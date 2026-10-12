@@ -67,6 +67,12 @@ ARMS: dict[str, Arm] = {a.id: a for a in [
     Arm("claude-bcu2", "claude", {"command": "node", "args": [str(ROOT.parent / "proto/v2/bcu-mcp.ts")],
         "env": {"BCU_CUA_DRIVER": str(ROOT.parent / "tools/cua-driver-fork/v2/cua-driver.exe"),
                 "BCU_APPS": "TestPad,Calculator,msedge,File Explorer"}}, "opus"),
+    # v3: the plugin's server (QuickJS sandbox, policy) over the driver the plugin ships. Headless
+    # runs can't show approval prompts, so the suite's apps are pre-approved and foreground input is
+    # allowed as in v2; a throwaway policy file keeps the user's own approvals out of the runs.
+    Arm("claude-bcu3", "claude", {"command": "node", "args": [str(ROOT.parent / "plugin/server/main.ts")],
+        "env": {"BCU_APPS": "TestPad,Calculator,msedge,File Explorer", "BCU_FOREGROUND": "allow",
+                "BCU_POLICY": str(ROOT / "workdir" / "policy.json"), "BCU_AUDIT": str(ROOT / "workdir" / "actions.jsonl")}}, "opus"),
     Arm("gpt-codexcu", "codex", {"command": str(CODEX_CU), "env": {"CODEX_CU_AUTO_APPROVE": "1"}}, "gpt-6-astra"),
 ]}
 

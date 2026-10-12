@@ -21,6 +21,7 @@ The write-up is [research/08-experiments.md](../research/08-experiments.md). Rou
 | `claude-cua-main` | Claude Code, Opus | Cua Driver `main` build (adds `run_steps`, `run_script`), 61 tools |
 | `claude-bcu` | Claude Code, Opus | `proto/v1/bcu-mcp.ts`: one `js` tool over Cua Driver `main` |
 | `claude-bcu-fork` | Claude Code, Opus | Same, over the local Cua Driver fork with modal-safe Invoke (`tools/cua-driver-fork/`) |
+| `claude-bcu3` | Claude Code, Opus | `plugin/server/main.ts` (v3: QuickJS sandbox, per-app policy) over `plugin/driver/cua-driver.exe` (fork v3) |
 | `claude-bcu2` | Claude Code, Opus | `proto/v2/bcu-mcp.ts` (v2: settling reads, `select`, explicit foreground, app scoping) over fork v2 (`tools/cua-driver-fork/v2/`) |
 | `gpt-codexcu` | Windows Codex CLI, GPT-6 Astra | Same Codex runtime. **Retired**, see caveats |
 
@@ -36,8 +37,17 @@ All arms get the same prompt text and effort level (`medium`). Claude runs use `
 | `edit_replace` | TestPad | Menu, a modal Replace dialog |
 | `explorer_move` | File Explorer | New folder, rename, move a file |
 | `edge_form` | Edge (Chromium), isolated profile, accessibility forced on | Web form: text, select, checkbox, submit |
+| `xapp_invoice` | Edge, Calculator, TestPad | Read a table, compute in another app, save the result through Save As |
+| `xapp_csv_list` | File Explorer, TestPad | Read a folder listing (extensions may be hidden), write a sorted list, save |
+| `xapp_form_from_file` | TestPad, Edge | Read a contact card, fill and submit the form |
+
+The `xapp_*` tasks draw random values each run (invoice lines, which files exist, which contact), and their checkers read the expected answer from `expected.json` in the task folder.
 
 TestPad (`apps/TestPad.cs`, compiled to its own exe) stands in for Windows Notepad, because Notepad restores the user's own session tabs, and some of those hold secrets. Task files live in `%TEMP%\bcu`. Edge runs in a throwaway profile there.
+
+## Codex desktop app baseline
+
+`bench/codex_app_wizard.sh` walks you through timing the real Codex app (GPT-6 Astra, any speed tier) on the same six core tasks: it sets each task up, puts the identical prompt on your clipboard, times from your "sent" to your "done" keypress while sampling the cursor and focus, and runs the same checker. Results land in `out/codex-app/` in the same format, so `python3 report.py codex-app` compares them. `REPS=2` runs each task twice.
 
 ## What each run records
 

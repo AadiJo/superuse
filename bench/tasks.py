@@ -7,6 +7,8 @@ agent's claim. Apps the agent touches are closed by the runner afterwards.
 """
 from __future__ import annotations
 
+import json
+import random
 import re
 import shutil
 import time
@@ -189,16 +191,24 @@ document.getElementById('f').addEventListener('submit', e => {
 </script></body></html>"""
 
 
-def edge_form_setup() -> None:
-    wpath, wsl = task_dir("edge_form")
-    (wsl / "form.html").write_text(FORM_HTML)
-    url = "file:///" + (wpath + "\\form.html").replace("\\", "/")
-    # Chromium hides a page's accessibility tree while its window is covered by another one
-    # (occlusion tracking), so without these flags the task depended on what the user had on top.
+def open_edge(url: str) -> None:
+    """Edge in a throwaway profile under %TEMP%\\bcu. Chromium hides a page's accessibility tree
+    while its window is covered by another one (occlusion tracking), so without these flags a task
+    depended on what the user had on top."""
     start(EDGE, f"--user-data-dir={win.WIN_TEMP}\\edge-profile", "--no-first-run", "--no-default-browser-check",
           "--force-renderer-accessibility", "--disable-features=CalculateNativeWinOcclusion,msEdgeWelcomePage,msImplicitSignin",
           "--new-window", url)
     time.sleep(4)
+
+
+def file_url(wpath: str) -> str:
+    return "file:///" + wpath.replace("\\", "/")
+
+
+def edge_form_setup() -> None:
+    wpath, wsl = task_dir("edge_form")
+    (wsl / "form.html").write_text(FORM_HTML)
+    open_edge(file_url(wpath + "\\form.html"))
 
 
 def edge_form_check(final: str) -> Check:
@@ -211,6 +221,76 @@ def edge_form_teardown() -> None:
     win.ps("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
            "Where-Object { $_.CommandLine -like '*bcu\\edge-profile*' } | "
            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
+
+
+
+# --- Cross-app tasks: values are random per run, so a stale answer can't pass ----------
+
+def expected(task_id: str) -> dict:
+    return json.loads((win.WSL_TEMP / task_id / "expected.json").read_text())
+
+
+def xapp_invoice_setup() -> None:
+    wpath, wsl = task_dir("xapp_invoice")
+    rng = random.Random()
+    items = [(name, rng.randint(2, 9), rng.randint(11, 99)) for name in ("Cables", "Adapters", "Mounts", "Labels")]
+    rows = "".join(f"<tr><td>{n}</td><td>{q}</td><td>{p}</td></tr>" for n, q, p in items)
+    (wsl / "invoice.html").write_text(f"""<!doctype html><html><head><meta charset="utf-8"><title>Invoice 4471</title>
+<style>body{{font:16px system-ui;margin:40px}} td,th{{border:1px solid #999;padding:6px 14px}}</style></head><body>
+<h1>Invoice 4471</h1><table><tr><th>Item</th><th>Quantity</th><th>Unit price</th></tr>{rows}</table>
+<p>Total: (to be calculated)</p></body></html>""")
+    (wsl / "expected.json").write_text(json.dumps({"total": sum(q * p for _, q, p in items)}))
+    open_edge(file_url(wpath + "\\invoice.html"))
+    open_testpad()
+
+
+def xapp_invoice_check(final: str) -> Check:
+    lines = read_lines(win.WSL_TEMP / "xapp_invoice" / "total.txt")
+    want = expected("xapp_invoice")["total"]
+    got = lines[0].replace(",", "").strip() if lines else ""
+    return Check(got == str(want), f"want={want} lines={lines}")
+
+
+CSV_FILES = ["budget_2026.csv", "contacts.csv", "q3_sales.csv", "zones.csv", "inventory.csv"]
+OTHER_FILES = ["budget_2026.bcu", "notes.log", "readme.bcu", "contacts_old.bcu"]
+
+
+def xapp_csv_list_setup() -> None:
+    wpath, wsl = task_dir("xapp_csv_list")
+    picked = random.sample(CSV_FILES, 3)
+    for name in picked + OTHER_FILES:
+        (wsl / name).write_text("x")
+    (wsl / "report.txt").write_text("")
+    (wsl / "expected.json").write_text(json.dumps({"csv": sorted(picked)}))
+    start("explorer.exe", wpath)
+    open_testpad(f"{wpath}\\report.txt")
+
+
+def xapp_csv_list_check(final: str) -> Check:
+    lines = [l.strip() for l in read_lines(win.WSL_TEMP / "xapp_csv_list" / "report.txt") if l.strip()]
+    want = expected("xapp_csv_list")["csv"]
+    return Check(lines == want, f"want={want} lines={lines}")
+
+
+PEOPLE = [("Grace Hopper", "grace@example.com"), ("Alan Turing", "alan@example.com"),
+          ("Katherine Johnson", "katherine@example.com"), ("Edsger Dijkstra", "edsger@example.com")]
+
+
+def xapp_form_from_file_setup() -> None:
+    wpath, wsl = task_dir("xapp_form_from_file")
+    name, email = random.choice(PEOPLE)
+    plan = random.choice(["Free", "Pro", "Team"])
+    (wsl / "contact.txt").write_text(f"Contact card\r\nName: {name}\r\nEmail: {email}\r\nPlan: {plan}\r\n")
+    (wsl / "form.html").write_text(FORM_HTML)
+    (wsl / "expected.json").write_text(json.dumps({"want": f"name={name}|email={email}|plan={plan.lower()}|agree=yes"}))
+    open_testpad(f"{wpath}\\contact.txt")
+    open_edge(file_url(wpath + "\\form.html"))
+
+
+def xapp_form_from_file_check(final: str) -> Check:
+    want = expected("xapp_form_from_file")["want"]
+    titles = [w.title for w in win.list_windows(titles=True) if w.proc == "msedge" and "SUBMITTED" in w.title]
+    return Check(any(want in t for t in titles), f"want={want} titles={titles}")
 
 
 def p(path: str) -> str:
@@ -232,6 +312,12 @@ TASKS: dict[str, Task] = {t.id: t for t in [
          lambda: None, sysdm_check),
     Task("edge_form", "A Microsoft Edge window shows a Signup form. Fill it in: Name = Ada Lovelace, Email = ada@example.com, Plan = Pro, tick 'I agree to the terms', then click Submit.",
          edge_form_setup, edge_form_check, edge_form_teardown),
+    Task("xapp_invoice", f"A Microsoft Edge window shows an invoice, and an empty TestPad text editor window is open. Use the Windows Calculator app to work out the invoice total (the sum of quantity × unit price over every line). Then type just the total, digits only, into TestPad and save it as {p('xapp_invoice')}\\total.txt.",
+         xapp_invoice_setup, xapp_invoice_check, edge_form_teardown),
+    Task("xapp_csv_list", f"A File Explorer window is open at {p('xapp_csv_list')}, and TestPad is open with {p('xapp_csv_list')}\\report.txt. Using File Explorer to look, write the full names of the .csv files in that folder (including the .csv extension) into report.txt, one per line in alphabetical order, then save the file.",
+         xapp_csv_list_setup, xapp_csv_list_check),
+    Task("xapp_form_from_file", "TestPad shows a contact card, and a Microsoft Edge window shows a Signup form. Fill in the form with the name, email and plan from the contact card, tick 'I agree to the terms', then click Submit.",
+         xapp_form_from_file_setup, xapp_form_from_file_check, edge_form_teardown),
 ]}
 
 

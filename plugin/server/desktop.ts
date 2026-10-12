@@ -70,11 +70,17 @@ function windowQuery(x: unknown): WindowQuery {
   throw new Error(`expected a window name or {pid, id, title, app}, got ${JSON.stringify(x)}`);
 }
 
+/** Driver refusals the model can recover from, and what to do next. Nothing was sent in any of them. */
+const HINTS: Array<[RegExp, string]> = [
+  [/window_target_mismatch|window_target_not_found/, "This window closed or changed. Bind it again with cua.window(...) and read state() before acting."],
+  [/target_not_at_point/, "Another window covers that point, so nothing was sent. Act by element number instead, or ask the user to uncover the window."],
+  [/background_unavailable|delivery_mode:"foreground"/, "setValue()/select() work in the background for text boxes and combo boxes. Otherwise retry this one action with {foreground: true}, which briefly takes focus and the real cursor (the user may be asked first)."],
+];
+
 function fail(r: DriverResult, what: string): never {
   let msg = r.text.slice(0, 600);
-  if (/background_unavailable|delivery_mode:"foreground"/.test(msg)) {
-    msg += "\nHint: setValue()/select() work in the background for text boxes and combo boxes. Otherwise retry with {foreground: true}, which briefly takes focus and the real cursor (the user may be asked first).";
-  }
+  const hint = HINTS.find(([re]) => re.test(r.text));
+  if (hint) msg += `\nHint: ${hint[1]}`;
   throw new Error(`${what} failed: ${msg}`);
 }
 

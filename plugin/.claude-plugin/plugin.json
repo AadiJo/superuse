@@ -1,0 +1,9 @@
+{
+  "name": "bcu",
+  "displayName": "Better Computer Use",
+  "version": "0.3.0",
+  "description": "Windows computer use for Claude: one sandboxed JavaScript tool over a background-input UI Automation driver, with per-app approvals.",
+  "author": { "name": "Advait Johari" },
+  "repository": "https://github.com/AadiJo/better-computer-use",
+  "keywords": ["computer-use", "windows", "automation", "mcp"]
+}

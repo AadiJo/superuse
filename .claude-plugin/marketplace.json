@@ -1,0 +1,14 @@
+{
+  "name": "better-computer-use",
+  "description": "Local marketplace for the bcu Windows computer-use plugin.",
+  "owner": {
+    "name": "Advait Johari"
+  },
+  "plugins": [
+    {
+      "name": "bcu",
+      "source": "./plugin",
+      "description": "Windows computer use for Claude: one sandboxed JavaScript tool over a background-input UI Automation driver."
+    }
+  ]
+}

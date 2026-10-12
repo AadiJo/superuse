@@ -1,0 +1,1010 @@
+From a35487a6d602f534a3047b8f46ea18217cba1f1e Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Mon, 12 Oct 2026 13:52:05 -0500
+Subject: [PATCH 16/19] feat(browser): open and close background tabs in the
+ bound window
+
+Agents could only act in tabs that already existed, so working on a page
+meant navigating the user's current tab away.
+
+browser_open_tab {target_id, url} opens a tab with Target.createTarget
+background:true, which Chromium adds unselected to the profile's most
+recently active window without activating it. The tool proves the tab
+landed in the bound window (else closes it again and refuses), adds it to
+the binding's tab table and returns its tab_id. browser_close_tab
+{target_id, tab_id} closes only tabs the same session opened.
+
+The window-level proof reuses the tab revalidation chain (now split into
+revalidate_record), both tools sit behind the browser_bound_input adapter
+like the other page mutations, and the existing-profile CDP policy admits
+Target.createTarget and Target.closeTarget for them.
+---
+ .../rust/Skills/cua-driver/BROWSER.md         |  20 +
+ .../cua-driver-core/src/authorization.rs      |   4 +
+ .../cua-driver-core/src/browser/cdp_ws.rs     |   4 +
+ .../cua-driver-core/src/browser/engine.rs     | 156 ++++---
+ .../crates/cua-driver-core/src/browser/mod.rs |   1 +
+ .../cua-driver-core/src/browser/store.rs      |  46 ++-
+ .../cua-driver-core/src/browser/tabs.rs       | 386 ++++++++++++++++++
+ .../cua-driver-core/src/browser/tools.rs      |  47 ++-
+ .../rust/crates/cua-driver-core/src/server.rs |   4 +
+ .../cua-driver-core/src/session_manifest.rs   |   2 +-
+ .../rust/crates/cua-driver-core/src/tool.rs   |   6 +
+ .../rust/crates/cua-driver-sdk/src/runtime.rs |   2 +
+ .../rust/crates/cua-driver/src/telemetry.rs   |   2 +
+ 13 files changed, 611 insertions(+), 69 deletions(-)
+ create mode 100644 libs/cua-driver/rust/crates/cua-driver-core/src/browser/tabs.rs
+
+diff --git a/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md b/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md
+index b0d6168..0635e43 100644
+--- a/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md
++++ b/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md
+@@ -25,6 +25,7 @@ get_browser_state(pid, window_id, session?)               # bind
+ get_browser_state(target_id, tab_id, session?,
+                   snapshot_format=semantic_v2)            # snapshot
+ browser_navigate / browser_click / browser_type / browser_pointer
++browser_open_tab / browser_close_tab
+ browser_dialog / browser_set_input_files / browser_download
+ get_browser_state(target_id, tab_id, session?,
+                   snapshot_format=semantic_v2)            # verify and refresh refs
+@@ -416,6 +417,25 @@ browser_pointer
+     "session":"browser-run-1"}'
+ ```
+ 
++### Background tabs
++
++`browser_open_tab` opens a tab in the bound window without selecting it or
++activating the window, and returns its `tab_id` in the same binding, so work
++can happen beside the user's current page instead of navigating it away. Only
++`http:`, `https:`, and `about:` URLs are accepted. Chromium adds background tabs
++to the profile's most recently active window; if that isn't the bound window,
++the driver closes the tab again and refuses with
++`browser_wrong_target_refused`. `browser_close_tab` closes only tabs the same
++session opened this way and refuses every other tab.
++
++```text
++browser_open_tab
++  '{"target_id":"<target>","url":"https://example.com",
++    "session":"browser-run-1"}'
++browser_close_tab
++  '{"target_id":"<target>","tab_id":"<new tab>","session":"browser-run-1"}'
++```
++
+ ### JavaScript dialogs
+ 
+ `browser_dialog` handles only page-owned `alert`, `confirm`, `prompt`, and
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
+index d8c79dd..8d461ea 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
+@@ -353,6 +353,8 @@ const BROWSER_BOUND_INPUT_OPERATIONS: &[&str] = &[
+     "browser_click",
+     "browser_type",
+     "browser_pointer",
++    "browser_open_tab",
++    "browser_close_tab",
+ ];
+ const BROWSER_BOUND_INPUT_SCOPE_KEYS: &[&str] = &[
+     "daemon_generation",
+@@ -926,6 +928,8 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
+         | "browser_click"
+         | "browser_type"
+         | "browser_pointer"
++        | "browser_open_tab"
++        | "browser_close_tab"
+         | "history_status"
+         | "history_query"
+         | "parse_visual_regions" => RiskClass::R2,
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/cdp_ws.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/cdp_ws.rs
+index 0858061..5689fad 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/cdp_ws.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/cdp_ws.rs
+@@ -66,6 +66,10 @@ const EXISTING_PROFILE_METHODS: &[&str] = &[
+     "Runtime.evaluate",
+     "Target.activateTarget",
+     "Target.attachToTarget",
++    // browser_open_tab / browser_close_tab: background tabs in the bound
++    // window, closed only when the same session opened them.
++    "Target.closeTarget",
++    "Target.createTarget",
+     "Target.detachFromTarget",
+     "Target.getTargets",
+     "Target.setAutoAttach",
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/engine.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/engine.rs
+index 68ca93c..cd768d3 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/engine.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/engine.rs
+@@ -105,7 +105,7 @@ fn authorize_live_browser_origin(
+         .map_err(|error| refuse(BrowserRefusalCode::BrowserOriginOutsideScope, error))
+ }
+ 
+-fn protected_live_origin_scope(raw: &str) -> Result<String, BrowserRefusal> {
++pub(crate) fn protected_live_origin_scope(raw: &str) -> Result<String, BrowserRefusal> {
+     if raw.trim() == "about:blank" {
+         return Ok("about:blank".to_owned());
+     }
+@@ -221,6 +221,13 @@ pub(crate) struct ValidatedTab {
+     pub cdp_session: String,
+ }
+ 
++/// A binding re-proved for a window-level mutation (opening a tab), with the
++/// same chain as [`ValidatedTab`] minus the tab.
++pub(crate) struct ValidatedBinding {
++    pub conn: Arc<CdpConnection>,
++    pub record: TargetRecord,
++}
++
+ fn viewport_point_to_screen(
+     native: Rect,
+     metrics: &Value,
+@@ -1419,15 +1426,7 @@ impl BrowserEngine {
+         target_id: &str,
+         tab_id: Option<&str>,
+     ) -> Result<ValidatedTab, BrowserRefusal> {
+-        let record = self.store.get_target(session, target_id)?;
+-
+-        if record.quality != BindingQuality::Exact {
+-            return Err(refuse(
+-                BrowserRefusalCode::BrowserWrongTargetRefused,
+-                "this binding is heuristic (title-only) — mutations require an exact \
+-                 bounds- or cardinality-correlated binding",
+-            ));
+-        }
++        let record = self.exact_target(session, target_id)?;
+ 
+         let tab_id = tab_id.ok_or_else(|| {
+             refuse(
+@@ -1448,6 +1447,77 @@ impl BrowserEngine {
+                 "the tab capability belongs to an older browser connection generation",
+             ));
+         }
++        let (conn, native) = self
++            .revalidate_record(session, &record, Some((tab_id, &tab.cdp_target_id)))
++            .await?;
++
++        let cdp_session = self.attach(&conn, &tab.cdp_target_id).await?;
++        let dispatch_context = crate::tool::current_dispatch_authorization_context();
++        if dispatch_context
++            .as_deref()
++            .is_some_and(|context| context.capability_manifest().is_some())
++        {
++            let live_url = self.live_top_level_url(&conn, &cdp_session).await?;
++            // A browser mutation admitted for a delegated session must use
++            // that exact session's capability manifest. Falling back to the
++            // process compatibility manifest would let a missing task-local
++            // context borrow unrelated authority.
++            let manifest = dispatch_context
++                .as_deref()
++                .ok_or_else(|| {
++                    refuse(
++                        BrowserRefusalCode::BrowserOriginOutsideScope,
++                        "the browser authorization context is unavailable",
++                    )
++                })?
++                .capability_manifest();
++            authorize_live_browser_origin(manifest, &live_url)?;
++        }
++        Ok(ValidatedTab {
++            conn,
++            record,
++            tab,
++            native,
++            cdp_session,
++        })
++    }
++
++    /// Re-prove a binding for a window-level mutation such as opening a tab:
++    /// grant generation, process, native window, endpoint, and the CDP
++    /// window's exact correlation, exactly as [`Self::revalidate_for_mutation`]
++    /// does for a tab.
++    pub(crate) async fn revalidate_binding(
++        &self,
++        session: &str,
++        target_id: &str,
++    ) -> Result<ValidatedBinding, BrowserRefusal> {
++        let record = self.exact_target(session, target_id)?;
++        let (conn, _native) = self.revalidate_record(session, &record, None).await?;
++        Ok(ValidatedBinding { conn, record })
++    }
++
++    /// Exact-or-refused: heuristic bindings never reach a mutation path.
++    fn exact_target(&self, session: &str, target_id: &str) -> Result<TargetRecord, BrowserRefusal> {
++        let record = self.store.get_target(session, target_id)?;
++        if record.quality != BindingQuality::Exact {
++            return Err(refuse(
++                BrowserRefusalCode::BrowserWrongTargetRefused,
++                "this binding is heuristic (title-only) — mutations require an exact \
++                 bounds- or cardinality-correlated binding",
++            ));
++        }
++        Ok(record)
++    }
++
++    /// The binding chain shared by tab and window mutations. `page` names the
++    /// tab whose CDP target must still be a page of the bound window; `None`
++    /// checks the window through any of its pages.
++    async fn revalidate_record(
++        &self,
++        session: &str,
++        record: &TargetRecord,
++        page: Option<(&str, &str)>,
++    ) -> Result<(Arc<CdpConnection>, NativeWindowInfo), BrowserRefusal> {
+         if record.generation > 0 {
+             let grant = self
+                 .existing_profile_grant(session, record.transport_session.as_deref(), record.pid)
+@@ -1545,17 +1615,32 @@ impl BrowserEngine {
+ 
+         // 4. CDP target still a page in the bound CDP window, with either
+         //    matching geometry or the same singleton cardinality proof.
+-        let conn = self.connection_for_record(session, &record).await?;
++        let conn = self.connection_for_record(session, record).await?;
+         let candidates = self.window_candidates(&conn).await?;
+-        let live = candidates
+-            .iter()
+-            .find(|c| c.cdp_target_id == tab.cdp_target_id)
+-            .ok_or_else(|| {
+-                refuse(
+-                    BrowserRefusalCode::BrowserTabNotFound,
+-                    format!("tab {tab_id} no longer has a live CDP page target"),
+-                )
+-            })?;
++        let live = match page {
++            Some((tab_id, cdp_target_id)) => candidates
++                .iter()
++                .find(|c| c.cdp_target_id == cdp_target_id)
++                .ok_or_else(|| {
++                    refuse(
++                        BrowserRefusalCode::BrowserTabNotFound,
++                        format!("tab {tab_id} no longer has a live CDP page target"),
++                    )
++                })?,
++            // Any page of the bound window carries that window's id and bounds.
++            None => candidates
++                .iter()
++                .find(|c| match record.cdp_window_id {
++                    Some(window_id) => c.cdp_window_id == Some(window_id),
++                    None => c.cdp_target_id == record.cdp_target_id,
++                })
++                .ok_or_else(|| {
++                    refuse(
++                        BrowserRefusalCode::BrowserWrongTargetRefused,
++                        "the bound browser window no longer has a live page target",
++                    )
++                })?,
++        };
+         if let Some(bound_window_id) = record.cdp_window_id {
+             if live.cdp_window_id != Some(bound_window_id) {
+                 return Err(refuse(
+@@ -1596,36 +1681,7 @@ impl BrowserEngine {
+                 "the embedded browser is no longer provably single-page and single-window",
+             ));
+         }
+-
+-        let cdp_session = self.attach(&conn, &tab.cdp_target_id).await?;
+-        let dispatch_context = crate::tool::current_dispatch_authorization_context();
+-        if dispatch_context
+-            .as_deref()
+-            .is_some_and(|context| context.capability_manifest().is_some())
+-        {
+-            let live_url = self.live_top_level_url(&conn, &cdp_session).await?;
+-            // A browser mutation admitted for a delegated session must use
+-            // that exact session's capability manifest. Falling back to the
+-            // process compatibility manifest would let a missing task-local
+-            // context borrow unrelated authority.
+-            let manifest = dispatch_context
+-                .as_deref()
+-                .ok_or_else(|| {
+-                    refuse(
+-                        BrowserRefusalCode::BrowserOriginOutsideScope,
+-                        "the browser authorization context is unavailable",
+-                    )
+-                })?
+-                .capability_manifest();
+-            authorize_live_browser_origin(manifest, &live_url)?;
+-        }
+-        Ok(ValidatedTab {
+-            conn,
+-            record,
+-            tab,
+-            native,
+-            cdp_session,
+-        })
++        Ok((conn, native))
+     }
+ 
+     async fn live_top_level_url(
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/mod.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/mod.rs
+index 070d6c0..f39cf14 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/mod.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/mod.rs
+@@ -53,6 +53,7 @@ pub mod refusal;
+ mod semantic;
+ mod setup_descriptor;
+ pub mod store;
++mod tabs;
+ pub mod tools;
+ pub mod types;
+ #[cfg(test)]
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/store.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/store.rs
+index 68f2099..7ce0e5f 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/store.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/store.rs
+@@ -15,7 +15,7 @@
+ //! `browser_ref_stale`, and frame identity is re-proven against the
+ //! live frame tree before any mutation.
+ 
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::Mutex;
+ 
+@@ -234,6 +234,9 @@ pub struct TargetRecord {
+ #[derive(Default)]
+ struct SessionTargets {
+     targets: HashMap<String, TargetRecord>,
++    /// `(pid, CDP target id)` of the tabs this session opened with
++    /// `browser_open_tab`, the only tabs `browser_close_tab` may close.
++    opened_tabs: HashSet<(i64, String)>,
+ }
+ 
+ /// Parse an external page ref of the form `p<snapshot>:<index>`.
+@@ -417,6 +420,47 @@ impl BrowserStore {
+             })
+     }
+ 
++    /// Remember a tab this session opened, so it may close it later.
++    pub fn record_opened_tab(&self, session: &str, pid: i64, cdp_target_id: &str) {
++        self.inner
++            .lock()
++            .unwrap()
++            .entry(session.to_owned())
++            .or_default()
++            .opened_tabs
++            .insert((pid, cdp_target_id.to_owned()));
++    }
++
++    /// Whether this session opened the tab with `browser_open_tab`.
++    pub fn opened_tab(&self, session: &str, pid: i64, cdp_target_id: &str) -> bool {
++        self.inner
++            .lock()
++            .unwrap()
++            .get(session)
++            .is_some_and(|targets| {
++                targets
++                    .opened_tabs
++                    .contains(&(pid, cdp_target_id.to_owned()))
++            })
++    }
++
++    /// Forget a closed tab: drop it from the session's opened set and from
++    /// every live binding of the session that lists it.
++    pub fn forget_closed_tab(&self, session: &str, pid: i64, cdp_target_id: &str) {
++        if let Some(targets) = self.inner.lock().unwrap().get_mut(session) {
++            targets.opened_tabs.remove(&(pid, cdp_target_id.to_owned()));
++            for target in targets
++                .targets
++                .values_mut()
++                .filter(|target| target.pid == pid)
++            {
++                target
++                    .tabs
++                    .retain(|_, tab| tab.cdp_target_id != cdp_target_id);
++            }
++        }
++    }
++
+     /// Drop every snapshot of one tab (navigation invalidates refs).
+     pub fn invalidate_tab_snapshots(&self, session: &str, target_id: &str, tab_id: &str) {
+         self.update_target(session, target_id, |rec| {
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tabs.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tabs.rs
+new file mode 100644
+index 0000000..dc58a43
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tabs.rs
+@@ -0,0 +1,386 @@
++//! Background tabs: `browser_open_tab` opens a tab in an exactly-bound browser
++//! window without selecting it or activating the window, so an agent can work
++//! beside the user's current page instead of navigating it away.
++//! `browser_close_tab` closes only tabs the same session opened.
++//!
++//! Chromium's `Target.createTarget` has no window parameter. With
++//! `background: true` it adds an unselected tab (`NEW_BACKGROUND_TAB`, window
++//! shown inactive, no focus) to the profile's most recently active window. The
++//! tool proves the tab landed in the bound window and otherwise closes it again
++//! and refuses, so a tab never appears in a window the caller didn't bind.
++
++use std::sync::Arc;
++
++use async_trait::async_trait;
++use serde_json::{json, Value};
++
++use crate::protocol::ToolResult;
++use crate::tool::{ProtectedResourceOwnership, Tool, ToolDef};
++use crate::tool_args::ArgsExt;
++
++use super::engine::{protected_live_origin_scope, BrowserEngine};
++use super::refusal::{BrowserRefusal, BrowserRefusalCode};
++use super::session_schema as schema_session;
++use super::store::TabRecord;
++use super::tools::{
++    browser_protected_resource_scope, browser_resource_ownership, is_loadable_page_url,
++    require_explicit_session, schema_tab_id, schema_target_id,
++};
++
++/// Attest the bound window a new tab opens in. Bounded manifests admit the
++/// call by the new tab's origin, the way they admit a navigation.
++async fn browser_window_protected_resource_scope(
++    engine: &BrowserEngine,
++    args: &Value,
++) -> Result<Option<Value>, String> {
++    let session = args
++        .get("session")
++        .and_then(Value::as_str)
++        .filter(|session| !session.is_empty())
++        .ok_or_else(|| "the browser operation requires an explicit session".to_owned())?;
++    let target_id = args
++        .get("target_id")
++        .and_then(Value::as_str)
++        .filter(|target| !target.is_empty())
++        .ok_or_else(|| "the browser operation requires an exact target_id".to_owned())?;
++    let url = args
++        .get("url")
++        .and_then(Value::as_str)
++        .ok_or_else(|| "browser_open_tab requires a URL".to_owned())?;
++    let runtime_session = crate::tool::current_dispatch_authorization_context()
++        .map(|context| context.runtime_session_key(session))
++        .unwrap_or_else(|| session.to_owned());
++    let validated = engine
++        .revalidate_binding(&runtime_session, target_id)
++        .await
++        .map_err(|error| error.message)?;
++    let origin = protected_live_origin_scope(url).map_err(|error| error.message)?;
++    let target = validated.record;
++    Ok(Some(json!({
++        "kind": "authenticated_browser_window",
++        "target_id": target_id,
++        "pid": target.pid,
++        "process_fingerprint": target.fingerprint,
++        "binding_generation": target.generation,
++        "cdp_window_id": target.cdp_window_id,
++        // The document the new tab will show.
++        "live_origin": origin,
++        "requested_origin": origin,
++        "action_class": "tab_open",
++    })))
++}
++
++// ── browser_open_tab ─────────────────────────────────────────────────────────
++
++pub struct BrowserOpenTabTool {
++    def: ToolDef,
++    engine: Arc<BrowserEngine>,
++}
++
++impl BrowserOpenTabTool {
++    pub fn new(engine: Arc<BrowserEngine>) -> Self {
++        let def = ToolDef {
++            name: "browser_open_tab".into(),
++            description: "Open a new tab in an exactly-bound browser window without \
++                selecting it or activating the window, and return its tab_id in the \
++                same binding (http/https/about URLs only). The user's current tab \
++                stays selected. Chromium adds background tabs to the profile's most \
++                recently active window: when that isn't the bound window, the tab is \
++                closed again and the call refuses with browser_wrong_target_refused. \
++                Close tabs you opened with browser_close_tab."
++                .into(),
++            input_schema: json!({
++                "type": "object",
++                "properties": {
++                    "target_id": schema_target_id(),
++                    "url": { "type": "string", "description": "URL for the new tab (http:, https:, or about:)." },
++                    "session": schema_session(),
++                },
++                "required": ["target_id", "url"],
++                "additionalProperties": true
++            }),
++            read_only: false,
++            destructive: false,
++            idempotent: false,
++            open_world: true,
++        };
++        Self { def, engine }
++    }
++}
++
++#[async_trait]
++impl Tool for BrowserOpenTabTool {
++    fn def(&self) -> &ToolDef {
++        &self.def
++    }
++
++    async fn protected_resource_ownership(
++        &self,
++        adapter_id: &str,
++        args: &Value,
++    ) -> ProtectedResourceOwnership {
++        if adapter_id == "browser_bound_input" {
++            browser_resource_ownership(&self.engine, args)
++        } else {
++            ProtectedResourceOwnership::UserOwned
++        }
++    }
++
++    async fn protected_resource_scope(
++        &self,
++        adapter_id: &str,
++        args: &Value,
++    ) -> Result<Option<Value>, String> {
++        if adapter_id == "browser_bound_input" {
++            browser_window_protected_resource_scope(&self.engine, args).await
++        } else {
++            Ok(None)
++        }
++    }
++
++    async fn invoke(&self, args: Value) -> ToolResult {
++        let (target_id, url) = match (args.require_str("target_id"), args.require_str("url")) {
++            (Ok(target), Ok(url)) => (target, url),
++            (Err(e), _) | (_, Err(e)) => return e,
++        };
++        let session = match require_explicit_session(&args) {
++            Ok(s) => s,
++            Err(e) => return e,
++        };
++        if !is_loadable_page_url(&url) {
++            return ToolResult::error(format!(
++                "browser_open_tab only accepts http/https/about URLs, got: {url}"
++            ));
++        }
++
++        let validated = match self.engine.revalidate_binding(&session, &target_id).await {
++            Ok(v) => v,
++            Err(refusal) => return refusal.to_tool_result(),
++        };
++        let record = &validated.record;
++        let Some(bound_window) = record.cdp_window_id else {
++            return BrowserRefusal::new(
++                BrowserRefusalCode::BrowserRouteUnavailable,
++                "this binding is a single-page embedded browser with no tabs to add to",
++            )
++            .to_tool_result();
++        };
++        let conn = &validated.conn;
++
++        let created = match conn
++            .call(
++                None,
++                "Target.createTarget",
++                json!({ "url": url, "background": true }),
++            )
++            .await
++        {
++            Ok(created) => created,
++            Err(error) => {
++                return BrowserRefusal::new(
++                    BrowserRefusalCode::BrowserRouteUnavailable,
++                    format!("the browser did not open a background tab: {error}"),
++                )
++                .to_tool_result()
++            }
++        };
++        let Some(cdp_target_id) = created
++            .get("targetId")
++            .and_then(Value::as_str)
++            .map(str::to_owned)
++        else {
++            return ToolResult::error("Target.createTarget returned no targetId");
++        };
++
++        let landed_in = conn
++            .call(
++                None,
++                "Browser.getWindowForTarget",
++                json!({ "targetId": cdp_target_id }),
++            )
++            .await
++            .ok()
++            .and_then(|window| window.get("windowId").and_then(Value::as_i64));
++        if landed_in != Some(bound_window) {
++            let closed = conn
++                .call(
++                    None,
++                    "Target.closeTarget",
++                    json!({ "targetId": cdp_target_id }),
++                )
++                .await
++                .is_ok();
++            return BrowserRefusal::new(
++                BrowserRefusalCode::BrowserWrongTargetRefused,
++                if closed {
++                    "the browser put the new tab in another window (its most recently \
++                     active one), so it was closed again; bind that window, or have the \
++                     user switch to the bound window, and retry"
++                } else {
++                    "the browser put the new tab in another window (its most recently \
++                     active one) and it could not be closed again"
++                },
++            )
++            .with_detail(json!({ "closed": closed, "retryable": false }))
++            .to_tool_result();
++        }
++
++        let tab_id = self.engine.store.mint_tab_id();
++        let tab = TabRecord {
++            tab_id: tab_id.clone(),
++            cdp_target_id: cdp_target_id.clone(),
++            title: String::new(),
++            url: url.clone(),
++            // Opened unselected; the user may select it later.
++            active: Some(false),
++            generation: record.generation,
++            snapshots: Default::default(),
++        };
++        self.engine
++            .store
++            .update_target(&session, &target_id, |target| {
++                target.tabs.insert(tab_id.clone(), tab);
++            });
++        self.engine
++            .store
++            .record_opened_tab(&session, record.pid, &cdp_target_id);
++
++        ToolResult::text(format!(
++            "opened {tab_id} in the background of {target_id} at {url}; the user's selected tab is unchanged"
++        ))
++        .with_structured(json!({
++            "status": "ok",
++            "target_id": target_id,
++            "tab_id": tab_id,
++            "url": url,
++            "active": false,
++        }))
++    }
++}
++
++// ── browser_close_tab ────────────────────────────────────────────────────────
++
++pub struct BrowserCloseTabTool {
++    def: ToolDef,
++    engine: Arc<BrowserEngine>,
++}
++
++impl BrowserCloseTabTool {
++    pub fn new(engine: Arc<BrowserEngine>) -> Self {
++        let def = ToolDef {
++            name: "browser_close_tab".into(),
++            description: "Close a tab this session opened with browser_open_tab. Every \
++                other tab, including all of the user's own tabs, is refused with \
++                browser_action_unavailable. Closing an unselected tab leaves the \
++                user's selected tab and the window untouched."
++                .into(),
++            input_schema: json!({
++                "type": "object",
++                "properties": {
++                    "target_id": schema_target_id(),
++                    "tab_id": schema_tab_id(),
++                    "session": schema_session(),
++                },
++                "required": ["target_id", "tab_id"],
++                "additionalProperties": true
++            }),
++            read_only: false,
++            destructive: false,
++            idempotent: false,
++            open_world: false,
++        };
++        Self { def, engine }
++    }
++}
++
++#[async_trait]
++impl Tool for BrowserCloseTabTool {
++    fn def(&self) -> &ToolDef {
++        &self.def
++    }
++
++    async fn protected_resource_ownership(
++        &self,
++        adapter_id: &str,
++        args: &Value,
++    ) -> ProtectedResourceOwnership {
++        if adapter_id == "browser_bound_input" {
++            browser_resource_ownership(&self.engine, args)
++        } else {
++            ProtectedResourceOwnership::UserOwned
++        }
++    }
++
++    async fn protected_resource_scope(
++        &self,
++        adapter_id: &str,
++        args: &Value,
++    ) -> Result<Option<Value>, String> {
++        if adapter_id == "browser_bound_input" {
++            browser_protected_resource_scope(&self.engine, args, "browser_close_tab").await
++        } else {
++            Ok(None)
++        }
++    }
++
++    async fn invoke(&self, args: Value) -> ToolResult {
++        let (target_id, tab_id) = match (args.require_str("target_id"), args.require_str("tab_id"))
++        {
++            (Ok(t), Ok(tab)) => (t, tab),
++            (Err(e), _) | (_, Err(e)) => return e,
++        };
++        let session = match require_explicit_session(&args) {
++            Ok(s) => s,
++            Err(e) => return e,
++        };
++
++        let _mutation = match self
++            .engine
++            .lock_mutation(&session, &target_id, &tab_id)
++            .await
++        {
++            Ok(guard) => guard,
++            Err(refusal) => return refusal.to_tool_result(),
++        };
++        let validated = match self
++            .engine
++            .revalidate_for_mutation(&session, &target_id, Some(&tab_id))
++            .await
++        {
++            Ok(v) => v,
++            Err(refusal) => return refusal.to_tool_result(),
++        };
++        let pid = validated.record.pid;
++        let cdp_target_id = validated.tab.cdp_target_id.clone();
++        if !self.engine.store.opened_tab(&session, pid, &cdp_target_id) {
++            return BrowserRefusal::new(
++                BrowserRefusalCode::BrowserActionUnavailable,
++                "browser_close_tab closes only tabs this session opened with browser_open_tab",
++            )
++            .to_tool_result();
++        }
++
++        match validated
++            .conn
++            .call(
++                None,
++                "Target.closeTarget",
++                json!({ "targetId": cdp_target_id }),
++            )
++            .await
++        {
++            Ok(_) => {
++                self.engine
++                    .store
++                    .forget_closed_tab(&session, pid, &cdp_target_id);
++                ToolResult::text(format!("closed {tab_id}")).with_structured(json!({
++                    "status": "ok",
++                    "target_id": target_id,
++                    "tab_id": tab_id,
++                    "closed": true,
++                }))
++            }
++            Err(error) => ToolResult::error(format!("Target.closeTarget failed: {error}")),
++        }
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs
+index bf57969..04d4ee2 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs
+@@ -22,6 +22,7 @@ use super::pointer::BrowserPointerTool;
+ use super::refusal::{BrowserRefusal, BrowserRefusalCode};
+ use super::session_schema as schema_session;
+ use super::store::BrowserActionKind;
++use super::tabs::{BrowserCloseTabTool, BrowserOpenTabTool};
+ use super::types::BindingQuality;
+ 
+ /// Register the complete browser surface against one shared engine. Platform
+@@ -37,6 +38,8 @@ pub fn register_browser_tools(engine: &Arc<BrowserEngine>, registry: &mut ToolRe
+     registry.register(Box::new(BrowserSetInputFilesTool::new(engine.clone())));
+     registry.register(Box::new(BrowserDownloadTool::new(engine.clone())));
+     registry.register(Box::new(BrowserPointerTool::new(engine.clone())));
++    registry.register(Box::new(BrowserOpenTabTool::new(engine.clone())));
++    registry.register(Box::new(BrowserCloseTabTool::new(engine.clone())));
+ }
+ 
+ // ── Shared helpers ───────────────────────────────────────────────────────────
+@@ -50,7 +53,7 @@ fn session_of(args: &Value) -> String {
+ 
+ /// Target/ref minting requires an explicit (non-default) session so the
+ /// capability namespace has a real owner whose end event cleans it up.
+-fn require_explicit_session(args: &Value) -> Result<String, ToolResult> {
++pub(crate) fn require_explicit_session(args: &Value) -> Result<String, ToolResult> {
+     let sid = session_of(args);
+     if sid.is_empty() || sid == "default" {
+         return Err(ToolResult::error(
+@@ -85,7 +88,7 @@ fn schema_delivery_mode() -> Value {
+     })
+ }
+ 
+-fn schema_target_id() -> Value {
++pub(crate) fn schema_target_id() -> Value {
+     json!({
+         "type": "string",
+         "description": "Opaque browser target id minted by get_browser_state \
+@@ -93,7 +96,7 @@ fn schema_target_id() -> Value {
+     })
+ }
+ 
+-fn schema_tab_id() -> Value {
++pub(crate) fn schema_tab_id() -> Value {
+     json!({
+         "type": "string",
+         "description": "Opaque tab id from get_browser_state (session-scoped)."
+@@ -173,13 +176,7 @@ pub(crate) async fn browser_protected_resource_scope(
+             .get("url")
+             .and_then(Value::as_str)
+             .ok_or_else(|| "browser_navigate requires a destination URL".to_owned())?;
+-        if requested.to_ascii_lowercase().starts_with("about:") {
+-            Some("about:".to_owned())
+-        } else {
+-            let parsed = url::Url::parse(requested)
+-                .map_err(|_| "the destination URL is invalid".to_owned())?;
+-            Some(parsed.origin().ascii_serialization())
+-        }
++        Some(requested_url_origin(requested)?)
+     } else {
+         None
+     };
+@@ -187,6 +184,7 @@ pub(crate) async fn browser_protected_resource_scope(
+         "get_browser_state" => "page_observation",
+         "browser_navigate" => "navigation",
+         "browser_dialog" => "page_dialog_resolution",
++        "browser_close_tab" => "tab_close",
+         _ => "page_input",
+     };
+     let mut resource = json!({
+@@ -217,6 +215,23 @@ pub(crate) async fn browser_protected_resource_scope(
+     Ok(Some(resource))
+ }
+ 
++/// Origin a navigation or new tab asks for: `about:` for about URLs, else the
++/// URL's serialized origin.
++pub(crate) fn requested_url_origin(url: &str) -> Result<String, String> {
++    if url.to_ascii_lowercase().starts_with("about:") {
++        return Ok("about:".to_owned());
++    }
++    url::Url::parse(url)
++        .map(|parsed| parsed.origin().ascii_serialization())
++        .map_err(|_| "the destination URL is invalid".to_owned())
++}
++
++/// Page URLs a typed browser tool may load: http, https and about only.
++pub(crate) fn is_loadable_page_url(url: &str) -> bool {
++    let lower = url.to_ascii_lowercase();
++    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("about:")
++}
++
+ fn semantic_ref_value(listed: &super::engine::SemanticListedRef) -> Value {
+     json!({
+         "ref": listed.external,
+@@ -834,11 +849,7 @@ impl Tool for BrowserNavigateTool {
+             Ok(s) => s,
+             Err(e) => return e,
+         };
+-        let lower = url.to_ascii_lowercase();
+-        if !(lower.starts_with("http://")
+-            || lower.starts_with("https://")
+-            || lower.starts_with("about:"))
+-        {
++        if !is_loadable_page_url(&url) {
+             return ToolResult::error(format!(
+                 "browser_navigate only accepts http/https/about URLs, got: {url}"
+             ));
+@@ -1222,7 +1233,7 @@ impl Tool for BrowserClickTool {
+                             BrowserRefusalCode::BrowserRefStale,
+                             "the ref's node has no layout box — it left the DOM or is hidden",
+                         )
+-                        .to_tool_result()
++                        .to_tool_result();
+                     }
+                 };
+                 match quad_center(&box_model) {
+@@ -2750,7 +2761,9 @@ mod tests {
+                 "browser_dialog",
+                 "browser_set_input_files",
+                 "browser_download",
+-                "browser_pointer"
++                "browser_pointer",
++                "browser_open_tab",
++                "browser_close_tab"
+             ]
+         );
+     }
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs
+index 10bd108..d9cca18 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs
+@@ -489,6 +489,8 @@ pub fn is_computer_action(tool_name: &str, operation: ToolOperation) -> bool {
+                         | "browser.navigate"
+                         | "browser.input.click"
+                         | "browser.input.type"
++                        | "browser.tab.open"
++                        | "browser.tab.close"
+                 )
+         })
+ }
+@@ -727,6 +729,8 @@ fn structured_refusal_code(tool_name: &str, result: Option<&serde_json::Value>)
+             | "browser_set_input_files"
+             | "browser_download"
+             | "browser_pointer"
++            | "browser_open_tab"
++            | "browser_close_tab"
+     ) {
+         return ToolRefusalCode::None;
+     }
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/session_manifest.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/session_manifest.rs
+index f514400..f818e26 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/session_manifest.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/session_manifest.rs
+@@ -141,7 +141,7 @@ impl SessionManifest {
+                     ));
+                 }
+             }
+-            "browser_navigate" => {
++            "browser_navigate" | "browser_open_tab" => {
+                 let url = args
+                     .get("url")
+                     .and_then(serde_json::Value::as_str)
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+index 7bf3a58..8bae9c0 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+@@ -839,6 +839,8 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
+         "browser_set_input_files" => &["browser.input.files"],
+         "browser_download" => &["browser.download"],
+         "browser_pointer" => &["browser.input.pointer"],
++        "browser_open_tab" => &["browser.tab.open"],
++        "browser_close_tab" => &["browser.tab.close"],
+ 
+         // ── driver self-service ──────────────────────────────────────
+         "check_for_update" => &["driver.update_check"],
+@@ -6384,6 +6386,8 @@ mod capability_tests {
+         "browser_set_input_files",
+         "browser_download",
+         "browser_pointer",
++        "browser_open_tab",
++        "browser_close_tab",
+         "history_status",
+         "history_query",
+         "parse_visual_regions",
+@@ -6474,6 +6478,8 @@ mod capability_tests {
+         "browser.dialog",
+         "browser.download",
+         "browser.input.pointer",
++        "browser.tab.open",
++        "browser.tab.close",
+         // driver self
+         "driver.update_check",
+         "driver.probe",
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+index 044d66b..851dd5d 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+@@ -757,6 +757,8 @@ mod tests {
+             "browser_set_input_files",
+             "browser_download",
+             "browser_pointer",
++            "browser_open_tab",
++            "browser_close_tab",
+             "start_session",
+             "escalate_session",
+             "get_session",
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs b/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs
+index 0d1ed60..8ad33a9 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs
+@@ -607,6 +607,8 @@ impl AgentSessionState {
+                 | "browser_set_input_files"
+                 | "browser_download"
+                 | "browser_pointer"
++                | "browser_open_tab"
++                | "browser_close_tab"
+         );
+         let refused = outcome.refusal_code.is_refusal();
+         let completed_computer_action = computer_action && !refused;

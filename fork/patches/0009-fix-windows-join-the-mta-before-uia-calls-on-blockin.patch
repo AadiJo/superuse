@@ -1,7 +1,7 @@
 From efe4121829b568a14ee7c9f07c73ea9cbee79c49 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 23:30:51 -0500
-Subject: [PATCH 09/13] fix(windows): join the mta before uia calls on blocking
+Subject: [PATCH 09/19] fix(windows): join the mta before uia calls on blocking
  workers
 
 The fork's UIA entry points (posted activation, closed menu paths, Chromium pattern clicks, combo selection, verified set_value) run on tokio blocking workers and called CoCreateInstance without initializing COM. When no thread keeps the process MTA alive that fails with CO_E_NOTINITIALIZED, and the modal-safe posted route silently fell back to UIA Invoke. Each entry point now joins the MTA first, fire and forget, like walk_tree and uia::scroll do.

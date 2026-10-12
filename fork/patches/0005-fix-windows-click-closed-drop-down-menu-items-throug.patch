@@ -1,7 +1,7 @@
 From 36c1b17d136f190aca987c93f28e7e7277b3157b Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 22:04:34 -0500
-Subject: [PATCH 05/13] fix(windows): click closed drop-down menu items through
+Subject: [PATCH 05/19] fix(windows): click closed drop-down menu items through
  their menu path
 
 A MenuItem token inside a closed drop-down (WinForms keeps those items in

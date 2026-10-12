@@ -6,7 +6,7 @@ Our local fork of [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-
 - `patches/`: our changes as one patch per commit, applied in order on top of that commit.
 - `build.sh`: clones upstream into `tools/src/cua` (gitignored) if needed, applies the patches on branch `bcu`, cross-builds from WSL and installs `plugin/driver/cua-driver.exe`.
 - `export-patches.sh`: writes new commits on `bcu` back to `patches/`.
-- `acceptance.py`: live checks against real apps. `python3 fork/acceptance.py [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu]`. Each run writes `fork/acceptance-runs/acceptance-<time>.json` with every tool call, its time, and the cursor and foreground samples. `BCU_CUA_DRIVER` picks the exe under test.
+- `acceptance.py`: live checks against real apps. `python3 fork/acceptance.py [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu] [helium] ...`. Each run writes `fork/acceptance-runs/acceptance-<time>.json` with every tool call, its time, and the cursor and foreground samples. `BCU_CUA_DRIVER` picks the exe under test.
 - `apps/MenuPad.cs`: a small app with a real Win32 menu bar for the `win32menu` check. `acceptance.py` builds it into `%TEMP%\bcu`.
 
 The sections below describe fork v2, the state after round 2 of the experiments (`research/08-experiments.md`). "Fork v3" at the end covers round 3.
@@ -222,3 +222,76 @@ Final run, `acceptance-runs/acceptance-20261012-001403.json` (v3 on the new chec
 - A posted key can still lose its modifiers on a thread that answers sent messages while its posted queue waits (finding 7). The 120 ms floor covers the common case.
 - When the target is itself always-on-top and another always-on-top window covers the point, only activation can tell whether the target ends up above it, so a refusal there follows an activation the driver then undoes.
 - Foreground `scroll` (a SendInput wheel at the cursor) isn't hit-tested. A wheel can't click, but it can scroll whatever covers the point.
+
+## Fork v5: browser route for Helium
+
+Round 5 makes the driver's DevTools route (`browser_*` tools) usable on the user's real Helium (Chromium 155, `chrome.exe` under `%LOCALAPPDATA%\imput\Helium`), attached with `cua-driver mcp --grant existing-profile`. One commit per item on `bcu`, patches 0014 to 0019. The binary is `tools/cua-driver-fork/v5/cua-driver.exe`, also installed as `plugin/driver/cua-driver.exe` (sha256 `c4b5e429...`).
+
+### 1. Speed (patch 0014)
+
+Timestamps around each step showed where the 2.2 to 2.6 s went. A user-owned browser action is re-proved three times: `authorize_attested_resource` and `validate_attested_resource` at dispatch, then the tool's own `revalidate_for_mutation`. Each proof re-read the browser's command line twice (once to classify, once to find the profile's `DevToolsActivePort`) through a `powershell.exe` running `Get-CimInstance`, 360 to 520 ms per spawn. Everything else in a proof cost under 15 ms: the Toolhelp process list 9 to 10 ms, the TCP owner table 0.5 ms, `Target.getTargets` plus window lookups 2 ms.
+
+The command line now comes from `NtQueryInformationProcess(ProcessCommandLineInformation)`, the same string WMI reports, in microseconds. PowerShell stays as the fallback for a process that can't be opened. Classification takes the exe name from the process (`QueryFullProcessImageNameW`, with an exit-code check so an exited pid still reads as gone) and falls back to Toolhelp. No cache was needed, so nothing can go stale on pid reuse, and every check (fingerprint, native window owner, endpoint port owner, grant generation, window correlation) still runs on every proof. A proof now takes about 3 ms.
+
+| | before (9f80bc8) | after |
+| --- | --- | --- |
+| revalidation, each | ~800 ms | ~3 ms |
+| `browser_type` | 2.7 s | 12 to 26 ms; `replace:true` 110 to 150 ms |
+| `browser_click` | 2.8 s | 44 to 67 ms |
+| `browser_navigate` | 2.2 s | 14 to 95 ms |
+| snapshot (`semantic_v2`) | 0.8 s | 8 to 50 ms |
+| bind | ~1.2 s | 7 to 14 ms |
+| `browser_prepare` | | ~500 ms, mostly Helium's consent prompt |
+
+The `replace` cost is a deliberate 100 ms settle inside `enter_focus_emulation`. The agent cursor matters in the selected tab: the driver awaits its glide before a click or type, so with the default motion `browser_type` took 220 to 520 ms and `browser_click` 490 ms there (17 and 45 ms with the cursor off). Background tabs report `visibilityState: hidden`, get no cursor, and run at the numbers above. `set_agent_cursor_motion` controls the glide.
+
+### 2. `replace:true` on email and number inputs (patch 0015)
+
+`setSelectionRange` throws on `type=email` and `type=number`, which have no selection API. The `select()` fallback worked, but the check after it read `selectionStart`, which is `null` for those types, and refused with "not a text input". For those types the driver now calls `select()` and proves it from the focused control's selection string, which Helium reports as the full value. Text, search, url, tel, password, untyped inputs, textareas and contenteditables were already fine.
+
+### 3. Background tabs (patch 0016)
+
+- `browser_open_tab {session, target_id, url}` opens a tab with CDP `Target.createTarget {url, background: true}`. Chrome's handler adds it as `NEW_BACKGROUND_TAB`, window shown inactive, no focus, in the profile's most recently active window, since CDP has no window parameter. The tool checks `Browser.getWindowForTarget` for the new tab. Outside the bound window, it closes the tab again and refuses `browser_wrong_target_refused` with `detail.closed`. Otherwise it adds the tab to the binding and returns `{status, target_id, tab_id, url, active: false}`. Only http, https and about URLs.
+- `browser_close_tab {session, target_id, tab_id}` closes only tabs the same session opened (a per-session set of `(pid, CDP target id)` in the store, dropped when the session ends) and returns `{status, target_id, tab_id, closed: true}`. Any other tab is refused `browser_action_unavailable`, including the user's.
+- Both go through the `browser_bound_input` adapter like the other page mutations, so bounded manifests check the new tab's origin. `revalidate_for_mutation` was split so a window-level action re-proves the same chain without a tab (`revalidate_binding`). The existing-profile CDP policy now admits `Target.createTarget` and `Target.closeTarget`.
+
+### 4. Keys (patch 0017)
+
+`browser_press_key {session, target_id, tab_id, key, modifiers?, ref?}` sends one trusted `Input.dispatchKeyEvent` press under focus emulation. Keys: Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, the four arrows, Space, F1 to F24, or one character. Aliases include esc, return, up, down. Modifiers: alt, ctrl, meta, shift. Text is dropped while Ctrl, Alt or Meta is held, so `a` + `ctrl` is select-all. With `ref` that element is focused first; without it the key goes to the page's focused element. Result: `{status, target_id, tab_id, key, modifiers, ref, frame}`. On the test page, Ctrl+A selected 0-12 of 12 characters in Name, Tab moved focus to Email, and Escape arrived.
+
+### 5. Native `<select>` (patch 0018)
+
+A closed select's options have no layout box, so a trusted click can't reach them. `browser_select {session, target_id, tab_id, ref, option?}` takes the select's ref with `option` as a value or visible label (exact value, then whitespace-normalized label, then case-insensitive), or an option's ref with `option` omitted. It sets the option and fires `input` and `change`, Playwright's `selectOption` route, with `DOM.resolveNode` and `Runtime.callFunctionOn` only, so no `Runtime.enable` and nothing outside the existing-profile policy. The events are untrusted (`isTrusted: false`), and the result says so: `{status, route: "dom_event", events_trusted: false, value, label, index, changed, ref, frame}`. Refs of selects and their options now declare a `select` action, and `browser_click` on an option of a closed select refuses `browser_action_unavailable` pointing at `browser_select`, not `browser_ref_stale`. A site that checks `isTrusted` on select changes needs the UIA route.
+
+### 6. Product name (patch 0019)
+
+A `chrome.exe` whose image path isn't under `\Google\Chrome` (Chrome, Beta, Dev, SxS) is now classified Chromium, so Helium reads "Attached to the approved existing Chromium profile". The Chromium setup descriptor drives the same `chrome://inspect` page and labels and also accepts the Chrome page title, and the profile lookup already prefers the install's own `User Data`. When the image path can't be read, the old classification stands.
+
+### Results (`acceptance-runs/acceptance-20261012-135315.json`)
+
+`helium` check: binds the Helium window on top of the z-order, opens its own background tab on a page it serves itself, fills Name (type, then replace), Email (type, then replace), Notes, Plan (`browser_select`), the checkbox and Submit, presses Ctrl+A, Tab and Escape, checks a second driver process can't close the tab, closes it, and checks the tab strips and prompts.
+
+| Measure | Result |
+| --- | --- |
+| Result | pass. `Submitted: name=Ada Lovelace\|email=ada@example.com\|plan=pro\|agree=yes\|notes=typed in a contenteditable` |
+| Actions | open_tab 16, type 12 to 26, type replace 110 to 137, click 44, closed-option click refused in 9, select 11, press_key 15 (136 with a ref), navigate 95, close_tab 17 ms |
+| Snapshots | 8 to 50 ms |
+| Cursor | 0 px |
+| Foreground | 0 changes from open_tab to close_tab. Prepare: 2 (Helium's "Allow remote debugging?" prompt pops up and the driver accepts it), restored |
+| User's view | selected tab and window title unchanged; tab count back to its start value |
+| Leftovers | no test tab, no `Inspect with` tab, no remote-debugging prompt |
+
+### What the front end must handle
+
+- New tools: `browser_open_tab`, `browser_close_tab`, `browser_press_key`, `browser_select`, with the arguments and results above. All need an explicit `session` and a target from `get_browser_state`, like the other `browser_*` tools.
+- Prefer `browser_open_tab` over navigating the user's tab, and close the tab when done. It works best in the window the user activated last (top of the z-order), which is also the only window `browser_prepare` succeeds on (see limits).
+- Choose a select option with `browser_select`, not by clicking an option ref. Use `browser_press_key` for Enter, Tab, Escape, arrows and shortcuts. `browser_type` with `replace:true` now works on every text-entry input.
+- Use one driver session per browser. See limits.
+
+### Limits
+
+- Helium anchors its remote-debugging prompt to the window the user activated last, and the driver's consent handler only looks inside the window being prepared. Preparing any other Helium window waits 4 s, refuses `browser_wrong_target_refused` ("no exact Chromium remote-debugging consent prompt appeared"), and leaves the prompt open (verified: the prompt's owner was the other window). Accepting the prompt where Helium puts it would widen the consent automation, so I left it. Dismiss a stale prompt with `WM_CLOSE`, which denies.
+- Two sessions of one driver attached to the same browser share one pooled socket (`CdpPool` keys by WebSocket URL, one generation per entry). Ending the second session dropped the socket the first one used; the first session's next call reconnected and refused "the browser reconnected and invalidated this target". This predates v5. A second driver process has its own socket and is unaffected.
+- `browser_open_tab`'s other-window refusal (close the tab again and refuse) wasn't exercised live. It needs the user to activate another window between bind and open, and the only bindable window is the last-active one.
+- `browser_select` events are untrusted. `browser_press_key` sends no separate modifier key events, only the modifier bits on the key itself.
+- `cargo test -p cua-driver-core --lib`: 955 pass. Two `history::tests` cases (no browser code) failed once each under the parallel run and pass alone. The SDK and CLI crate tests need the Linux X11 libraries, which aren't installed here, so I updated their tool lists without running them.

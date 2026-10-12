@@ -1,0 +1,53 @@
+From 3ce4476f5b6408574640b096dd7a4ee6e57d6240 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Mon, 12 Oct 2026 13:42:05 -0500
+Subject: [PATCH 15/19] fix(browser): replace text in email and number inputs
+
+browser_type replace:true selected a field's text with setSelectionRange,
+which throws on type=email and type=number. Its select() fallback worked but
+was then rejected because selectionStart is null for those types. Select them
+with select() and prove it from the focused control's selection string.
+---
+ .../cua-driver-core/src/browser/tools.rs      | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs
+index 59594eb..bf57969 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs
+@@ -1377,9 +1377,20 @@ const FOCUS_EMULATION_READY_CHECK: &str = "function() { \
+ // is not a shape we know how to select. Selection is the only clearing path
+ // that keeps input semantics intact: assigning `value` directly would skip the
+ // beforeinput/input events that frameworks bind their state to.
++// `email` and `number` inputs have no selection API (`selectionStart` is null
++// and `setSelectionRange` throws), but `select()` still selects the whole
++// value, and the focused control's selection string proves it did.
+ const SELECT_ALL_IN_ELEMENT: &str = "function() { \
+     if (this.tagName === 'INPUT' || this.tagName === 'TEXTAREA') { \
+         const value = this.value || ''; \
++        if (this.selectionStart === null) { \
++            try { this.select(); } catch (_) { return -1; } \
++            const root = this.getRootNode(); \
++            const owner = ('getSelection' in root) ? root : this.ownerDocument; \
++            const selection = owner.getSelection(); \
++            if (!selection || String(selection) !== value) return -1; \
++            return Array.from(value).length; \
++        } \
+         try { this.setSelectionRange(0, value.length); } catch (e) { \
+             try { this.select(); } catch (_) { return -1; } \
+         } \
+@@ -1426,9 +1437,11 @@ async fn select_all_in_element(
+         .map_err(|error| error.to_string())?;
+     match selected["result"]["value"].as_i64() {
+         Some(n) if n >= 0 => Ok(n as usize),
+-        _ => Err("the ref is not a text input, textarea, or contenteditable \
+-                  element, so its content cannot be selected for replacement"
+-            .into()),
++        _ => Err(
++            "the ref is not a text-entry input, textarea, or contenteditable \
++                  element whose whole content could be selected for replacement"
++                .into(),
++        ),
+     }
+ }
+ 

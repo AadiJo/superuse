@@ -1,0 +1,562 @@
+From 08416b30a3ec08e4c29115ad7a416d40b2cb94aa Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Mon, 12 Oct 2026 13:52:05 -0500
+Subject: [PATCH 18/19] feat(browser): choose native select options in the
+ background
+
+A closed <select> draws its options in a browser-owned popup, so their refs
+have no layout box and browser_click refused them as stale.
+
+browser_select {target_id, tab_id, ref, option?} takes the select's ref with
+an option value or label, or an option's ref, marks the option selected and
+fires input and change the way a user's choice does (Playwright's
+selectOption route). It only needs DOM.resolveNode and Runtime.callFunctionOn,
+so it stays inside the existing-profile CDP policy without Runtime.enable. The
+events are untrusted and the result says so. Snapshot refs of a select and its
+options now declare a select action, and browser_click on an option of a
+closed select points to browser_select instead of calling the ref stale.
+---
+ .../rust/Skills/cua-driver/BROWSER.md         |  12 +-
+ .../cua-driver-core/src/authorization.rs      |   2 +
+ .../crates/cua-driver-core/src/browser/mod.rs |   1 +
+ .../cua-driver-core/src/browser/select.rs     | 294 ++++++++++++++++++
+ .../cua-driver-core/src/browser/semantic.rs   |   3 +
+ .../cua-driver-core/src/browser/store.rs      |   3 +
+ .../cua-driver-core/src/browser/tools.rs      |  29 +-
+ .../rust/crates/cua-driver-core/src/server.rs |   2 +
+ .../rust/crates/cua-driver-core/src/tool.rs   |   3 +
+ .../rust/crates/cua-driver-sdk/src/runtime.rs |   1 +
+ .../rust/crates/cua-driver/src/telemetry.rs   |   1 +
+ 11 files changed, 349 insertions(+), 2 deletions(-)
+ create mode 100644 libs/cua-driver/rust/crates/cua-driver-core/src/browser/select.rs
+
+diff --git a/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md b/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md
+index 10b1db6..06a0633 100644
+--- a/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md
++++ b/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md
+@@ -25,7 +25,7 @@ get_browser_state(pid, window_id, session?)               # bind
+ get_browser_state(target_id, tab_id, session?,
+                   snapshot_format=semantic_v2)            # snapshot
+ browser_navigate / browser_click / browser_type / browser_pointer
+-browser_press_key
++browser_press_key / browser_select
+ browser_open_tab / browser_close_tab
+ browser_dialog / browser_set_input_files / browser_download
+ get_browser_state(target_id, tab_id, session?,
+@@ -433,6 +433,16 @@ browser_press_key
+     "key":"a","modifiers":["ctrl"],"session":"browser-run-1"}'
+ ```
+ 
++### Native selects
++
++A closed `<select>` draws its options in a browser-owned popup, so its option
++refs have no box and `browser_click` refuses them. Use `browser_select` with a
++ref whose `actions` contains `select`: the select with `option` set to a value
++or visible label, or one of its options with `option` omitted. It marks the
++option selected and fires `input` and `change`, the events a user's choice
++fires. Those events are synthetic (`isTrusted` is false), and the result says
++`route: "dom_event"`.
++
+ ### Background tabs
+ 
+ `browser_open_tab` opens a tab in the bound window without selecting it or
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
+index 8c7b747..64e2a0b 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
+@@ -356,6 +356,7 @@ const BROWSER_BOUND_INPUT_OPERATIONS: &[&str] = &[
+     "browser_open_tab",
+     "browser_close_tab",
+     "browser_press_key",
++    "browser_select",
+ ];
+ const BROWSER_BOUND_INPUT_SCOPE_KEYS: &[&str] = &[
+     "daemon_generation",
+@@ -932,6 +933,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
+         | "browser_open_tab"
+         | "browser_close_tab"
+         | "browser_press_key"
++        | "browser_select"
+         | "history_status"
+         | "history_query"
+         | "parse_visual_regions" => RiskClass::R2,
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/mod.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/mod.rs
+index 670aee5..c8d48e9 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/mod.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/mod.rs
+@@ -51,6 +51,7 @@ pub mod pointer;
+ mod prepare;
+ mod reconnect;
+ pub mod refusal;
++mod select;
+ mod semantic;
+ mod setup_descriptor;
+ pub mod store;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/select.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/select.rs
+new file mode 100644
+index 0000000..bdf818d
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/select.rs
+@@ -0,0 +1,294 @@
++//! `browser_select`: choose an option of a native `<select>` in an
++//! exactly-bound tab, in the background.
++//!
++//! A closed `<select>` renders its options in a browser-owned popup, so option
++//! refs have no layout box and a trusted click can't reach them. This sets the
++//! option the way Playwright's `selectOption` does: mark it selected, then fire
++//! the `input` and `change` events a user's choice fires. The events are
++//! untrusted (`isTrusted` is false) and the result says so. It needs only
++//! `DOM.resolveNode` and `Runtime.callFunctionOn`, both inside the
++//! existing-profile CDP method policy, and never `Runtime.enable`.
++
++use std::sync::Arc;
++
++use async_trait::async_trait;
++use serde_json::{json, Value};
++
++use crate::protocol::ToolResult;
++use crate::tool::{ProtectedResourceOwnership, Tool, ToolDef};
++use crate::tool_args::ArgsExt;
++
++use super::engine::BrowserEngine;
++use super::platform::BrowserVisualActionKind;
++use super::refusal::{BrowserRefusal, BrowserRefusalCode};
++use super::session_schema as schema_session;
++use super::store::BrowserActionKind;
++use super::tools::{
++    browser_protected_resource_scope, browser_resource_ownership, quad_center,
++    require_explicit_session, schema_tab_id, schema_target_id,
++};
++
++// `this` is the ref's node: a <select>, or an <option> of one. `wanted` is the
++// option's value or visible label, or null to choose the referenced option.
++const SELECT_OPTION: &str = "function(wanted) { \
++    const select = (this instanceof HTMLOptionElement) ? this.closest('select') : this; \
++    if (!(select instanceof HTMLSelectElement)) return { error: 'not_select' }; \
++    if (select.disabled) return { error: 'disabled' }; \
++    const options = Array.from(select.options); \
++    const norm = (s) => String(s).replace(/\\s+/g, ' ').trim(); \
++    let match = null; \
++    if (wanted === null) { \
++        if (!(this instanceof HTMLOptionElement)) return { error: 'option_required' }; \
++        match = this; \
++    } else { \
++        match = options.find((o) => o.value === wanted) \
++            || options.find((o) => norm(o.label) === norm(wanted)) \
++            || options.find((o) => norm(o.label).toLowerCase() === norm(wanted).toLowerCase()) \
++            || null; \
++    } \
++    if (!match) return { error: 'not_found', options: options.slice(0, 50).map((o) => o.label) }; \
++    const group = match.parentElement; \
++    if (match.disabled || (group instanceof HTMLOptGroupElement && group.disabled)) \
++        return { error: 'option_disabled' }; \
++    const before = select.value; \
++    if (select.multiple) { for (const o of options) o.selected = (o === match); } \
++    else { match.selected = true; } \
++    select.dispatchEvent(new Event('input', { bubbles: true, composed: true })); \
++    select.dispatchEvent(new Event('change', { bubbles: true })); \
++    return { value: select.value, label: match.label, index: match.index, \
++        changed: before !== select.value }; \
++}";
++
++pub struct BrowserSelectTool {
++    def: ToolDef,
++    engine: Arc<BrowserEngine>,
++}
++
++impl BrowserSelectTool {
++    pub fn new(engine: Arc<BrowserEngine>) -> Self {
++        let def = ToolDef {
++            name: "browser_select".into(),
++            description: "Choose an option of a native <select> in an exactly-bound tab, in \
++                the background. ref is the select (refs that declare \"select\"), with \
++                option naming the choice by value or visible label; or ref is one of its \
++                options, with option omitted. Marks the option selected and fires the \
++                input and change events a user's choice fires; the events are synthetic \
++                (isTrusted false). Returns the select's new value."
++                .into(),
++            input_schema: json!({
++                "type": "object",
++                "properties": {
++                    "target_id": schema_target_id(),
++                    "tab_id": schema_tab_id(),
++                    "session": schema_session(),
++                    "ref": {
++                        "type": "string",
++                        "description": "Ref of the <select>, or of one of its options, from get_browser_state."
++                    },
++                    "option": {
++                        "type": "string",
++                        "description": "Option value, else visible label (whitespace-normalized, then case-insensitive). Required when ref is the select."
++                    },
++                },
++                "required": ["target_id", "tab_id", "ref"],
++                "additionalProperties": true
++            }),
++            read_only: false,
++            destructive: false,
++            idempotent: true,
++            open_world: true,
++        };
++        Self { def, engine }
++    }
++}
++
++#[async_trait]
++impl Tool for BrowserSelectTool {
++    fn def(&self) -> &ToolDef {
++        &self.def
++    }
++
++    async fn protected_resource_ownership(
++        &self,
++        adapter_id: &str,
++        args: &Value,
++    ) -> ProtectedResourceOwnership {
++        if adapter_id == "browser_bound_input" {
++            browser_resource_ownership(&self.engine, args)
++        } else {
++            ProtectedResourceOwnership::UserOwned
++        }
++    }
++
++    async fn protected_resource_scope(
++        &self,
++        adapter_id: &str,
++        args: &Value,
++    ) -> Result<Option<Value>, String> {
++        if adapter_id == "browser_bound_input" {
++            browser_protected_resource_scope(&self.engine, args, "browser_select").await
++        } else {
++            Ok(None)
++        }
++    }
++
++    async fn invoke(&self, args: Value) -> ToolResult {
++        let (target_id, tab_id, ext_ref) = match (
++            args.require_str("target_id"),
++            args.require_str("tab_id"),
++            args.require_str("ref"),
++        ) {
++            (Ok(t), Ok(tab), Ok(r)) => (t, tab, r),
++            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return e,
++        };
++        let session = match require_explicit_session(&args) {
++            Ok(s) => s,
++            Err(e) => return e,
++        };
++        let wanted = args.opt_str("option");
++
++        let _mutation = match self
++            .engine
++            .lock_mutation(&session, &target_id, &tab_id)
++            .await
++        {
++            Ok(guard) => guard,
++            Err(refusal) => return refusal.to_tool_result(),
++        };
++        let validated = match self
++            .engine
++            .revalidate_for_mutation(&session, &target_id, Some(&tab_id))
++            .await
++        {
++            Ok(v) => v,
++            Err(refusal) => return refusal.to_tool_result(),
++        };
++        let entry = match self
++            .engine
++            .store
++            .resolve_ref(&session, &target_id, &tab_id, &ext_ref)
++        {
++            Ok(entry) => entry,
++            Err(refusal) => return refusal.to_tool_result(),
++        };
++        if entry.semantic && !entry.actions.contains(&BrowserActionKind::Select) {
++            return BrowserRefusal::new(
++                BrowserRefusalCode::BrowserActionUnavailable,
++                format!("semantic ref {ext_ref} is not a <select> or one of its options"),
++            )
++            .to_tool_result();
++        }
++        let cdp = match self
++            .engine
++            .frame_session_for_mutation(&session, &target_id, &tab_id, &validated, &entry.frame)
++            .await
++        {
++            Ok(s) => s,
++            Err(refusal) => return refusal.to_tool_result(),
++        };
++        let conn = &validated.conn;
++        let object_id = conn
++            .call(
++                Some(&cdp),
++                "DOM.resolveNode",
++                json!({ "backendNodeId": entry.backend_node_id }),
++            )
++            .await
++            .ok()
++            .and_then(|resolved| {
++                resolved
++                    .pointer("/object/objectId")
++                    .and_then(Value::as_str)
++                    .map(str::to_owned)
++            });
++        let Some(object_id) = object_id else {
++            return BrowserRefusal::new(
++                BrowserRefusalCode::BrowserRefStale,
++                "the ref's node no longer resolves in the live page",
++            )
++            .to_tool_result();
++        };
++
++        // A closed select's options have no box; the select itself usually does.
++        if let Ok(box_model) = conn
++            .call(
++                Some(&cdp),
++                "DOM.getBoxModel",
++                json!({ "backendNodeId": entry.backend_node_id }),
++            )
++            .await
++        {
++            if let Some((x, y)) = quad_center(&box_model) {
++                self.engine
++                    .visualize_browser_action(
++                        &session,
++                        &validated,
++                        &cdp,
++                        x,
++                        y,
++                        BrowserVisualActionKind::Click,
++                    )
++                    .await;
++            }
++        }
++
++        let outcome = match conn
++            .call(
++                Some(&cdp),
++                "Runtime.callFunctionOn",
++                json!({
++                    "objectId": object_id,
++                    "functionDeclaration": SELECT_OPTION,
++                    "arguments": [{ "value": wanted }],
++                    "returnByValue": true,
++                }),
++            )
++            .await
++        {
++            Ok(result) => result
++                .pointer("/result/value")
++                .cloned()
++                .unwrap_or(Value::Null),
++            Err(error) => {
++                return ToolResult::error(format!("selecting the option failed: {error}"))
++            }
++        };
++        if let Some(error) = outcome.get("error").and_then(Value::as_str) {
++            if error == "option_required" {
++                return ToolResult::error(
++                    "ref is the <select> itself: pass option with the value or label to choose",
++                );
++            }
++            let message = match error {
++                "not_select" => "the ref is not a <select> or one of its options",
++                "disabled" => "the <select> is disabled",
++                "option_disabled" => "that option is disabled",
++                _ => "no option of the <select> has that value or label",
++            };
++            return BrowserRefusal::new(BrowserRefusalCode::BrowserActionUnavailable, message)
++                .with_detail(json!({ "options": outcome.get("options") }))
++                .to_tool_result();
++        }
++
++        let value = outcome.get("value").cloned().unwrap_or(Value::Null);
++        let label = outcome.get("label").cloned().unwrap_or(Value::Null);
++        ToolResult::text(format!(
++            "selected {} in {tab_id}; value is now {}",
++            label.as_str().unwrap_or("?"),
++            value
++        ))
++        .with_structured(json!({
++            "status": "ok",
++            "route": "dom_event",
++            "target_id": target_id,
++            "tab_id": tab_id,
++            "ref": ext_ref,
++            "frame": entry.frame.kind.as_str(),
++            "value": value,
++            "label": label,
++            "index": outcome.get("index"),
++            "changed": outcome.get("changed"),
++            "events_trusted": false,
++        }))
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/semantic.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/semantic.rs
+index dc7cece..9c4778a 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/semantic.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/semantic.rs
+@@ -835,6 +835,9 @@ fn action_kinds(
+     {
+         actions.push(BrowserActionKind::Type);
+     }
++    if matches!(tag, "select" | "option") {
++        actions.push(BrowserActionKind::Select);
++    }
+     if actions.is_empty()
+         && dom.is_some_and(|meta| {
+             meta.attrs.contains_key("onclick")
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/store.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/store.rs
+index 7ce0e5f..eda3b58 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/store.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/store.rs
+@@ -37,6 +37,8 @@ pub enum BrowserActionKind {
+     Upload,
+     Pointer,
+     Scroll,
++    /// A native `<select>` or one of its options: `browser_select`.
++    Select,
+ }
+ 
+ impl BrowserActionKind {
+@@ -47,6 +49,7 @@ impl BrowserActionKind {
+             Self::Upload => "upload",
+             Self::Pointer => "pointer",
+             Self::Scroll => "scroll",
++            Self::Select => "select",
+         }
+     }
+ }
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs
+index a6f93e8..e5cdc0e 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs
+@@ -21,6 +21,7 @@ use super::keys::BrowserPressKeyTool;
+ use super::platform::{BrowserVisualActionKind, PrepareProfile, PrepareRequest, PrepareStrategy};
+ use super::pointer::BrowserPointerTool;
+ use super::refusal::{BrowserRefusal, BrowserRefusalCode};
++use super::select::BrowserSelectTool;
+ use super::session_schema as schema_session;
+ use super::store::BrowserActionKind;
+ use super::tabs::{BrowserCloseTabTool, BrowserOpenTabTool};
+@@ -42,6 +43,7 @@ pub fn register_browser_tools(engine: &Arc<BrowserEngine>, registry: &mut ToolRe
+     registry.register(Box::new(BrowserOpenTabTool::new(engine.clone())));
+     registry.register(Box::new(BrowserCloseTabTool::new(engine.clone())));
+     registry.register(Box::new(BrowserPressKeyTool::new(engine.clone())));
++    registry.register(Box::new(BrowserSelectTool::new(engine.clone())));
+ }
+ 
+ // ── Shared helpers ───────────────────────────────────────────────────────────
+@@ -1231,6 +1233,30 @@ impl Tool for BrowserClickTool {
+                 {
+                     Ok(v) => v,
+                     Err(_) => {
++                        // A closed <select> draws its options in a browser-owned
++                        // popup, so they never have a box. That isn't staleness.
++                        let is_option = conn
++                            .call(
++                                Some(cdp),
++                                "DOM.describeNode",
++                                json!({ "backendNodeId": backend }),
++                            )
++                            .await
++                            .ok()
++                            .and_then(|node| {
++                                node.pointer("/node/nodeName")
++                                    .and_then(Value::as_str)
++                                    .map(|name| name.eq_ignore_ascii_case("option"))
++                            })
++                            .unwrap_or(false);
++                        if is_option {
++                            return BrowserRefusal::new(
++                                BrowserRefusalCode::BrowserActionUnavailable,
++                                "this option belongs to a closed <select>, which has no \
++                                 clickable box for it; choose it with browser_select",
++                            )
++                            .to_tool_result();
++                        }
+                         return BrowserRefusal::new(
+                             BrowserRefusalCode::BrowserRefStale,
+                             "the ref's node has no layout box — it left the DOM or is hidden",
+@@ -2766,7 +2792,8 @@ mod tests {
+                 "browser_pointer",
+                 "browser_open_tab",
+                 "browser_close_tab",
+-                "browser_press_key"
++                "browser_press_key",
++                "browser_select"
+             ]
+         );
+     }
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs
+index e610391..2a6d96e 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs
+@@ -490,6 +490,7 @@ pub fn is_computer_action(tool_name: &str, operation: ToolOperation) -> bool {
+                         | "browser.input.click"
+                         | "browser.input.type"
+                         | "browser.input.key"
++                        | "browser.input.select"
+                         | "browser.tab.open"
+                         | "browser.tab.close"
+                 )
+@@ -733,6 +734,7 @@ fn structured_refusal_code(tool_name: &str, result: Option<&serde_json::Value>)
+             | "browser_open_tab"
+             | "browser_close_tab"
+             | "browser_press_key"
++            | "browser_select"
+     ) {
+         return ToolRefusalCode::None;
+     }
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+index cdd4191..7cdfc51 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+@@ -842,6 +842,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
+         "browser_open_tab" => &["browser.tab.open"],
+         "browser_close_tab" => &["browser.tab.close"],
+         "browser_press_key" => &["browser.input.key"],
++        "browser_select" => &["browser.input.select"],
+ 
+         // ── driver self-service ──────────────────────────────────────
+         "check_for_update" => &["driver.update_check"],
+@@ -6390,6 +6391,7 @@ mod capability_tests {
+         "browser_open_tab",
+         "browser_close_tab",
+         "browser_press_key",
++        "browser_select",
+         "history_status",
+         "history_query",
+         "parse_visual_regions",
+@@ -6483,6 +6485,7 @@ mod capability_tests {
+         "browser.tab.open",
+         "browser.tab.close",
+         "browser.input.key",
++        "browser.input.select",
+         // driver self
+         "driver.update_check",
+         "driver.probe",
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+index 00a02b2..7907186 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+@@ -760,6 +760,7 @@ mod tests {
+             "browser_open_tab",
+             "browser_close_tab",
+             "browser_press_key",
++            "browser_select",
+             "start_session",
+             "escalate_session",
+             "get_session",
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs b/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs
+index 9dbe9fb..4c2b2d9 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs
+@@ -610,6 +610,7 @@ impl AgentSessionState {
+                 | "browser_open_tab"
+                 | "browser_close_tab"
+                 | "browser_press_key"
++                | "browser_select"
+         );
+         let refused = outcome.refusal_code.is_refusal();
+         let completed_computer_action = computer_action && !refused;

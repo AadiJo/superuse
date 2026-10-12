@@ -1,0 +1,179 @@
+From 6a87f26f8d143a739bc4b63ecadba4c3538798a9 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Mon, 12 Oct 2026 13:42:05 -0500
+Subject: [PATCH 14/19] perf(windows): read browser command lines natively
+ instead of spawning powershell
+
+Every browser action re-proves its binding three times (authorize, validate,
+invoke), and each proof read the browser's command line twice through
+PowerShell's Get-CimInstance, about 400 ms per read. Actions took 2.2-2.6 s.
+
+Read it with NtQueryInformationProcess(ProcessCommandLineInformation) and keep
+PowerShell only as a fallback for processes that can't be opened. Classification
+also takes the exe name from the process instead of a Toolhelp snapshot of
+every process. Revalidation drops from ~800 ms to ~3 ms; every check it makes
+is unchanged.
+---
+ .../rust/crates/platform-windows/Cargo.toml   |   3 +
+ .../platform-windows/src/browser_platform.rs  | 119 ++++++++++++++++--
+ 2 files changed, 113 insertions(+), 9 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/Cargo.toml b/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
+index 1d2a2ae..6a8fc10 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
++++ b/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
+@@ -66,6 +66,9 @@ windows = { version = "0.58", features = [
+     "Win32_System_Registry",
+     # Locale-independent TCP listener ownership for browser endpoint proof.
+     "Win32_NetworkManagement_IpHelper",
++    # NtQueryInformationProcess(ProcessCommandLineInformation): read a
++    # browser's argv natively instead of spawning PowerShell per check.
++    "Wdk_System_Threading",
+     "Win32_Networking_WinSock",
+     # `cua-driver doctor` interactive-session probe:
+     # - Win32_System_RemoteDesktop → ProcessIdToSessionId
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/browser_platform.rs b/libs/cua-driver/rust/crates/platform-windows/src/browser_platform.rs
+index 26a8e29..4687ca5 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/browser_platform.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/browser_platform.rs
+@@ -757,7 +757,71 @@ fn system_powershell_path() -> Result<PathBuf, BrowserRefusal> {
+     Ok(system_directory_path()?.join("WindowsPowerShell\\v1.0\\powershell.exe"))
+ }
+ 
++/// Read `pid`'s command line from its process parameters with
++/// `NtQueryInformationProcess(ProcessCommandLineInformation)` (Windows 8.1+).
++/// This is the string WMI's `Win32_Process.CommandLine` reports, read in
++/// microseconds: every browser mutation re-proves the endpoint, and a
++/// PowerShell process per read cost ~400 ms each time. `None` when the process
++/// can't be opened for limited query (another user's or a protected process).
++fn native_command_line(pid: u32) -> Option<String> {
++    use windows::Wdk::System::Threading::{
++        NtQueryInformationProcess, ProcessCommandLineInformation,
++    };
++    use windows::Win32::Foundation::UNICODE_STRING;
++
++    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
++    let mut needed = 0u32;
++    // The sizing call fails with STATUS_INFO_LENGTH_MISMATCH and reports the size.
++    let _ = unsafe {
++        NtQueryInformationProcess(
++            handle,
++            ProcessCommandLineInformation,
++            std::ptr::null_mut(),
++            0,
++            &mut needed,
++        )
++    };
++    let header = std::mem::size_of::<UNICODE_STRING>();
++    let bytes = (needed as usize).clamp(header, 1 << 20);
++    // u64 storage keeps the UNICODE_STRING header aligned.
++    let mut buffer = vec![0u64; bytes.div_ceil(8)];
++    let status = unsafe {
++        NtQueryInformationProcess(
++            handle,
++            ProcessCommandLineInformation,
++            buffer.as_mut_ptr().cast(),
++            (buffer.len() * 8) as u32,
++            &mut needed,
++        )
++    };
++    let _ = unsafe { CloseHandle(handle) };
++    if status.is_err() {
++        return None;
++    }
++    let string = unsafe { &*buffer.as_ptr().cast::<UNICODE_STRING>() };
++    let start = buffer.as_ptr() as usize;
++    let text = string.Buffer.0 as usize;
++    let len = usize::from(string.Length);
++    // The kernel writes the characters right after the header, inside `buffer`.
++    if string.Buffer.is_null() || text < start || text + len > start + buffer.len() * 8 {
++        return None;
++    }
++    let chars = unsafe { std::slice::from_raw_parts(string.Buffer.0, len / 2) };
++    Some(String::from_utf16_lossy(chars))
++}
++
+ async fn browser_command_line(pid: u32) -> Result<String, BrowserRefusal> {
++    if let Some(command_line) = native_command_line(pid) {
++        let command_line = command_line.trim();
++        if !command_line.is_empty() {
++            return Ok(command_line.to_owned());
++        }
++    }
++    powershell_command_line(pid).await
++}
++
++/// The WMI route, kept for processes the native read can't open.
++async fn powershell_command_line(pid: u32) -> Result<String, BrowserRefusal> {
+     let powershell = system_powershell_path()?;
+     let script = format!(
+         "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' -ErrorAction Stop).CommandLine"
+@@ -1002,6 +1066,40 @@ fn process_identity(pid: u32) -> Result<(u64, Option<String>), BrowserRefusal> {
+     Ok((started, path))
+ }
+ 
++/// Executable file name (`chrome.exe`) of a running `pid`, read from the
++/// process itself. Classification runs on every browser mutation, and a
++/// Toolhelp snapshot of every process costs ~10 ms. `None` when the process
++/// can't be opened for limited query or has exited; callers then fall back
++/// to the snapshot.
++fn live_process_executable_name(pid: u32) -> Option<String> {
++    use windows::Win32::System::Threading::GetExitCodeProcess;
++    const STILL_ACTIVE: u32 = 259;
++
++    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
++    let mut exit_code = 0u32;
++    let running =
++        unsafe { GetExitCodeProcess(handle, &mut exit_code) }.is_ok() && exit_code == STILL_ACTIVE;
++    let mut path_buf = [0u16; 1024];
++    let mut path_len = path_buf.len() as u32;
++    let path = running
++        .then(|| unsafe {
++            QueryFullProcessImageNameW(
++                handle,
++                PROCESS_NAME_FORMAT(0),
++                windows::core::PWSTR(path_buf.as_mut_ptr()),
++                &mut path_len,
++            )
++        })
++        .and_then(Result::ok)
++        .map(|()| String::from_utf16_lossy(&path_buf[..path_len as usize]));
++    let _ = unsafe { CloseHandle(handle) };
++    path?
++        .rsplit(['\\', '/'])
++        .next()
++        .filter(|name| !name.is_empty())
++        .map(str::to_owned)
++}
++
+ fn canonical_process_executable(path: String) -> String {
+     // Manifest executable grants use `canonicalize` too. Normalize the Windows
+     // process evidence at collection time so shared authorization stays exact.
+@@ -2157,15 +2255,18 @@ impl BrowserPlatform for WindowsBrowserPlatform {
+                 format!("pid {pid} is outside the Windows process-id range"),
+             )
+         })?;
+-        let name = tokio::task::spawn_blocking(move || {
+-            crate::win32::list_processes()
+-                .into_iter()
+-                .find(|process| process.pid == pid_u32)
+-                .map(|process| process.name)
+-        })
+-        .await
+-        .ok()
+-        .flatten()
++        let name = match live_process_executable_name(pid_u32) {
++            Some(name) => Some(name),
++            None => tokio::task::spawn_blocking(move || {
++                crate::win32::list_processes()
++                    .into_iter()
++                    .find(|process| process.pid == pid_u32)
++                    .map(|process| process.name)
++            })
++            .await
++            .ok()
++            .flatten(),
++        }
+         .ok_or_else(|| {
+             refusal(
+                 BrowserRefusalCode::BrowserBindingStale,

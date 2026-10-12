@@ -1,7 +1,7 @@
 """Live acceptance checks for the forked Cua Driver on the Windows desktop.
 
     python3 fork/acceptance.py [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu]
-        [win32menu_bypos] [menubg] [ownership] [fgpoint]
+        [win32menu_bypos] [menubg] [ownership] [fgpoint] [helium]
 
 Drives the driver (BCU_CUA_DRIVER, default plugin/driver/cua-driver.exe) over
 MCP stdio against windows this script opens itself (TestPad, MenuPad from
@@ -11,6 +11,11 @@ real cursor and foreground window, and writes
 fork/acceptance-runs/acceptance-<time>.json. Tool calls only target windows
 this script opened. Explorer windows share the shell's pid, so the explorer
 check matches titles in memory to find its own window and logs none of them.
+
+`helium` is the exception: it attaches to the user's running Helium with
+`--grant existing-profile`, but only acts in a background tab it opens itself
+and closes again. Bind results list the user's tabs, so that check logs no
+result text from them and reads tab URLs only to find its own test page.
 """
 from __future__ import annotations
 
@@ -18,7 +23,9 @@ import json
 import re
 import shutil
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parents[1] / "bench"
@@ -652,6 +659,230 @@ def check_fgpoint(run: Run) -> dict:
     return res
 
 
+# --- 6. Helium: the browser_* route on the user's real browser, in a background tab --------
+
+HELIUM_EXE = r"\imput\Helium\Application\chrome.exe"
+HELIUM_FORM = """<!doctype html><html><head><meta charset="utf-8"><title>BCU Helium test</title></head><body>
+<form id="f">
+<label>Name <input id="name"></label>
+<label>Email <input id="email" type="email"></label>
+<label>Plan <select id="plan"><option value="">Choose...</option><option value="free">Free</option>
+<option value="pro">Pro</option><option value="team">Team</option></select></label>
+<label><input id="agree" type="checkbox"> I agree to the terms</label>
+<label>Notes <div id="notes" contenteditable="true" role="textbox" aria-label="Notes"></div></label>
+<button type="submit">Submit</button>
+</form><p id="out"></p><p id="keys">keys:</p>
+<script>
+const v = (id) => document.getElementById(id);
+const log = (t) => { v('keys').textContent += ' ' + t; };
+v('f').addEventListener('submit', (e) => {
+  e.preventDefault();
+  v('out').textContent = `Submitted: name=${v('name').value}|email=${v('email').value}|plan=${v('plan').value}` +
+    `|agree=${v('agree').checked ? 'yes' : 'no'}|notes=${v('notes').textContent}`;
+});
+document.addEventListener('keyup', (e) => {
+  const a = document.activeElement;
+  const sel = (a && a.selectionStart != null) ? `:${a.selectionStart}-${a.selectionEnd}/${a.value.length}` : '';
+  log(`${e.ctrlKey ? 'ctrl+' : ''}${e.key}@${a ? a.id || a.tagName : '?'}${sel}`);
+});
+v('plan').addEventListener('change', (e) => log(`change:${e.target.value}:trusted=${e.isTrusted}`));
+</script></body></html>"""
+HELIUM_SUBMITTED = ("Submitted: name=Ada Lovelace|email=ada@example.com|plan=pro|agree=yes"
+                    "|notes=typed in a contenteditable")
+
+
+def serve_page(html: str) -> tuple[ThreadingHTTPServer, str]:
+    """Serve `html` at http://127.0.0.1:<free port>/form.html from this process (Windows reaches
+    WSL's loopback through localhost forwarding)."""
+    body = html.encode()
+
+    class Page(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200 if self.path == "/form.html" else 404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            if self.path == "/form.html":
+                self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}/form.html"
+
+
+def helium_windows() -> list[win.Win]:
+    """Helium's browser windows, top of the z-order first. EnumWindows lists top-level windows top
+    to bottom, so the first is the one the user activated last: where Chromium puts background tabs."""
+    out = win.ps("Get-Process chrome -ErrorAction SilentlyContinue | "
+                 f"Where-Object {{ $_.Path -like '*{HELIUM_EXE}' }} | ForEach-Object {{ $_.Id }}")
+    pids = {int(x) for x in out.split() if x.isdigit()}
+    return [w for w in win.list_windows(titles=True)
+            if w.pid in pids and w.cls == "Chrome_WidgetWin_1" and w.title.endswith("Helium")]
+
+
+def debugging_prompts() -> int:
+    return sum(1 for w in win.list_windows(titles=True) if "remote debugging" in w.title.lower())
+
+
+def check_helium(run: Run) -> dict:
+    """Fill a form in a background tab of the user's Helium through browser_* tools only, then close
+    the tab. Passes when the form submits, every action stays under 300 ms and every snapshot under
+    400 ms, the cursor and foreground never move, the user's selected tab never changes, and no test
+    tab, inspect tab or remote-debugging prompt is left."""
+    wins = helium_windows()
+    if not wins:
+        return {"passed": False, "skipped": "Helium is not running"}
+    w = wins[0]
+    server, url = serve_page(HELIUM_FORM)
+    res: dict = {"window_id": w.hwnd, "pid": w.pid, "helium_windows": len(wins), "steps": []}
+
+    def call(name: str, args: dict, step: str | None = None, *, record: bool = True, client=None) -> dict:
+        r, ms = (client or run.c).call(name, args)
+        refusal = refusal_code(r)
+        entry = {"tool": name, "ms": round(ms, 1), "error": bool(r.get("isError")), "refusal": refusal}
+        # Bind results describe the user's tabs: keep their text out of the log.
+        safe = name != "get_browser_state" and name != "browser_prepare"
+        run.log.append({**entry, "args": {k: v for k, v in args.items() if k != "url" or v == url},
+                        "text": text_of(r)[:300] if safe else ""})
+        if record:
+            res["steps"].append({"step": step or name, **entry})
+        print(f"  {(step or name):24} {ms:7.1f} ms {refusal or ''}")
+        return r
+
+    def sc_of(r: dict) -> dict:
+        return r.get("structuredContent") or {}
+
+    def bind(session: str, window: win.Win, client=None) -> dict:
+        call("browser_prepare", {"session": session, "pid": window.pid, "window_id": window.hwnd,
+                                 "strategy": {"kind": "existing_profile"}}, "prepare", client=client)
+        return sc_of(call("get_browser_state", {"session": session, "pid": window.pid,
+                                                 "window_id": window.hwnd}, "bind", client=client))
+
+    def ours(tabs: list[dict]) -> list[dict]:
+        return [t for t in tabs if t.get("url") == url]
+
+    def text_rows(r: dict, needle: str) -> list[str]:
+        return [ln.strip() for ln in sc_of(r).get("outline", "").splitlines() if needle in ln]
+
+    title_before = w.title
+    prompts_before = debugging_prompts()
+    try:
+        S = "acceptance-helium"
+        _, res["prepare_sampler"] = sampled(lambda: res.update(binding=bind(S, w)))
+        b = res.pop("binding")
+        target = b["target_id"]
+        res["binding_quality"] = b.get("binding_quality")
+        tabs_before = len(b.get("tabs") or [])
+
+        def body() -> dict:
+            out: dict = {}
+            r = call("browser_open_tab", {"session": S, "target_id": target, "url": url}, "open_tab")
+            tab = sc_of(r).get("tab_id")
+            out["tab_id"] = tab
+            T_ = {"session": S, "target_id": target, "tab_id": tab}
+            time.sleep(0.5)  # let the new tab load before the first snapshot
+            snap = lambda q=None: call("get_browser_state", {**T_, "snapshot_format": "semantic_v2", **({"query": q} if q else {})}, "snapshot")  # noqa: E731
+            refs = {(x.get("role"), x.get("name")): x["ref"] for x in sc_of(snap()).get("refs", [])}
+            ref = lambda role, name: refs[(role, name)]  # noqa: E731
+            call("browser_type", {**T_, "ref": ref("textbox", "Name"), "text": "Grace"}, "type")
+            call("browser_type", {**T_, "ref": ref("textbox", "Name"), "text": "Ada Lovelace", "replace": True}, "type_replace")
+            call("browser_type", {**T_, "ref": ref("textbox", "Email"), "text": "wrong@example.com"}, "type")
+            r = call("browser_type", {**T_, "ref": ref("textbox", "Email"), "text": "ada@example.com", "replace": True}, "type_replace_email")
+            out["email_replace_ok"] = not r.get("isError")
+            call("browser_type", {**T_, "ref": ref("textbox", "Notes"), "text": "typed in a contenteditable"}, "type")
+            r = call("browser_click", {**T_, "ref": ref("option", "Team")}, "click_closed_option")
+            out["closed_option_refusal"] = refusal_code(r)
+            r = call("browser_select", {**T_, "ref": ref("combobox", "Plan"), "option": "Pro"}, "select")
+            out["select_value"] = sc_of(r).get("value")
+            call("browser_click", {**T_, "ref": ref("checkbox", "I agree to the terms")}, "click")
+            call("browser_press_key", {**T_, "ref": ref("textbox", "Name"), "key": "a", "modifiers": ["ctrl"]}, "press_key")
+            call("browser_press_key", {**T_, "key": "Tab"}, "press_key")
+            call("browser_press_key", {**T_, "key": "Escape"}, "press_key")
+            out["key_log"] = text_rows(snap("keys:"), "keys:")
+            refs = {(x.get("role"), x.get("name")): x["ref"] for x in sc_of(snap()).get("refs", [])}
+            call("browser_click", {**T_, "ref": ref("button", "Submit")}, "click")
+            time.sleep(0.3)
+            out["submitted"] = text_rows(snap("Submitted"), "Submitted")
+            call("browser_navigate", {**T_, "url": url}, "navigate")
+            return out
+
+        out, res["sampler"] = sampled(body)
+        res.update(out)
+        tab = out.get("tab_id")
+
+        # A second driver can see the tab but may not close it. It runs in its own process: two
+        # sessions of one driver share a single pooled socket per browser, and ending either one
+        # drops it for both. (Helium anchors its remote-debugging prompt to the window the user
+        # activated last, and the driver only accepts it in the window it prepares, so this
+        # check never prepares Helium's other windows: that would leave a stale prompt.)
+        with McpClient([EXE, "mcp", "--grant", "existing-profile"], env=ENV) as other:
+            S2 = "acceptance-helium-other"
+            b2 = bind(S2, w, other)
+            foreign = ours(b2.get("tabs") or [])
+            if foreign:
+                r = call("browser_close_tab", {"session": S2, "target_id": b2["target_id"],
+                                               "tab_id": foreign[0]["tab_id"]}, "close_foreign_tab", client=other)
+                res["foreign_close_refusal"] = refusal_code(r)
+            call("end_session", {"session": S2}, record=False, client=other)
+
+        if tab:
+            r = call("browser_close_tab", {"session": S, "target_id": target, "tab_id": tab}, "close_tab")
+            res["closed"] = bool(sc_of(r).get("closed"))
+
+        after = sc_of(call("get_browser_state", {"session": S, "pid": w.pid, "window_id": w.hwnd}, "bind"))
+        res["tabs_restored"] = len(after.get("tabs") or []) == tabs_before
+        res["test_tabs_left"] = len(ours(after.get("tabs") or []))
+        call("end_session", {"session": S}, record=False)
+    finally:
+        server.shutdown()
+    time.sleep(0.5)
+    res["strip_strays"] = helium_strip_strays(run, wins)
+    res["prompts_before"], res["prompts_left"] = prompts_before, debugging_prompts()
+    res["selected_tab_unchanged"] = [x.title for x in helium_windows() if x.hwnd == w.hwnd] == [title_before]
+
+    timed = [s for s in res["steps"] if s["step"] not in ("prepare", "bind")]
+    actions = [s["ms"] for s in timed if s["step"] != "snapshot"]
+    snapshots = [s["ms"] for s in timed if s["step"] == "snapshot"]
+    res["max_action_ms"], res["max_snapshot_ms"] = max(actions, default=0), max(snapshots, default=0)
+    keys = " ".join(res.get("key_log", []))
+    s = res.get("sampler", {})
+    res["passed"] = bool(
+        res.get("binding_quality") == "exact"
+        and res.get("submitted") and HELIUM_SUBMITTED in res["submitted"][0]
+        and res.get("email_replace_ok") and res.get("select_value") == "pro"
+        and res.get("closed_option_refusal") == "browser_action_unavailable"
+        and all(k in keys for k in ("change:pro", "ctrl+a@name:0-12/12", "Tab@email", "Escape@email"))
+        and res.get("foreign_close_refusal") == "browser_action_unavailable"
+        and res.get("closed") and res.get("tabs_restored") and res.get("test_tabs_left") == 0
+        and not res["strip_strays"] and res["prompts_left"] == 0 and res["selected_tab_unchanged"]
+        and s.get("cursor_max_displacement_px") == 0 and s.get("foreground_changes") == 0
+        and res["max_action_ms"] < 300 and res["max_snapshot_ms"] < 400)
+    return res
+
+
+def refusal_code(r: dict) -> str | None:
+    """A tool's refusal code: from the structured result, or for ActionResult tools
+    (browser_click, browser_type, browser_pointer) from the "refused (<code>)" text prefix."""
+    code = code_of(r)
+    m = re.match(r"refused \((\w+)\)", text_of(r))
+    return code or (m.group(1) if m else None)
+
+
+def helium_strip_strays(run: Run, wins: list[win.Win]) -> list[str]:
+    """Names of tab-strip tabs that are ours (test page) or a leftover remote-debugging setup page, read
+    from each Helium window's UIA tree in memory. Only those names are returned."""
+    strays = []
+    for w in wins:
+        r, _ = run.c.call("get_window_state", {"session": "acceptance-helium-strip", "pid": w.pid, "window_id": w.hwnd,
+                                               "include_screenshot": False, "full_output": True})
+        for m in re.finditer(r'TabItem "([^"]*)"', (r.get("structuredContent") or {}).get("tree_markdown", "")):
+            if m.group(1).startswith(("BCU Helium test", "Inspect with")):
+                strays.append(m.group(1))
+    return strays
+
+
 # --- 4. Calculator (UWP regression) ------------------------------------------
 
 def check_calc(run: Run) -> dict:
@@ -684,7 +915,12 @@ def check_calc(run: Run) -> dict:
 CHECKS = {"saveas": check_saveas, "closedmenu": check_closedmenu, "replace": check_replace, "edge": check_edge,
           "edge_alert": check_edge_alert, "calc": check_calc, "explorer": check_explorer,
           "win32menu": check_win32menu, "win32menu_bypos": check_win32menu_bypos, "menubg": check_menubg,
-          "ownership": check_ownership, "fgpoint": check_fgpoint}
+          "ownership": check_ownership, "fgpoint": check_fgpoint, "helium": check_helium}
+# Extra `cua-driver mcp` arguments per check.
+CHECK_ARGS = {"helium": ["--grant", "existing-profile"]}
+# Checks that open no task windows and clean up after themselves skip the shared teardown, which
+# closes new task windows and kills TestPad.
+SELF_CLEANING = {"helium"}
 
 
 def main() -> None:
@@ -695,13 +931,14 @@ def main() -> None:
         print(f"== {name}")
         before = win.list_windows()
         try:
-            with McpClient([EXE, "mcp"], env=ENV) as c:
+            with McpClient([EXE, "mcp", *CHECK_ARGS.get(name, [])], env=ENV) as c:
                 results[name] = CHECKS[name](Run(c, log))
         except Exception as e:  # record and keep going
             results[name] = {"passed": False, "exception": repr(e)[:800]}
         finally:
-            print("  closed:", win.close_new_windows(before))
-            win.ps("Stop-Process -Name TestPad -Force -ErrorAction SilentlyContinue")
+            if name not in SELF_CLEANING:
+                print("  closed:", win.close_new_windows(before))
+                win.ps("Stop-Process -Name TestPad -Force -ErrorAction SilentlyContinue")
         print(f"  -> passed={results[name].get('passed')} sampler={results[name].get('sampler')}")
     OUT.mkdir(exist_ok=True)
     out = OUT / f"acceptance-{time.strftime('%Y%m%d-%H%M%S')}.json"

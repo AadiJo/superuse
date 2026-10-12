@@ -1,7 +1,7 @@
 From 48e38eb30436940d500dbe42187f9434f7e4c7e6 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 23:42:15 -0500
-Subject: [PATCH 12/13] fix(windows): post WM_MENUCOMMAND for MNS_NOTIFYBYPOS
+Subject: [PATCH 12/19] fix(windows): post WM_MENUCOMMAND for MNS_NOTIFYBYPOS
  menu bars
 
 The Win32 menu route always posted WM_COMMAND with the item id. A menu bar with the MNS_NOTIFYBYPOS style tells its owner about picks with WM_MENUCOMMAND (item position and menu handle) instead, and such apps may not handle WM_COMMAND or assign item ids, so the command was dropped while the tool reported success. The route now reads the menu bar's style and posts the notification the app expects, and the result names which one it sent.

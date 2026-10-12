@@ -1,7 +1,7 @@
 From 9f80bc8183b9e72c968323c5a3d8fcfb79e01c36 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Mon, 12 Oct 2026 13:10:51 -0500
-Subject: [PATCH 13/13] fix(windows): find a chromium build's own profile
+Subject: [PATCH 13/19] fix(windows): find a chromium build's own profile
  beside its install, not by exe name
 
 ---

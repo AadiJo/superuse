@@ -1,0 +1,254 @@
+From ebcb8b0d8eaeeddb1c03f4e6555d3f1edc75b2b6 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Sun, 11 Oct 2026 23:33:00 -0500
+Subject: [PATCH 10/12] fix(windows): keep the foreground shield until a
+ dispatched invoke returns
+
+The fg_bypass shield (the host window disabled so it cannot take foreground) ended when invoke_with_deadline returned Dispatched at its 1.5 s deadline, while the Invoke kept running. A Chromium or XAML provider that self-activates when it finally runs the action could then steal foreground. On a dispatched Invoke the shield now moves to the Invoke thread and is lowered when Invoke returns, or after 10 s at most; the tool call does not wait. Guards only re-enable a window they disabled, so a guard armed while a dispatched one still holds the window cannot leave it disabled.
+---
+ .../platform-windows/src/uia/fg_bypass.rs     | 77 +++++++++++++------
+ .../crates/platform-windows/src/uia/invoke.rs | 64 ++++++++++++++-
+ 2 files changed, 115 insertions(+), 26 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/fg_bypass.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/fg_bypass.rs
+index 34e83bd..4f50458 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/fg_bypass.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/fg_bypass.rs
+@@ -29,51 +29,82 @@
+ //! is therefore gated on `is_xaml_host_hwnd || is_chromium_target_window` and is
+ //! a no-op for other hosts.
+ 
++use std::cell::RefCell;
++
+ use windows::Win32::Foundation::HWND;
+ use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+ use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOT};
+ 
+-/// RAII guard that disables a window on construction and restores its
+-/// previous enabled-state on Drop. Always re-arms on Drop even if the
+-/// wrapped action panics.
++/// RAII guard that disables a window on construction and re-enables it on
++/// Drop, even if the wrapped action panics. It only re-enables a window it
++/// disabled itself: a guard armed while another one (an earlier call whose
++/// Invoke is still running, see [`take_active_shield`]) holds the window
++/// disabled does nothing on Drop, so overlapping guards that end in any order
++/// can't leave the window disabled. Holds the handle as an integer so a
++/// dispatched Invoke's worker thread can own it.
+ pub struct DisabledHwndGuard {
+-    hwnd: HWND,
++    hwnd: isize,
+     was_enabled: bool,
+-    armed: bool,
+ }
+ 
+ impl DisabledHwndGuard {
+     /// Disable `hwnd` for the lifetime of the guard. No-op for null HWND.
+     pub fn disable(hwnd: HWND) -> Self {
+-        if hwnd.0.is_null() {
+-            return Self {
+-                hwnd,
+-                was_enabled: false,
+-                armed: false,
+-            };
+-        }
+         // `EnableWindow` returns nonzero iff the window was *previously
+-        // disabled* — invert to get the "was enabled" state we want to
+-        // restore at Drop time.
+-        let was_disabled = unsafe { EnableWindow(hwnd, false).as_bool() };
++        // disabled*.
++        let was_enabled = !hwnd.0.is_null() && !unsafe { EnableWindow(hwnd, false).as_bool() };
+         Self {
+-            hwnd,
+-            was_enabled: !was_disabled,
+-            armed: true,
++            hwnd: hwnd.0 as isize,
++            was_enabled,
+         }
+     }
+ }
+ 
+ impl Drop for DisabledHwndGuard {
+     fn drop(&mut self) {
+-        if self.armed {
++        if self.was_enabled {
+             unsafe {
+-                let _ = EnableWindow(self.hwnd, self.was_enabled);
++                let _ = EnableWindow(HWND(self.hwnd as *mut _), true);
+             }
+         }
+     }
+ }
+ 
++thread_local! {
++    /// The shield of the innermost [`run_with_uwp_bypass`] on this thread.
++    static ACTIVE: RefCell<Option<DisabledHwndGuard>> = const { RefCell::new(None) };
++}
++
++/// Installs a shield as this thread's active one for the length of a
++/// [`run_with_uwp_bypass`] call, then drops it (unless it was taken) and
++/// puts back the outer call's shield.
++struct ActiveShield {
++    outer: Option<DisabledHwndGuard>,
++}
++
++impl ActiveShield {
++    fn install(guard: Option<DisabledHwndGuard>) -> Self {
++        Self {
++            outer: ACTIVE.with(|slot| slot.replace(guard)),
++        }
++    }
++}
++
++impl Drop for ActiveShield {
++    fn drop(&mut self) {
++        let mine = ACTIVE.with(|slot| slot.replace(self.outer.take()));
++        drop(mine);
++    }
++}
++
++/// Take the shield of the [`run_with_uwp_bypass`] call running on this
++/// thread, so it can outlive that call. `uia::invoke` uses it when an Invoke
++/// is still running at its deadline: the provider can still self-activate
++/// once it gets to the action, so the shield stays until the Invoke returns.
++pub(crate) fn take_active_shield() -> Option<DisabledHwndGuard> {
++    ACTIVE.with(|slot| slot.borrow_mut().take())
++}
++
+ /// Wrap an activation closure (Invoke / Expand / Toggle / SelectionItem.Select)
+ /// in a UWP foreground-steal bypass.
+ ///
+@@ -81,7 +112,9 @@ impl Drop for DisabledHwndGuard {
+ /// UIA element. When it identifies as an XAML host (`is_xaml_host_hwnd`), the
+ /// HWND is disabled for the duration of `action`. For non-XAML / classic
+ /// Win32 hosts the closure runs unmodified — empirically those don't
+-/// self-foreground via the input-queue path that EnableWindow gates.
++/// self-foreground via the input-queue path that EnableWindow gates. An
++/// Invoke that outlives its deadline inside `action` keeps the window
++/// disabled until it returns (see [`take_active_shield`]).
+ ///
+ /// **Known limitation, WPF Buttons / TextBoxes:** WPF's automation peers
+ /// call `UIElement.Focus()` synchronously during the UIA Invoke /
+@@ -94,7 +127,7 @@ impl Drop for DisabledHwndGuard {
+ /// activations through it. See PR #1699 bg-modality tests for the
+ /// regression guards.
+ pub fn run_with_uwp_bypass<T>(host_hwnd: isize, action: impl FnOnce() -> T) -> T {
+-    let _guard = make_guard(host_hwnd);
++    let _shield = ActiveShield::install(make_guard(host_hwnd));
+     action()
+ }
+ 
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/invoke.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/invoke.rs
+index e88c14b..3da9a24 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/invoke.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/invoke.rs
+@@ -12,16 +12,35 @@
+ //! provider may still be running the action, so callers report it as sent and
+ //! must not try another pattern or input that could fire it twice. The thread
+ //! holds no gate or lock, so later UIA calls (including ones against the new
+-//! dialog) are not queued behind it. It exits once Invoke returns.
++//! dialog) are not queued behind it. It exits once Invoke returns. A caller's
++//! `fg_bypass` shield stays up until then (at most [`DISPATCHED_SHIELD_MAX`]
++//! past the deadline), since the provider can still self-activate once it
++//! gets to the action.
+ 
+-use std::sync::{mpsc, OnceLock};
++use std::sync::{mpsc, Arc, Mutex, OnceLock};
+ use std::time::Duration;
+ 
++use super::fg_bypass::DisabledHwndGuard;
++
+ use windows::Win32::Foundation::E_FAIL;
+ use windows::Win32::UI::Accessibility::IUIAutomationInvokePattern;
+ 
+ const DEFAULT_DEADLINE: Duration = Duration::from_millis(1500);
+ 
++/// How long a dispatched Invoke may keep the caller's foreground shield
++/// after the deadline. The shielded window ignores the user's input while
++/// disabled, so a provider stuck for longer (a modal loop, UIA's own
++/// one-minute timeout) gets its window back.
++const DISPATCHED_SHIELD_MAX: Duration = Duration::from_secs(10);
++
++/// The caller's shield, handed to a dispatched Invoke's worker, which drops
++/// it when Invoke returns. A timer drops it at [`DISPATCHED_SHIELD_MAX`].
++#[derive(Default)]
++struct DispatchedShield {
++    invoke_returned: bool,
++    shield: Option<DisabledHwndGuard>,
++}
++
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum InvokeOutcome {
+     /// Invoke returned success within the deadline.
+@@ -56,8 +75,11 @@ pub(crate) fn dispatched_message(target: &str, pid: u32) -> String {
+ /// Call `pattern.Invoke()` on a fresh MTA thread and wait at most
+ /// [`invoke_deadline`]. `Err` is a failure Invoke reported within the
+ /// deadline, so callers may still try another pattern; `Dispatched` must be
+-/// reported as delivered. A caller's `fg_bypass` shield ends when this
+-/// returns, so it no longer covers an Invoke that is still running.
++/// reported as delivered. When the caller runs this inside
++/// `fg_bypass::run_with_uwp_bypass` and Invoke is still running at the
++/// deadline, the shield moves to the Invoke thread and stays up until Invoke
++/// returns, at most [`DISPATCHED_SHIELD_MAX`] later. The call itself does not
++/// wait for that.
+ pub(crate) fn invoke_with_deadline(
+     pattern: &IUIAutomationInvokePattern,
+ ) -> windows::core::Result<InvokeOutcome> {
+@@ -70,6 +92,8 @@ pub(crate) fn invoke_with_deadline(
+ 
+     let pattern = MtaPattern(pattern.clone());
+     let (tx, rx) = mpsc::channel();
++    let dispatched = Arc::new(Mutex::new(DispatchedShield::default()));
++    let worker_dispatched = dispatched.clone();
+     std::thread::Builder::new()
+         .name("cua-uia-invoke".into())
+         .spawn(move || {
+@@ -79,6 +103,13 @@ pub(crate) fn invoke_with_deadline(
+             // capture the non-Send interface by itself.
+             let pattern = pattern;
+             let result = unsafe { pattern.0.Invoke() };
++            // Lower the shield a late Invoke was handed (outside the lock).
++            let shield = {
++                let mut held = worker_dispatched.lock().unwrap();
++                held.invoke_returned = true;
++                held.shield.take()
++            };
++            drop(shield);
+             if let Err(mpsc::SendError(late)) = tx.send(result) {
+                 tracing::info!(
+                     target: "uia_invoke",
+@@ -99,6 +130,7 @@ pub(crate) fn invoke_with_deadline(
+                 "UIA Invoke still running after {}ms; reporting it as dispatched",
+                 deadline.as_millis()
+             );
++            keep_shield_until_return(&dispatched);
+             Ok(InvokeOutcome::Dispatched)
+         }
+         Err(mpsc::RecvTimeoutError::Disconnected) => Err(windows::core::Error::new(
+@@ -107,3 +139,27 @@ pub(crate) fn invoke_with_deadline(
+         )),
+     }
+ }
++
++/// Hand the caller's active shield, if any, to the Invoke still running, and
++/// start the timer that bounds it. If Invoke returned in the meantime the
++/// shield is simply dropped here.
++fn keep_shield_until_return(dispatched: &Arc<Mutex<DispatchedShield>>) {
++    let Some(shield) = super::fg_bypass::take_active_shield() else {
++        return;
++    };
++    {
++        let mut held = dispatched.lock().unwrap();
++        if held.invoke_returned {
++            return;
++        }
++        held.shield = Some(shield);
++    }
++    let dispatched = dispatched.clone();
++    let _ = std::thread::Builder::new()
++        .name("cua-uia-shield".into())
++        .spawn(move || {
++            std::thread::sleep(DISPATCHED_SHIELD_MAX);
++            let shield = dispatched.lock().unwrap().shield.take();
++            drop(shield);
++        });
++}

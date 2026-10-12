@@ -1,7 +1,7 @@
 From d346798a54029f571e0e7ca12995ffbf975adac3 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 21:46:31 -0500
-Subject: [PATCH 3/5] fix(windows): deliver explorer shortcuts in the
+Subject: [PATCH 03/12] fix(windows): deliver explorer shortcuts in the
  background
 
 Background hotkeys in File Explorer (Ctrl+Shift+N, Ctrl+X/V) reported

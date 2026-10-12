@@ -1,0 +1,300 @@
+From 5cca420ca9597bceda4120fd97297d7274aee6d0 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Sun, 11 Oct 2026 23:28:57 -0500
+Subject: [PATCH 08/12] feat(windows): invoke_menu takes delivery_mode and
+ never activates in the background
+
+invoke_menu activated the target whenever a menu could not be walked with posted messages: WPF and XAML hosts, and Win32 menu items missing or disabled in the static HMENU, which includes a mistyped path (the window was activated before the walk failed). invoke_menu now accepts delivery_mode like the input tools. Background, the default, never activates: those menus return background_unavailable with the cause (for a Win32 menu bar, which segment did not resolve and the items it has). Foreground keeps the activate, walk, restore route. The action record reports the requested delivery.
+---
+ .../platform-windows/src/tools/impl_.rs       | 144 ++++++++++++++----
+ .../crates/platform-windows/src/win32/menu.rs |  53 +++++--
+ 2 files changed, 153 insertions(+), 44 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+index 7738d9a..4ea9e48 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+@@ -9629,50 +9629,101 @@ enum MenuForeground {
+     Activated { assisted_retry: bool },
+ }
+ 
+-/// Run a menu path on top-level `hwnd_value`, taking foreground only where
+-/// the menu needs it. Blocking; shared by `invoke_menu` and by `click` on a
+-/// closed drop-down item.
++/// Why [`run_menu_path`] did not run the command.
++enum MenuPathError {
++    /// The walk failed: a segment is missing, ambiguous or disabled.
++    Failed(String),
++    /// Background delivery was requested, but this menu can only be walked
++    /// with the window active. Nothing was sent and foreground is untouched.
++    NeedsActivation(String),
++}
++
++/// Run a menu path on top-level `hwnd_value`. Blocking.
+ /// - Win32 menu bar: post the item's `WM_COMMAND` (`win32::menu`).
+ /// - Other menus of classic windows (WinForms MenuStrip): posted clicks
+ ///   (`uia::menu_walks_in_background`).
+ /// - Everything else (WPF, XAML, a Win32 menu whose path only exists once
+-///   opened): activate the window, walk the menu through UIA, then restore
+-///   the previous foreground.
++///   opened): the menu only opens while the window is active. With
++///   `delivery_mode` foreground, activate the window, walk the menu through
++///   UIA, then restore the previous foreground. With background (the
++///   default), refuse before touching foreground.
++/// A window that is already foreground is walked without activation either way.
+ fn run_menu_path(
+     hwnd_value: u64,
+     path: &[String],
+-) -> Result<(MenuForeground, crate::uia::MenuActivation), String> {
++    delivery: crate::input::delivery::DeliveryMode,
++) -> Result<(MenuForeground, crate::uia::MenuActivation), MenuPathError> {
++    use crate::win32::menu::MenuMiss;
+     use windows::Win32::Foundation::HWND;
+     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+-    if let Some(id) = crate::win32::menu::resolve_command(hwnd_value, path) {
+-        let mut pid = 0_u32;
+-        unsafe {
+-            windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+-                HWND(hwnd_value as *mut _),
+-                Some(&mut pid),
+-            )
+-        };
+-        let watch = crate::uia::activate::WindowWatch::start(pid);
+-        crate::win32::menu::post_command(hwnd_value, id).map_err(|error| error.to_string())?;
+-        let changes = watch.settle();
+-        return Ok((
+-            MenuForeground::Untouched,
+-            crate::uia::MenuActivation::Command(id, changes),
+-        ));
+-    }
++    let static_miss = match crate::win32::menu::resolve_command(hwnd_value, path) {
++        Ok(id) => {
++            let mut pid = 0_u32;
++            unsafe {
++                windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
++                    HWND(hwnd_value as *mut _),
++                    Some(&mut pid),
++                )
++            };
++            let watch = crate::uia::activate::WindowWatch::start(pid);
++            crate::win32::menu::post_command(hwnd_value, id)
++                .map_err(|error| MenuPathError::Failed(error.to_string()))?;
++            let changes = watch.settle();
++            return Ok((
++                MenuForeground::Untouched,
++                crate::uia::MenuActivation::Command(id, changes),
++            ));
++        }
++        Err(MenuMiss::NoMenuBar) => None,
++        Err(MenuMiss::Unresolved(reason)) => Some(reason),
++    };
+     let hwnd = HWND(hwnd_value as *mut _);
+     let prior = unsafe { GetForegroundWindow() };
+     if prior == hwnd || crate::uia::menu_walks_in_background(hwnd_value) {
+         return crate::uia::invoke_menu_path(hwnd_value, path)
+-            .map(|invoked| (MenuForeground::Untouched, invoked));
++            .map(|invoked| (MenuForeground::Untouched, invoked))
++            .map_err(MenuPathError::Failed);
++    }
++    if delivery != crate::input::delivery::DeliveryMode::Foreground {
++        return Err(MenuPathError::NeedsActivation(match static_miss {
++            Some(reason) => format!(
++                "{reason} in the window's Win32 menu bar; the app may only fill that menu in \
++                 when it opens, and it only opens while the window is active"
++            ),
++            None => format!(
++                "menus of this window (class '{}') only open while it is active",
++                crate::input::delivery::read_class_name(hwnd_value)
++            ),
++        }));
+     }
+-    let assisted_retry = activate_window_for_menu(hwnd)?;
++    let assisted_retry = activate_window_for_menu(hwnd).map_err(MenuPathError::Failed)?;
+     std::thread::sleep(std::time::Duration::from_millis(100));
+     let result = crate::uia::invoke_menu_path(hwnd_value, path);
+     if !prior.0.is_null() {
+         let _ = unsafe { crate::input::force_foreground_attached(prior) };
+     }
+-    result.map(|invoked| (MenuForeground::Activated { assisted_retry }, invoked))
++    result
++        .map(|invoked| (MenuForeground::Activated { assisted_retry }, invoked))
++        .map_err(MenuPathError::Failed)
++}
++
++/// `background_unavailable` for a menu that needs the window active.
++fn menu_background_unavailable(hwnd: u64, path: &[String], cause: String) -> ToolResult {
++    cua_driver_core::delivery::background_unavailable_result(
++        format!(
++            "invoke_menu cannot run {} without activating the window: {cause}. Nothing was \
++             sent and foreground was not changed. Retry with delivery_mode:\"foreground\" to \
++             activate the window for the walk and restore the previous foreground afterwards.",
++            path.join(" > ")
++        ),
++        "background_unavailable",
++        "this menu only opens while its window is active; retry with \
++         delivery_mode:\"foreground\".",
++        json!({
++            "target_class": crate::input::delivery::read_class_name(hwnd),
++            "cause": cause,
++        }),
++    )
+ }
+ 
+ #[async_trait]
+@@ -9681,10 +9732,25 @@ impl Tool for InvokeMenuTool {
+         INVOKE_MENU_DEF.get_or_init(|| {
+             let contract =
+                 cua_driver_contract::tool_contract("invoke_menu").expect("invoke_menu contract");
++            // The portable contract plus Windows' `delivery_mode`: activating
++            // the window is a foreground change, so it is opt-in like the
++            // input tools'.
++            let mut input_schema = contract.input_schema;
++            input_schema["properties"]["delivery_mode"] =
++                crate::input::delivery::delivery_mode_schema();
+             ToolDef {
+                 name: contract.name,
+-                description: contract.description,
+-                input_schema: contract.input_schema,
++                description: format!(
++                    "{} On Windows, `delivery_mode` decides whether the window may be \
++                     activated. \"background\" (default) never activates it: Win32 menu bars \
++                     get the item's WM_COMMAND and classic (WinForms) menus get posted clicks; \
++                     menus that only open while the window is active (WPF, XAML, Win32 items \
++                     missing or disabled in the static menu) return background_unavailable. \
++                     \"foreground\" activates the window for the walk and restores the \
++                     previous foreground.",
++                    contract.description
++                ),
++                input_schema,
+                 read_only: contract.annotations.read_only,
+                 destructive: contract.annotations.destructive,
+                 idempotent: contract.annotations.idempotent,
+@@ -9697,7 +9763,8 @@ impl Tool for InvokeMenuTool {
+         use windows::Win32::Foundation::HWND;
+         use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+ 
+-        let input: InvokeMenuInput = match parse_typed_input("invoke_menu", args) {
++        let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
++        let input: InvokeMenuInput = match parse_typed_projection("invoke_menu", &args) {
+             Ok(input) => input,
+             Err(result) => return result,
+         };
+@@ -9718,10 +9785,18 @@ impl Tool for InvokeMenuTool {
+ 
+         // `HWND` wraps a raw pointer and is intentionally not `Send`, so the
+         // blocking worker gets the integer handle.
+-        let outcome = tokio::task::spawn_blocking(move || run_menu_path(hwnd_value, &path)).await;
++        let walked = path.clone();
++        let outcome =
++            tokio::task::spawn_blocking(move || run_menu_path(hwnd_value, &walked, delivery))
++                .await;
+         match outcome {
+-            Ok(Ok((foreground, invoked))) => menu_path_result(&invoked, foreground, input.pid),
+-            Ok(Err(error)) => menu_refusal(error),
++            Ok(Ok((foreground, invoked))) => {
++                menu_path_result(&invoked, foreground, input.pid, delivery)
++            }
++            Ok(Err(MenuPathError::Failed(error))) => menu_refusal(error),
++            Ok(Err(MenuPathError::NeedsActivation(cause))) => {
++                menu_background_unavailable(hwnd_value, &path, cause)
++            }
+             Err(error) => menu_refusal(format!("invoke_menu: blocking task failed: {error}")),
+         }
+     }
+@@ -9732,6 +9807,7 @@ fn menu_path_result(
+     invoked: &crate::uia::MenuActivation,
+     foreground: MenuForeground,
+     pid: u32,
++    delivery: crate::input::delivery::DeliveryMode,
+ ) -> ToolResult {
+     use crate::uia::invoke::InvokeOutcome;
+     use crate::uia::MenuActivation;
+@@ -9770,7 +9846,11 @@ fn menu_path_result(
+                 }
+                 MenuActivation::Uia(_) => ActionTransport::WindowsUiaInvoke,
+             },
+-            RequestedDelivery::Foreground,
++            if delivery == crate::input::delivery::DeliveryMode::Foreground {
++                RequestedDelivery::Foreground
++            } else {
++                RequestedDelivery::Background
++            },
+         )
+         .actual_delivery(match foreground {
+             MenuForeground::Untouched => ActualDelivery::Background,
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/win32/menu.rs b/libs/cua-driver/rust/crates/platform-windows/src/win32/menu.rs
+index cbc8835..30c1aa3 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/win32/menu.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/win32/menu.rs
+@@ -64,30 +64,59 @@ unsafe fn items(menu: HMENU) -> Vec<Item> {
+         .collect()
+ }
+ 
++/// Why [`resolve_command`] found no command to post.
++#[derive(Debug)]
++pub enum MenuMiss {
++    /// The window has no Win32 menu bar.
++    NoMenuBar,
++    /// The path does not resolve uniquely to an enabled command in the static
++    /// menu, for example a submenu the app fills in only when it opens. Says
++    /// which segment failed and why.
++    Unresolved(String),
++}
++
+ /// Command id of the enabled leaf item at `path` in `hwnd`'s menu bar.
+-/// `None` when the window has no Win32 menu bar or the path does not resolve
+-/// uniquely to an enabled command in it (for example a submenu the app fills
+-/// in only when it opens); the caller then walks the menu through UIA.
+-pub fn resolve_command(hwnd: u64, path: &[String]) -> Option<u32> {
++/// On a miss the caller walks the menu through UIA, which needs the window
++/// active when it has a Win32 menu bar.
++pub fn resolve_command(hwnd: u64, path: &[String]) -> Result<u32, MenuMiss> {
+     let mut menu = unsafe { GetMenu(HWND(hwnd as *mut _)) };
++    if menu.0.is_null() {
++        return Err(MenuMiss::NoMenuBar);
++    }
++    let unresolved = |problem: String| Err(MenuMiss::Unresolved(problem));
++    let mut parent = "the menu bar".to_owned();
+     for (depth, segment) in path.iter().enumerate() {
+         if menu.0.is_null() {
+-            return None;
++            return unresolved(format!("{parent} has no submenu"));
+         }
+         let items = unsafe { items(menu) };
+         let mut matching = items.iter().filter(|item| item.text == *segment);
+-        let item = matching.next()?;
+-        if matching.next().is_some() || !item.enabled {
+-            return None;
++        let Some(item) = matching.next() else {
++            let names: Vec<&str> = items.iter().map(|item| item.text.as_str()).collect();
++            return unresolved(format!(
++                "\"{segment}\" is not an item of {parent} (items: {})",
++                names.join(", ")
++            ));
++        };
++        if matching.next().is_some() {
++            return unresolved(format!(
++                "\"{segment}\" names more than one item of {parent}"
++            ));
++        }
++        if !item.enabled {
++            return unresolved(format!("\"{segment}\" is disabled"));
+         }
+         let last = depth + 1 == path.len();
+         match (last, item.submenu.0.is_null()) {
+-            (true, true) => return Some(item.id),
+-            (true, false) => return None,
+-            (false, _) => menu = item.submenu,
++            (true, true) => return Ok(item.id),
++            (true, false) => return unresolved(format!("\"{segment}\" opens a submenu")),
++            (false, _) => {
++                menu = item.submenu;
++                parent = format!("\"{segment}\"");
++            }
+         }
+     }
+-    None
++    unresolved("the path is empty".to_owned())
+ }
+ 
+ /// Post the menu command `id` to `hwnd`, as a click on the item would.

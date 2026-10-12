@@ -132,3 +132,93 @@ Explorer's Ctrl+X and Ctrl+V take 600 to 700 ms because the hold waits for Explo
 - If a posted menu walk fails partway (a segment never shows), the drop-down it opened stays open in the background app.
 - The posted menu walk was tested on WinForms MenuStrip only. Other classic owner-drawn menus without a Win32 menu bar weren't tried.
 - When a target's UI thread doesn't get back to its message loop within 2 s of a shortcut, the call returns `background_unavailable`, but the key may still arrive later without its modifiers.
+
+## Fork v4: review fixes
+
+An external review of v3 (GPT-6.1 Sol) reported eight findings. I treated each one as a hypothesis, read the code path end to end, and fixed the real ones in the driver function that owns the decision. One commit per fix on `bcu`, patches 0006 to 0012. The binary is `tools/cua-driver-fork/v4/cua-driver.exe`, also installed as `plugin/driver/cua-driver.exe` (sha256 `d2206fc4...`).
+
+### 1. Window ownership before input (patch 0006): partly real
+
+The review said keyboard tools and pixel `click`/`drag` trust `window_id` without checking its owner. That part was wrong. `ExactPidWindowTargetGuard` (`tools/impl_.rs`) already refuses an explicit `(pid, window_id)` pair whose HWND belongs to another process, for every input tool (`window_target_mismatch`, or `window_target_not_found` for a dead handle). v3 refuses all four mismatched calls in the new `ownership` check.
+
+The real gap was token-only calls. A call with just an `element_token` used the HWND recorded in the token's snapshot, and nothing checked it. If that window closed, the input went to a dead handle, or to whatever app got the reused HWND. The guard now resolves the token's pid and window from the snapshot store and runs the same check. With v3 the `ownership` check's token call reached the input path and failed after 504 ms with "Invalid window handle". With v4 it's refused in 3 ms as `window_target_not_found`.
+
+### 2. Pixel clicks hitting another app (patch 0007)
+
+(a) Background pixel click: not real. `try_invoke_in_window_at_point` runs `FindAll` on the target HWND's own UIA subtree, so the hit test can't return another window's element. Posted clicks go to an HWND, never by coordinate, and `deepest_child` stays inside the target (`IsChild`). The coordinate injector already refuses a covered point (`target_visible_at_point`). In the `fgpoint` check, a background click at a point covered by another always-on-top window posted to the target with 0 foreground changes.
+
+(b) Foreground pixel click and drag: real. `SendInput` goes to whatever window is under the point. A point outside the target window, or under another app's always-on-top window, clicked that window. The two SendInput functions in `input/mouse.rs` now own the check, so every foreground click, double/right click, px-focus of the keyboard tools and window drag inherits it:
+
+- Before activating or raising the target: refuse when the point is outside the target's top-level rectangle (and not over one of its windows), or when another app's always-on-top window covers it and the target isn't always-on-top itself. Activation can't change either case, so these refusals don't touch foreground.
+- After the raise: the top-level window under the point must be the target's own or another top-level window of its UI thread (an open menu, drop-down or dialog). Child windows of other processes inside the target, like a WebView2 renderer, count as the target. This check polls for up to 250 ms, because `SetForegroundWindow` on another thread's window raises it only when that thread handles the activation. Without the poll, a point that activation uncovers was refused.
+- The driver's own cursor overlay sits on the point during a click. `WindowFromPoint` can return it, so for our own windows the check looks again, skipping transparent windows.
+- The refusal is `target_not_at_point`. No input is sent and the cursor isn't moved. Desktop-scope drags keep screen semantics through a separate entry point (`send_desktop_drag_synthesized`).
+
+`fgpoint` check: click and drag left of the target refused in 5 ms (the point was over Explorer's desktop window). A foreground click under the always-on-top window refused in 10 ms with that window's pid, 0 foreground changes. A foreground click at a point another window covered until activation landed. Before the pre-activation topmost check, that covered refusal cost a 270 ms activation of the target (measured at 10 ms sampling) before the driver restored foreground.
+
+### 3. `invoke_menu` activation is opt-in (patch 0008): real
+
+`run_menu_path` activated the window for every menu it couldn't walk with posted messages: WPF, XAML, and Win32 menu items missing or disabled in the static HMENU. A mistyped path is "missing", so a typo activated the window before failing. `invoke_menu` now takes `delivery_mode` like the input tools:
+
+- `background` (default): Win32 menu bars get the item's notification and classic menus get posted clicks, as in v3. Anything that needs the window active returns `background_unavailable` before touching foreground. For a Win32 menu bar the cause names the segment that didn't resolve and lists the items there ("\"Stomp\" is not an item of \"Edit\" (items: Clear, Stamp)").
+- `foreground`: v3's activate, walk, restore.
+- A window that's already foreground is walked through UIA in either mode, since nothing needs activating.
+
+The schema comes from the portable contract plus `delivery_mode`, so the registry still refuses unknown arguments. The action record now reports the requested delivery. `win32/menu.rs::resolve_command` returns why it missed instead of `None`. `menubg` check: the disabled item and the typo both return `background_unavailable` in 2 to 8 ms with 0 foreground changes. The same calls on v3 activated MenuPad twice and returned "menu path segment 1 was not found". With `foreground` the disabled item activates, fails as `menu_path_unavailable`, and restores (2 changes).
+
+### 4. COM on blocking workers (patch 0009): real but latent
+
+`activation_target`, `posted_click_target`, `closed_menu_item_path`, `pattern_click`, `select_combo_option` and `set_value_verified` call `CoCreateInstance` and run on tokio blocking workers that may never have joined COM. It works today because `walk_tree` leaves the process MTA alive (fire-and-forget `CoInitializeEx`) and a snapshot always comes first. A first call on a fresh worker before any walk would fail with `CO_E_NOTINITIALIZED`, and the modal-safe posted route would silently fall back to UIA Invoke. Each of those entry points now joins the MTA first, fire and forget, the convention `walk_tree` and `uia::scroll` use. `ComInit` (which uninitializes on drop) isn't right here, because callers hold interfaces past the call. I didn't reproduce the failure live; the regression checks pass.
+
+### 5. Foreground shield after an Invoke deadline (patch 0010): real
+
+`run_with_uwp_bypass` disables a Chromium or XAML host so it can't take foreground, and re-enabled it when `invoke_with_deadline` returned `Dispatched` at 1.5 s, with the Invoke still running. A provider that self-activates when it finally runs the action could steal foreground. Now the shield in effect is kept in a thread-local, and a dispatched Invoke takes it over: the Invoke thread lowers it when Invoke returns, or a timer does after 10 s. The tool call doesn't wait. A guard only re-enables a window it disabled itself, so a guard armed while a dispatched one still holds the window can't leave it disabled. Not exercised live: Chromium's Invoke returns at once (`edge_alert` 9 to 15 ms) and I have no XAML fixture that blocks for 1.5 s.
+
+### 6. Keyboard state around the attached hold (patch 0011): partly real
+
+The suggested fix, capturing the state before attaching, doesn't work. `GetKeyboardState` returns the calling thread's state, and before attaching that's the driver thread's own. `AttachThreadInput` resets the shared key state (documented), so the target's prior state can't be captured from another thread at all. The cleanup already ran on every path, timeouts included. What was wrong: it wrote the whole 256-byte array back, undoing any key that changed during the hold (real input to a foreground target), and wrote zeros if the state couldn't be read. Cleanup now puts back only the modifier bytes it set, and skips the restore if the state was never read. `replace` (Ctrl+S on WinForms) and `explorer` (Ctrl+Shift+N, Ctrl+X, Ctrl+V) pass. A physically held key wasn't tested.
+
+### 7. `WM_NULL` as proof the key was handled: real, documented
+
+A thread waiting in its own outgoing `SendMessage`, a COM call or `MsgWaitForMultipleObjects` answers sent messages while its posted ones stay queued, so the round trips can finish before the key is read. No API shows another thread's posted queue (`GetQueueStatus` is the caller's own). A sound barrier needs a `WH_GETMESSAGE` hook in a DLL loaded into the target process, which is far more than this needs. The round trips and v2's 120 ms floor stay, and the comment in `post_key_with_modifier_state` now states the limit.
+
+### 8. `MNS_NOTIFYBYPOS` menus (patch 0012): real
+
+The Win32 menu route always posted `WM_COMMAND`. A menu bar with `MNS_NOTIFYBYPOS` notifies its owner with `WM_MENUCOMMAND` (item position, menu handle), and such apps may not handle `WM_COMMAND` at all. The route now reads the menu bar's style with `GetMenuInfo` (the style is a menu-bar property) and posts the notification the app expects. The result names which one it sent. `apps/MenuPad.cs --bypos` sets the style and acts on `WM_MENUCOMMAND` only, like a native app with it. v3: "posted its WM_COMMAND", success, and the editor stayed empty. v4: "posted its WM_MENUCOMMAND (position 2)", editor reads `via-WM_MENUCOMMAND stamped`.
+
+### Acceptance
+
+New checks: `win32menu_bypos`, `menubg`, `ownership`, `fgpoint`. MenuPad gained `--bypos`, `--topmost`, `--at X Y` and `--title`. Every check's sampler summary now carries `foreground_sequence`, the foreground windows in order. `closedmenu` and `win32menu` accept foreground changes only among the app's own windows (`no_foreground_steal`). When the app under test launches into the foreground, its own Save As dialog takes foreground and hands it back. That's what an earlier "2 foreground changes" in `saveas` and `win32menu` turned out to be (`[TestPad, Save As, TestPad]`), not the driver.
+
+Final run, `acceptance-runs/acceptance-20261012-001403.json` (v3 on the new checks: `acceptance-20261011-234207.json`):
+
+| Check | Result | Timings | Cursor | Foreground changes |
+| --- | --- | --- | --- | --- |
+| saveas | pass | `invoke_menu` 245 ms, Save click 558 ms, dialog 118 elements | 0 px | 2, TestPad and its own dialog |
+| closedmenu | pass | 514 ms | 0 px | 0 |
+| replace | pass | `invoke_menu` 104 ms, Ctrl+S 542 ms | 0 px | 0 |
+| win32menu | pass | Stamp 418 ms, Save As 158 ms | 0 px | 2, MenuPad and its own dialog |
+| win32menu_bypos (new) | pass | 421 ms, `WM_MENUCOMMAND (position 2)` | 0 px | 0 |
+| menubg (new) | pass | refusals 8 and 2 ms, Stamp 418 ms | 0 px | 0 (foreground phase: 2, restored) |
+| ownership (new) | pass | refusals 3 to 8 ms | 0 px | 0 |
+| fgpoint (new) | pass | outside 5 ms, covered 10 ms, uncovered click 822 ms | 0 px | 0 in the refusal phases |
+| explorer | pass | 2.4 s of tool time | 0 px | 0 |
+| edge | pass | same routes as v3 | 0 px | 0 |
+| edge_alert | pass | Invoke 15 ms | 0 px | 0 |
+| calc | pass, `Display is 144` | clicks 11 to 520 ms | 0 px | 2, from `launch_app` as in v3 |
+
+### What the front end must handle
+
+- `invoke_menu` accepts `delivery_mode` (`"background"`, the default, or `"foreground"`). In background it never activates the window. Menus that need activation return `isError` with `structuredContent.code: "background_unavailable"`, `cause`, `target_class` and `escalation.recommended: "foreground"`: WPF, XAML and other non-classic hosts, plus Win32 menu-bar paths that are missing or disabled in the static menu, typos included. Retrying with `"foreground"` activates, walks and restores, so it belongs behind the same policy gate as foreground input. v3 rejects `delivery_mode` as an unknown argument.
+- `target_not_at_point` (new code, `effect: "refused"`, with `window_id`, `x`, `y`, `hit_window_id`, `hit_pid`) from foreground `click`, `double_click`, `right_click`, `drag`, and the x/y focus click of `press_key`, `hotkey` and `type_text`. No input was sent. Pick a point inside the target that nothing covers, or use an element token.
+- `window_target_mismatch` and `window_target_not_found` now also come back for token-only calls whose snapshot window has closed or changed owner. Take a fresh `get_window_state`.
+- Win32 menu results may say `WM_MENUCOMMAND (position N)` instead of `WM_COMMAND (id N)`.
+
+### Limits
+
+- The ownership and hit tests run just before input, so a window that closes or moves in the microseconds between them still races.
+- A dispatched Invoke keeps a Chromium or XAML window disabled until Invoke returns, up to 10 s, and the user can't click that window meanwhile.
+- After `AttachThreadInput` the target's earlier key state is gone. A key the user physically holds on a foreground target can read as up until its next key event.
+- A posted key can still lose its modifiers on a thread that answers sent messages while its posted queue waits (finding 7). The 120 ms floor covers the common case.
+- When the target is itself always-on-top and another always-on-top window covers the point, only activation can tell whether the target ends up above it, so a refusal there follows an activation the driver then undoes.
+- Foreground `scroll` (a SendInput wheel at the cursor) isn't hit-tested. A wheel can't click, but it can scroll whatever covers the point.

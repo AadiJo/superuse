@@ -1,6 +1,7 @@
 """Live acceptance checks for the forked Cua Driver on the Windows desktop.
 
     python3 fork/acceptance.py [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu]
+        [win32menu_bypos] [menubg] [ownership] [fgpoint]
 
 Drives the driver (BCU_CUA_DRIVER, default plugin/driver/cua-driver.exe) over
 MCP stdio against windows this script opens itself (TestPad, MenuPad from
@@ -66,6 +67,12 @@ class Run:
         return snap, rows, ms
 
 
+def code_of(r: dict) -> str | None:
+    """The structured error code of a tool result, wherever its envelope puts it."""
+    sc = r.get("structuredContent") or {}
+    return sc.get("code") or (sc.get("refusal") or {}).get("code") or (sc.get("error") or {}).get("code")
+
+
 def find(rows, role: str, name: str, contains: bool = False) -> tuple[str, str, str, str]:
     for row in rows:
         if row[1] == role and (name in row[2] if contains else row[2] == name):
@@ -88,13 +95,24 @@ def wait_window(pids: set[int], pred, timeout: float = 10) -> win.Win:
 
 
 def sampled(fn):
+    """Run `fn` under the cursor/foreground sampler. The summary adds `foreground_sequence`: each
+    foreground window in turn, so a change can be traced to the window that took it."""
     s = win.Sampler()
     s.start()
     try:
         out = fn()
     finally:
         s.stop()
-    return out, s.summary()
+    summary = s.summary()
+    seq = [smp.fg for smp in s.samples]
+    summary["foreground_sequence"] = [fg for i, fg in enumerate(seq) if i == 0 or fg != seq[i - 1]]
+    return out, summary
+
+
+def no_foreground_steal(summary: dict, own: set[int]) -> bool:
+    """No foreground change, or only among the app's own windows `own`. An app that launched into the
+    foreground hands it to its own dialog and back; that isn't the driver activating anything."""
+    return summary.get("foreground_changes") == 0 or set(summary.get("foreground_sequence", [])) <= own
 
 
 def testpad() -> win.Win:
@@ -117,6 +135,7 @@ def check_saveas(run: Run) -> dict:
         r, res["invoke_menu_ms"] = run.call("invoke_menu", {"pid": pid, "window_id": tp.hwnd, "path": ["File", "Save As..."]})
         res["invoke_menu_text"] = text_of(r)
         dlg = wait_window({pid}, lambda w: w.title == "Save As", timeout=5)
+        res["own_windows"] = [tp.hwnd, dlg.hwnd]
         _, rows, res["dialog_state_ms"] = run.state(pid, dlg.hwnd)
         res["dialog_elements"] = len(rows)
         name = find(rows, "Edit", "File name:")
@@ -150,6 +169,7 @@ def check_closedmenu(run: Run) -> dict:
         res["click_text"] = text_of(r)
         res["click_error"] = bool(r.get("isError"))
         dlg = wait_window({pid}, lambda w: w.title == "Save As", timeout=5)
+        res["own_windows"] = [tp.hwnd, dlg.hwnd]
         _, rows, res["dialog_state_ms"] = run.state(pid, dlg.hwnd)
         res["dialog_elements"] = len(rows)
         run.call("click", {"pid": pid, "element_token": find(rows, "Button", "Cancel")[0]})
@@ -160,7 +180,7 @@ def check_closedmenu(run: Run) -> dict:
     res.update(sampler=res_s,
                passed=not res["click_error"] and "closed drop-down" in res["click_text"]
                and res["click_ms"] < 1000 and res["dialog_elements"] > 0
-               and res_s.get("foreground_changes") == 0 and res_s.get("cursor_max_displacement_px") == 0)
+               and no_foreground_steal(res_s, set(res["own_windows"])) and res_s.get("cursor_max_displacement_px") == 0)
     return res
 
 
@@ -356,21 +376,28 @@ def check_explorer(run: Run) -> dict:
 MENUPAD_SRC = HERE / "apps" / "MenuPad.cs"
 
 
-def open_menupad() -> win.Win:
-    """Build fork/apps/MenuPad.cs into %TEMP%\\bcu\\MenuPad.exe (like TestPad) and start it."""
+def open_menupad(*args: str, title: str = "MenuPad") -> win.Win:
+    """Build fork/apps/MenuPad.cs into %TEMP%\\bcu\\MenuPad.exe (like TestPad) and start it with `args`
+    (Start-Process joins them with spaces, so no spaces inside one). Returns the new window titled `title`."""
     exe = win.WSL_TEMP / "MenuPad.exe"
     if not exe.exists() or exe.stat().st_mtime < MENUPAD_SRC.stat().st_mtime:
         shutil.copy(MENUPAD_SRC, win.WSL_TEMP / "MenuPad.cs")
         win.ps(f"""Remove-Item '{win.WIN_TEMP}\\MenuPad.exe' -ErrorAction SilentlyContinue
 Add-Type -TypeDefinition (Get-Content -Raw '{win.WIN_TEMP}\\MenuPad.cs') -OutputAssembly '{win.WIN_TEMP}\\MenuPad.exe' -OutputType WindowsApplication -ReferencedAssemblies System.Windows.Forms,System.Drawing""", timeout=120)
-    T.start(f"{win.WIN_TEMP}\\MenuPad.exe")
+    before = {w.hwnd for w in win.list_windows() if w.proc == "MenuPad"}
+    T.start(f"{win.WIN_TEMP}\\MenuPad.exe", *args)
     end = time.time() + 10
     while time.time() < end:
-        found = [w for w in win.list_windows(titles=True) if w.proc == "MenuPad" and w.title == "MenuPad"]
+        found = [w for w in win.list_windows(titles=True)
+                 if w.proc == "MenuPad" and w.title == title and w.hwnd not in before]
         if found:
             return found[0]
         time.sleep(0.3)
-    raise LookupError("MenuPad window not found")
+    raise LookupError(f"MenuPad window {title!r} not found")
+
+
+def stop_menupads() -> None:
+    win.ps("Stop-Process -Name MenuPad -Force -ErrorAction SilentlyContinue")
 
 
 def check_win32menu(run: Run) -> dict:
@@ -387,6 +414,7 @@ def check_win32menu(run: Run) -> dict:
         r, res["saveas_ms"] = run.call("invoke_menu", {"pid": pid, "window_id": mp.hwnd, "path": ["File", "Save As..."]})
         res["saveas_text"] = text_of(r)
         dlg = wait_window({pid}, lambda w: w.title == "Save As", timeout=5)
+        res["own_windows"] = [mp.hwnd, dlg.hwnd]
         _, rows, res["dialog_state_ms"] = run.state(pid, dlg.hwnd)
         res["dialog_elements"] = len(rows)
         r, res["cancel_ms"] = run.call("click", {"pid": pid, "element_token": find(rows, "Button", "Cancel")[0]})
@@ -396,11 +424,231 @@ def check_win32menu(run: Run) -> dict:
     try:
         res, res_s = sampled(body)
     finally:
-        win.ps("Stop-Process -Name MenuPad -Force -ErrorAction SilentlyContinue")
+        stop_menupads()
     res.update(sampler=res_s,
                passed="WM_COMMAND" in res["stamp_text"] and "stamped" in res["editor_row"]
                and "WM_COMMAND" in res["saveas_text"] and res["dialog_elements"] > 0
+               and no_foreground_steal(res_s, set(res["own_windows"])) and res_s.get("cursor_max_displacement_px") == 0)
+    return res
+
+
+# --- 6b. MNS_NOTIFYBYPOS menu bar: WM_MENUCOMMAND, not WM_COMMAND ------------
+
+def check_win32menu_bypos(run: Run) -> dict:
+    mp = open_menupad("--bypos", "--title", "MenuPad-bypos", title="MenuPad-bypos")
+    pid = mp.pid
+
+    def body() -> dict:
+        res: dict = {}
+        # Stamp is Edit's third item (Clear, separator, Stamp): position 2.
+        r, res["stamp_ms"] = run.call("invoke_menu", {"pid": pid, "window_id": mp.hwnd, "path": ["Edit", "Stamp"]})
+        res["stamp_text"] = text_of(r)
+        time.sleep(0.2)
+        _, rows, _ = run.state(pid, mp.hwnd)
+        res["editor_row"] = find(rows, "Edit", "Text editor")[3]
+        return res
+
+    try:
+        res, res_s = sampled(body)
+    finally:
+        stop_menupads()
+    res.update(sampler=res_s,
+               passed="WM_MENUCOMMAND (position 2)" in res["stamp_text"]
+               and "via-WM_MENUCOMMAND stamped" in res["editor_row"]
                and res_s.get("foreground_changes") == 0 and res_s.get("cursor_max_displacement_px") == 0)
+    return res
+
+
+# --- 6c. invoke_menu delivery_mode: background never activates ----------------
+
+def check_menubg(run: Run) -> dict:
+    mp = open_menupad()
+    pid = mp.pid
+
+    def call(name: str, args: dict, res: dict) -> None:
+        r, ms = run.call("invoke_menu", {"pid": pid, "window_id": mp.hwnd, **args})
+        res[name] = {"ms": round(ms, 1), "error": bool(r.get("isError")), "code": code_of(r), "text": text_of(r)[:300]}
+
+    def background() -> dict:
+        res: dict = {}
+        # Disabled in the static HMENU, and a typo: both need the menu opened, so the window active.
+        call("disabled", {"path": ["File", "Disabled item"]}, res)
+        call("typo", {"path": ["Edit", "Stomp"]}, res)
+        call("stamp", {"path": ["Edit", "Stamp"]}, res)
+        time.sleep(0.2)
+        _, rows, _ = run.state(pid, mp.hwnd)
+        res["editor_row"] = find(rows, "Edit", "Text editor")[3]
+        return res
+
+    def foreground() -> dict:
+        res: dict = {}
+        call("disabled_fg", {"path": ["File", "Disabled item"], "delivery_mode": "foreground"}, res)
+        time.sleep(0.5)
+        return res
+
+    try:
+        res, res_s = sampled(background)
+        res_fg, res_fg_s = sampled(foreground)
+    finally:
+        stop_menupads()
+    res.update(res_fg, sampler=res_s, sampler_foreground=res_fg_s)
+    res.update(passed=res["disabled"]["code"] == "background_unavailable"
+               and res["typo"]["code"] == "background_unavailable" and "Stomp" in res["typo"]["text"]
+               and not res["stamp"]["error"] and "stamped" in res["editor_row"]
+               and res_s.get("foreground_changes") == 0 and res_s.get("cursor_max_displacement_px") == 0
+               and res["disabled_fg"]["error"] and res["disabled_fg"]["code"] != "background_unavailable"
+               and res_fg_s.get("foreground_restored") is True)
+    return res
+
+
+# --- 7. Window ownership: a pid that doesn't own the window is refused ---------
+
+def check_ownership(run: Run) -> dict:
+    mp = open_menupad()
+    pid = mp.pid
+    other = 4  # System: owns no window, so (4, MenuPad's hwnd) is a mismatched pair
+
+    def body() -> dict:
+        res: dict = {}
+
+        def call(name: str, tool: str, args: dict) -> None:
+            r, ms = run.call(tool, args)
+            res[name] = {"ms": round(ms, 1), "error": bool(r.get("isError")), "code": code_of(r), "text": text_of(r)[:300]}
+
+        call("press_key_mismatch", "press_key", {"pid": other, "window_id": mp.hwnd, "key": "a"})
+        call("hotkey_mismatch", "hotkey", {"pid": other, "window_id": mp.hwnd, "keys": ["ctrl", "a"]})
+        call("type_text_mismatch", "type_text", {"pid": other, "window_id": mp.hwnd, "text": "x"})
+        call("click_fg_mismatch", "click", {"pid": other, "window_id": mp.hwnd, "x": 60, "y": 120,
+                                            "delivery_mode": "foreground"})
+        _, rows, _ = run.state(pid, mp.hwnd)
+        res["editor_row"] = find(rows, "Edit", "Text editor")[3]
+        token = find(rows, "Edit", "Text editor")[0]
+        # The token's window closes: its HWND is dead, and the token must not reach anything.
+        stop_menupads()
+        end = time.time() + 5
+        while time.time() < end and any(w.hwnd == mp.hwnd for w in win.list_windows()):
+            time.sleep(0.2)
+        call("token_closed_window", "press_key", {"element_token": token, "key": "a"})
+        return res
+
+    try:
+        res, res_s = sampled(body)
+    finally:
+        stop_menupads()
+    mismatches = ["press_key_mismatch", "hotkey_mismatch", "type_text_mismatch", "click_fg_mismatch"]
+    res.update(sampler=res_s,
+               passed=all(res[k]["code"] == "window_target_mismatch" for k in mismatches)
+               and res["token_closed_window"]["code"] == "window_target_not_found"
+               and re.search(r'value="[^"]', res["editor_row"]) is None  # nothing was typed
+               and res_s.get("foreground_changes") == 0 and res_s.get("cursor_max_displacement_px") == 0)
+    return res
+
+
+# --- 8. Foreground pixel input must land on the target ------------------------
+
+def bounds_of(run: Run, pid: int, hwnd: int) -> tuple[int, int, int, int]:
+    """DWM frame bounds of a window in screen pixels, from the driver's list_windows."""
+    r, _ = run.call("list_windows", {"pid": pid})
+    for w in (r.get("structuredContent") or {}).get("windows", []):
+        if w.get("window_id") == hwnd:
+            b = w.get("bounds") or w
+            return b["x"], b["y"], b["width"], b["height"]
+    raise LookupError(f"window {hwnd} not in list_windows")
+
+
+HIT_PS = r'''
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class BcuHit {
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint f);
+}
+"@
+[void][BcuHit]::SetThreadDpiAwarenessContext([IntPtr](-4))
+$p = New-Object BcuHit+POINT; $p.X = %X%; $p.Y = %Y%
+[BcuHit]::GetAncestor([BcuHit]::WindowFromPoint($p), 2).ToInt64()
+'''
+
+
+def top_window_at(x: int, y: int) -> int:
+    """Top-level window at screen pixel (x, y), as a per-monitor DPI-aware caller sees it."""
+    out = win.ps(HIT_PS.replace("%X%", str(x)).replace("%Y%", str(y))).split()
+    return int(out[-1]) if out and out[-1].lstrip("-").isdigit() else 0
+
+
+def check_fgpoint(run: Run) -> dict:
+    """A: target. B: an always-on-top window over part of A, which activating A doesn't uncover. C: an
+    ordinary window over another part of A, which activating A does uncover. C opens last, so A is
+    not the foreground window and a refusal that activated A first would show up."""
+    a = open_menupad("--at", "100", "100", "--title", "MenuPad-A", title="MenuPad-A")
+    b = open_menupad("--topmost", "--at", "360", "220", "--title", "MenuPad-B", title="MenuPad-B")
+    c = open_menupad("--at", "40", "330", "--title", "MenuPad-C", title="MenuPad-C")
+
+    def setup() -> dict:
+        ax, ay, aw, ah = bounds_of(run, a.pid, a.hwnd)
+        bx, by, bw, bh = bounds_of(run, b.pid, b.hwnd)
+        cx, cy, cw, ch = bounds_of(run, c.pid, c.hwnd)
+        # Screenshot pixels map to screen as frame origin + 1 (bitmap_to_screen); the windows are small
+        # enough that the screenshot isn't downscaled.
+        local = lambda sx, sy: (sx - ax - 1, sy - ay - 1)
+        covered = local((max(ax, bx) + min(ax + aw, bx + bw)) // 2, (max(ay, by) + min(ay + ah, by + bh)) // 2)
+        # In A and C, left of B.
+        clear_screen = ((max(ax, cx) + min(bx, ax + aw, cx + cw)) // 2, (max(ay, cy) + min(ay + ah, cy + ch)) // 2)
+        r, _ = run.call("get_window_state", {"pid": a.pid, "window_id": a.hwnd, "include_screenshot": True})
+        return {"a_bounds": [ax, ay, aw, ah], "b_bounds": [bx, by, bw, bh], "c_bounds": [cx, cy, cw, ch],
+                "covered": covered, "clear": local(*clear_screen), "clear_screen": clear_screen}
+
+    pts = setup()
+    target = {"pid": a.pid, "window_id": a.hwnd}
+
+    def call(res: dict, name: str, tool: str, args: dict) -> None:
+        r, ms = run.call(tool, {**target, **args})
+        res[name] = {"ms": round(ms, 1), "error": bool(r.get("isError")), "code": code_of(r), "text": text_of(r)[:300],
+                     "hit_pid": (r.get("structuredContent") or {}).get("hit_pid")}
+
+    def outside() -> dict:
+        res: dict = {}
+        call(res, "click_outside", "click", {"x": -40, "y": 120, "delivery_mode": "foreground"})
+        call(res, "drag_outside", "drag", {"from_x": -40, "from_y": 120, "to_x": 60, "to_y": 120,
+                                            "delivery_mode": "foreground"})
+        x, y = pts["covered"]
+        call(res, "click_covered_bg", "click", {"x": x, "y": y})
+        return res
+
+    def covered() -> dict:
+        res: dict = {}
+        x, y = pts["covered"]
+        call(res, "click_covered_fg", "click", {"x": x, "y": y, "delivery_mode": "foreground"})
+        # After a foreground call the driver polls for 3 s and restores the prior foreground whenever the
+        # target's app holds it, so a second foreground call on the same app inside that window can be undone.
+        time.sleep(3.5)
+        return res
+
+    def clear() -> dict:
+        res: dict = {"clear_hit_before": top_window_at(*pts["clear_screen"]), "a_hwnd": a.hwnd, "c_hwnd": c.hwnd}
+        x, y = pts["clear"]
+        call(res, "click_clear_fg", "click", {"x": x, "y": y, "delivery_mode": "foreground"})
+        time.sleep(0.6)
+        return res
+
+    try:
+        res, res_s = sampled(outside)
+        res_c, res_c_s = sampled(covered)
+        res_ok, res_ok_s = sampled(clear)
+    finally:
+        stop_menupads()
+    res.update(pts, **res_c, **res_ok, sampler=res_s, sampler_covered=res_c_s, sampler_clear=res_ok_s)
+    res["passed"] = (res["click_outside"]["code"] == "target_not_at_point"
+                     and res["drag_outside"]["code"] == "target_not_at_point"
+                     and not res["click_covered_bg"]["error"]
+                     and res_s.get("foreground_changes") == 0 and res_s.get("cursor_max_displacement_px") == 0
+                     and res["click_covered_fg"]["code"] == "target_not_at_point"
+                     and res["click_covered_fg"]["hit_pid"] == b.pid
+                     and res_c_s.get("cursor_max_displacement_px") == 0 and res_c_s.get("foreground_changes") == 0
+                     # another window covered the point until activation raised A, and the click wasn't refused
+                     and res["clear_hit_before"] not in (0, a.hwnd) and not res["click_clear_fg"]["error"])
     return res
 
 
@@ -435,7 +683,8 @@ def check_calc(run: Run) -> dict:
 
 CHECKS = {"saveas": check_saveas, "closedmenu": check_closedmenu, "replace": check_replace, "edge": check_edge,
           "edge_alert": check_edge_alert, "calc": check_calc, "explorer": check_explorer,
-          "win32menu": check_win32menu}
+          "win32menu": check_win32menu, "win32menu_bypos": check_win32menu_bypos, "menubg": check_menubg,
+          "ownership": check_ownership, "fgpoint": check_fgpoint}
 
 
 def main() -> None:

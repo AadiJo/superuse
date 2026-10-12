@@ -1,0 +1,119 @@
+From bc72309fabd0c8824b9bd1836599406af214edd4 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Sun, 11 Oct 2026 23:22:55 -0500
+Subject: [PATCH 06/12] fix(windows): check an element token's window against
+ its pid before input
+
+Explicit (pid, window_id) pairs were already refused when the window belongs to another process. A call that names its target only by element_token took the HWND recorded in the token's snapshot without that check, so a window that closed after the snapshot (dead or reused handle) still received input. The guard now resolves the token's pid and window and applies the same ownership check.
+---
+ .../platform-windows/src/tools/impl_.rs       | 54 +++++++++++++++----
+ 1 file changed, 43 insertions(+), 11 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+index a5dee62..45987b9 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+@@ -436,8 +436,18 @@ fn pid_window_target_candidates(pid: i64) -> Vec<WindowTargetCandidate> {
+     window_target_candidates_for_pid(crate::win32::list_windows_via_win32(Some(pid)), pid)
+ }
+ 
++/// The `(pid, window_id)` an `element_token` was minted for, from the
++/// snapshot that issued it. `None` for a call without a current token.
++type TokenWindowResolver = Arc<dyn Fn(&Value) -> Option<(u32, u64)> + Send + Sync>;
++
++/// Refuses input to a window that is not owned by the pid the call names:
++/// an explicit `(pid, window_id)` pair, or the pair an `element_token`
++/// carries. The token's window is checked too because its HWND was recorded
++/// at snapshot time: if that window has closed since, its handle may be dead
++/// or reused by another process.
+ struct ExactPidWindowTargetGuard {
+     inner: Box<dyn Tool>,
++    token_window: TokenWindowResolver,
+ }
+ 
+ fn exact_window_ownership_result(
+@@ -506,19 +516,25 @@ impl Tool for ExactPidWindowTargetGuard {
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
+         if args.get("scope").and_then(Value::as_str) != Some("desktop") {
+-            if let (Some(pid), Some(window_id)) = (
++            let explicit = match (
+                 args.get("pid").and_then(Value::as_u64),
+                 args.get("window_id").and_then(Value::as_u64),
+             ) {
+-                let Ok(pid) = u32::try_from(pid) else {
+-                    return ToolResult::error("pid is outside the Windows process-id range.")
+-                        .with_structured(json!({
+-                            "code": "window_target_mismatch",
+-                            "effect": "refused",
+-                            "pid": pid,
+-                            "window_id": window_id,
+-                        }));
+-                };
++                (Some(pid), Some(window_id)) => {
++                    let Ok(pid) = u32::try_from(pid) else {
++                        return ToolResult::error("pid is outside the Windows process-id range.")
++                            .with_structured(json!({
++                                "code": "window_target_mismatch",
++                                "effect": "refused",
++                                "pid": pid,
++                                "window_id": window_id,
++                            }));
++                    };
++                    Some((pid, window_id))
++                }
++                _ => None,
++            };
++            if let Some((pid, window_id)) = explicit.or_else(|| (self.token_window)(&args)) {
+                 let owner_pid =
+                     tokio::task::spawn_blocking(move || crate::win32::window_owner_pid(window_id))
+                         .await
+@@ -536,17 +552,19 @@ impl Tool for ExactPidWindowTargetGuard {
+ type PidWindowGuardParts = (
+     WindowTargetCandidates,
+     cua_driver_core::window_target::TokenPidResolver,
++    TokenWindowResolver,
+ );
+ 
+ fn pid_window_guarded<T: Tool + 'static>(
+     tool: T,
+-    (candidates, token_pid_resolver): &PidWindowGuardParts,
++    (candidates, token_pid_resolver, token_window): &PidWindowGuardParts,
+ ) -> Box<dyn Tool> {
+     Box::new(ExactPidWindowTargetGuard {
+         inner: Box::new(
+             PidOnlyWindowTargetGuard::new(Box::new(tool), candidates.clone())
+                 .with_token_pid_resolver(token_pid_resolver.clone()),
+         ),
++        token_window: token_window.clone(),
+     })
+ }
+ 
+@@ -556,6 +574,19 @@ fn token_pid_resolver(state: Arc<ToolState>) -> cua_driver_core::window_target::
+     Arc::new(move |args| state.snapshots.pid_for_token(args))
+ }
+ 
++/// The pid and window an `element_token`'s snapshot was taken of. Bare row
++/// numbers ("11") are not tokens of a snapshot; they need an explicit
++/// `window_id`, which the explicit check covers.
++fn token_window_resolver(state: Arc<ToolState>) -> TokenWindowResolver {
++    Arc::new(move |args| {
++        let token = args.get("element_token")?.as_str()?;
++        let (snapshot_id, _) = cua_driver_core::element_token::parse_token(token)?;
++        let pid = state.snapshots.pid_for_token(args)?;
++        let window_id = state.snapshots.window_for_snapshot(pid, snapshot_id)?;
++        Some((u32::try_from(pid).ok()?, window_id))
++    })
++}
++
+ /// Cursor sentinel for a direct platform call without lifecycle metadata.
+ /// Normal runtime dispatch supplies either a named or implicit session key.
+ pub(crate) const NO_CURSOR: &str = "";
+@@ -10709,6 +10740,7 @@ pub fn build_registry_with_provider(
+     let pid_window_candidates: PidWindowGuardParts = (
+         Arc::new(pid_window_target_candidates),
+         token_pid_resolver(state.clone()),
++        token_window_resolver(state.clone()),
+     );
+     r.register(pid_window_guarded(BringToFrontTool, &pid_window_candidates));
+     r.register(Box::new(SetWindowFrameTool));

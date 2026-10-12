@@ -1,0 +1,99 @@
+From fffd3ac3a71c7c21cd44f02f076a2a8dbf931b71 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Sun, 11 Oct 2026 23:34:58 -0500
+Subject: [PATCH 11/12] fix(windows): restore only the modifier bytes a
+ background shortcut held
+
+post_key_with_modifier_state saved the keyboard state after AttachThreadInput and wrote the whole array back afterwards. AttachThreadInput resets the shared key state, so the target's earlier state cannot be kept from another thread either way, but the full write also undid any key that changed during the hold (real input to a foreground target), and wrote a zeroed array if the state could not be read. Cleanup now puts back only the modifier bytes it set, on every path. The comment on the WM_NULL round trip now says what it cannot prove: a thread waiting in its own SendMessage or COM call answers sent messages while posted ones stay queued.
+---
+ .../platform-windows/src/input/keyboard.rs    | 53 +++++++++++++------
+ 1 file changed, 38 insertions(+), 15 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
+index 892bfcb..6eb7706 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
+@@ -472,10 +472,18 @@ fn post_key_with_modifier_state(hwnd: u64, key: &str, modifiers: &[&str]) -> Res
+     if !unsafe { AttachThreadInput(my_thread, their_thread, TRUE) }.as_bool() {
+         bail!("AttachThreadInput to the target thread failed");
+     }
+-    let mut saved = [0u8; 256];
++    // AttachThreadInput resets the shared key state (documented), so the
++    // target's earlier state can't be read or kept from this thread, and
++    // reading it before attaching would only return this thread's own state.
++    // `before` is the shared state right after attaching. Cleanup, which every
++    // path below reaches, puts back only the bytes held here, so a key that
++    // changed meanwhile (real input to a foreground target) keeps its state.
++    let mut before = None;
++    let mut forced = Vec::new();
+     let result = (|| -> Result<()> {
+-        unsafe { GetKeyboardState(&mut saved) }?;
+-        let mut held = saved;
++        let mut state = [0u8; 256];
++        unsafe { GetKeyboardState(&mut state) }?;
++        before = Some(state);
+         for vk in modifiers.iter().filter_map(|m| modifier_vk(m)) {
+             let left = match vk {
+                 v if v == VK_SHIFT => VK_LSHIFT,
+@@ -483,18 +491,24 @@ fn post_key_with_modifier_state(hwnd: u64, key: &str, modifiers: &[&str]) -> Res
+                 v if v == VK_LWIN => VK_LWIN,
+                 _ => VK_LCONTROL,
+             };
+-            held[vk.0 as usize] |= 0x80;
+-            held[left.0 as usize] |= 0x80;
++            for index in [vk.0 as usize, left.0 as usize] {
++                state[index] |= 0x80;
++                forced.push(index);
++            }
+         }
+-        unsafe { SetKeyboardState(&held) }?;
++        unsafe { SetKeyboardState(&state) }?;
+         let started = Instant::now();
+         post_key(hwnd, key, modifiers)?;
+         // The state must hold until the target has pulled the key down from
+-        // its queue. A sent WM_NULL is handled at the thread's next
+-        // GetMessage, so after round trip j at least j-1 posted messages are
+-        // done; the key down is message `modifiers.len() + 1`. A thread that
+-        // was busy (Explorer right after a navigation) is covered too. Keep
+-        // v2's 120 ms as a floor for loops that peek without removing.
++        // its queue. In a GetMessage loop a sent WM_NULL is handled at the
++        // thread's next GetMessage, so after round trip j at least j-1 posted
++        // messages are done; the key down is message `modifiers.len() + 1`.
++        // A thread that was busy (Explorer right after a navigation) is
++        // covered too. It is not proof: a thread waiting in its own outgoing
++        // SendMessage, a COM call or MsgWaitForMultipleObjects answers sent
++        // messages while its posted ones stay queued, and no API shows another
++        // thread's posted queue. Keep v2's 120 ms as a floor for that and for
++        // loops that peek without removing.
+         for _ in 0..modifiers.len() + 2 {
+             wait_for_message_loop(HWND(hwnd as *mut _))?;
+         }
+@@ -502,15 +516,24 @@ fn post_key_with_modifier_state(hwnd: u64, key: &str, modifiers: &[&str]) -> Res
+         Ok(())
+     })();
+     unsafe {
+-        let _ = SetKeyboardState(&saved);
++        if let Some(before) = before {
++            // Falls back to `before` whole if the state can't be read.
++            let mut now = before;
++            let _ = GetKeyboardState(&mut now);
++            for &index in &forced {
++                now[index] = before[index];
++            }
++            let _ = SetKeyboardState(&now);
++        }
+         let _ = AttachThreadInput(my_thread, their_thread, BOOL(0));
+     }
+     result
+ }
+ 
+-/// Return once `hwnd`'s thread is back in its message loop (a sent `WM_NULL`
+-/// was handled). Errors after 2 s or at once for a hung UI thread; the key may
+-/// then arrive later without its modifiers.
++/// Return once `hwnd`'s thread answers a sent `WM_NULL`, which usually means
++/// it is back in its message loop (see the caller for when it is not).
++/// Errors after 2 s or at once for a hung UI thread; the key may then arrive
++/// later without its modifiers.
+ fn wait_for_message_loop(hwnd: HWND) -> Result<()> {
+     use windows::Win32::UI::WindowsAndMessaging::{SendMessageTimeoutW, SMTO_ABORTIFHUNG, WM_NULL};
+     let mut reply = 0usize;

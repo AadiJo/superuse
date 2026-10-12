@@ -128,7 +128,7 @@ const rowIndex = (line: string) => Number(line.match(/\[(\d+)\]/)?.[1] ?? NaN);
 
 export class Desktop {
   out: RunOutput = { images: [], notes: new Set() };
-  private lastActionAt = 0;
+  private unsettledSince = 0; // time of the latest action whose effects no read has waited out yet
   private readonly bindings = new Map<number, Promise<Win>>();
   private readonly pages = new Map<number, Promise<Page>>();
   readonly driver: Driver;
@@ -141,8 +141,11 @@ export class Desktop {
 
   beginRun() { this.out = { images: [], notes: new Set() }; }
   note(text: string) { this.out.notes.add(text); }
-  markAction() { this.lastActionAt = Date.now(); }
-  get recentlyActed() { return Date.now() - this.lastActionAt < SETTLE_AFTER_ACTION_MS; }
+  /** An action whose effects land after the driver returns (a posted click, key or menu command). */
+  markAction() { this.unsettledSince = Date.now(); }
+  /** One settled read per action is enough: later reads see the same, already settled UI. */
+  markSettled() { this.unsettledSince = 0; }
+  get unsettled() { return Date.now() - this.unsettledSince < SETTLE_AFTER_ACTION_MS; }
 
   /** Entry point for every sandbox call: `cua.*` and `w.*` methods with JSON arguments. */
   async dispatch(method: string, args: unknown[]): Promise<unknown> {
@@ -418,15 +421,15 @@ class Win {
     return { r, tree: r.data.tree_markdown ?? r.data.diff_markdown ?? r.text };
   }
 
-  /** Accessibility tree as compact text; rows tagged [N] are actionable. Right after an action it
-   *  re-reads until two reads match (UI settled), so model code never needs to sleep. */
+  /** Accessibility tree as compact text; rows tagged [N] are actionable. The first read after an
+   *  action re-reads until two reads match (UI settled), so model code never needs to sleep. */
   async state(opts: StateOpts = {}): Promise<string> {
     // "a|b" means any of several substrings: read the whole tree and filter rows here.
     const multi = opts.query?.includes("|")
       ? new RegExp(opts.query.split("|").map((q) => q.trim().replace(/[.*+?^${}()[\]\\]/g, "\\$&")).join("|"), "i") : null;
     const readOpts = { ...opts, query: multi ? undefined : opts.query };
     let cur = await this.read(readOpts);
-    if (this.d.recentlyActed && !opts.diff) {
+    if (this.d.unsettled && !opts.diff) {
       const end = Date.now() + SETTLE_CAP_MS;
       while (Date.now() < end) {
         await sleep(SETTLE_POLL_MS);
@@ -435,6 +438,7 @@ class Win {
         cur = opts.screenshot ? { ...next, r: cur.r } : next;
         if (stable) break;
       }
+      this.d.markSettled();
       if (opts.screenshot) cur = await this.read(readOpts); // fresh frame bound to the final snapshot
     }
     this.d.out.images.push(...cur.r.images);
@@ -477,7 +481,9 @@ class Win {
 
   private async act(tool: string, args: Args) {
     const r = await this.d.driver.call(tool, args);
-    this.d.markAction();
+    // set_value writes through UIA and reads the value back before it returns, so there is
+    // nothing left to settle. Everything else is posted to the app and lands later.
+    if (tool !== "set_value") this.d.markAction();
     audit({ tool, app: this.app.key, window: this.id, delivery: args.delivery_mode ?? "background", ok: !r.isError });
     if (r.isError) fail(r, tool);
     // Surface "a dialog probably opened" from the driver so the model looks for it.
@@ -586,7 +592,7 @@ class Win {
   async screenshot() { await this.frame(true); }
 
   private async frame(show: boolean) {
-    if (this.d.recentlyActed) await sleep(250);
+    if (this.d.unsettled) await sleep(250);
     const r = await this.d.driver.call("get_window_state", { pid: this.pid, window_id: this.id, include_accessibility_tree: false, include_screenshot: true, max_image_dimension: SHOT_MAX });
     if (r.isError) fail(r, "screenshot");
     this.hasFrame = true;

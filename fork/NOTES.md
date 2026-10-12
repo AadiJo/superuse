@@ -6,9 +6,10 @@ Our local fork of [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-
 - `patches/`: our changes as one patch per commit, applied in order on top of that commit.
 - `build.sh`: clones upstream into `tools/src/cua` (gitignored) if needed, applies the patches on branch `bcu`, cross-builds from WSL and installs `plugin/driver/cua-driver.exe`.
 - `export-patches.sh`: writes new commits on `bcu` back to `patches/`.
-- `acceptance.py`: live checks against real apps. `python3 fork/acceptance.py [saveas] [replace] [edge] [edge_alert] [calc]`. Each run writes `fork/acceptance-runs/acceptance-<time>.json` with every tool call, its time, and the cursor and foreground samples. `BCU_CUA_DRIVER` picks the exe under test.
+- `acceptance.py`: live checks against real apps. `python3 fork/acceptance.py [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu]`. Each run writes `fork/acceptance-runs/acceptance-<time>.json` with every tool call, its time, and the cursor and foreground samples. `BCU_CUA_DRIVER` picks the exe under test.
+- `apps/MenuPad.cs`: a small app with a real Win32 menu bar for the `win32menu` check. `acceptance.py` builds it into `%TEMP%\bcu`.
 
-The sections below describe fork v2, the state after round 2 of the experiments (`research/08-experiments.md`).
+The sections below describe fork v2, the state after round 2 of the experiments (`research/08-experiments.md`). "Fork v3" at the end covers round 3.
 
 ## What changed
 
@@ -65,3 +66,69 @@ Before the no-sleep posted click, `invoke_menu` Save As took 561 ms. It has been
 - The Ctrl+S modifier state is held for a fixed 120 ms. A UI thread that's busy longer than that would see a bare key.
 - Many clicks take 300-470 ms, including UWP Calculator clicks on the unchanged Invoke path, while the first one or two take under 10 ms. I didn't trace it. The overlay glide is my guess.
 - The window watch only reports titled, visible top-level windows that appear within 400 ms. A slower dialog shows as "none opened", and the agent has to call `list_windows`.
+
+## Fork v3
+
+Round 3 fixes the three leftovers in `research/08-experiments.md` ("What's still slow or disruptive"). One commit each on `bcu`, patches 0003 to 0005. The binary is `tools/cua-driver-fork/v3/cua-driver.exe`, also installed as `plugin/driver/cua-driver.exe` (sha256 `6aba269e...`).
+
+### 1. Explorer shortcuts land in the background (patch 0003)
+
+v2's attached keyboard state only ran for classic window classes. Explorer's top-level window is `CabinetWClass`, so Ctrl+Shift+N reached the file view as a plain posted N, which Explorer treats as type-ahead, and the tool reported success.
+
+- `hotkey` and `press_key` now share `post_key_background` in `input/keyboard.rs`. It posts to the window that has keyboard focus on the target's UI thread (`GetGUIThreadInfo`). In Explorer that's the file view's `DirectUIHWND`, or the inline rename `Edit` after Ctrl+Shift+N or F2. Explorer's thread keeps that focus window while it sits in the background.
+- With modifiers it holds them in that thread's key state, as v2 did. The hold now lasts until `WM_NULL` round trips (`SendMessageTimeout`) show the key down was handled, so a busy thread doesn't see a bare key. v2's 120 ms stays as a floor.
+- It returns `background_unavailable` with a cause, not a false success, when focus is inside an XAML island (Explorer's address bar, search box or command bar report `InputSiteWindowClass`), when UIPI blocks the post, when the thread can't be attached, or when the thread doesn't get back to its message loop within 2 s.
+- `click` with `action: "select"` or `"toggle"` pins that UIA pattern on every window, not only Chromium. Without it a click on an Explorer file ran Invoke first, and Invoke opens the file.
+
+Checked by hand in Explorer, all in the background with 0 px and 0 foreground changes: Ctrl+Shift+N, typing the name plus Enter, F2 rename, Ctrl+X, Ctrl+V. The XAML command bar also works through UIA (Cut by Invoke; New expanded, then Folder invoked), so it's a fallback when focus sits in the XAML parts.
+
+### 2. `invoke_menu` without activation (patch 0004)
+
+A 15 ms foreground trace showed where the changes came from. Besides v2's own activate and restore, the UIA Invoke on WinForms' "File" header handed TestPad foreground rights. A TestPad window took foreground 80 ms into the call and the Save As dialog took it after that. A posted click on the MenuStrip opened the same drop-down with no foreground change.
+
+`invoke_menu` now goes through `run_menu_path` (`tools/impl_.rs`), which picks a route per window:
+
+| Menu | Route | Activation |
+| --- | --- | --- |
+| Win32 menu bar (`GetMenu` is non-null) | `win32/menu.rs` finds the path in the HMENU by item text, with mnemonics and accelerator text stripped the way UIA names them, and posts the item's `WM_COMMAND`. The menu never opens. | none |
+| Other menus of classic windows (WinForms MenuStrip) | Every hop is a posted click (`uia::menu_walks_in_background`). The next hop waits up to 1 s for its item to get a rectangle, because WinForms keeps closed items in the tree. | none |
+| WPF, XAML/UWP, and Win32 menu items that are missing or disabled in the static HMENU (apps can fill those in on `WM_INITMENUPOPUP`) | The old UIA walk | activate, walk, restore |
+
+The action record now reports `Background` delivery when the window wasn't activated, and `structuredContent.windows` lists the windows the command opened or closed. Nothing in the suite had a Win32 menu bar, so `apps/MenuPad.cs` (WinForms' legacy `MainMenu`, a real HMENU) and the `win32menu` check cover that route.
+
+### 3. Clicking items of closed drop-downs (patch 0005)
+
+`click` on a MenuItem token whose drop-down isn't shown (WinForms reports an empty rectangle) now builds the item's menu path from its UIA parent chain and walks it with posted clicks, like `invoke_menu`. The path follows the same naming rule as `invoke_menu`'s matcher (enabled MenuItem ancestors, plus Menu and MenuBar ancestors that expose a pattern), so both resolve the same item. This applies where the menu walk runs in the background: classic windows without a Win32 menu bar. Win32 menu bars don't keep closed items in the tree. Other hosts keep UIA Invoke, which doesn't need the menu open.
+
+Before, with v2 (`acceptance-20261011-220803.json`): the click blocked for 1511 ms, came back "Dispatched", and the Save As dialog's tree read as empty. After: 358 ms and a dialog with 118 elements.
+
+### Results (`acceptance-runs/acceptance-20261011-220657.json`)
+
+| Check | Result | Timings | Cursor | Foreground changes |
+| --- | --- | --- | --- | --- |
+| saveas | pass. File holds alpha/beta, title `saved.txt - TestPad` | `invoke_menu` 388 ms, dialog state 253 ms (118 elements), Save click 554 ms | 0 px | 0 (v2: 2) |
+| closedmenu (new) | pass | click on the closed "Save As..." item 358 ms, dialog state 266 ms (118 elements) | 0 px | 0 |
+| replace | pass. Text replaced, file saved | `invoke_menu` 103 ms, dialog state 78 ms, Replace All 66 ms, Ctrl+S 549 ms | 0 px | 0 (v2: 2) |
+| win32menu (new) | pass. Stamp ran, Save As opened | Edit > Stamp 426 ms (400 ms of that is the window watch when nothing opens), File > Save As... 175 ms, dialog 117 elements | 0 px | 0 |
+| explorer (new) | pass. `archive/a.bcu` and `b.bcu` on disk | Ctrl+Shift+N 155 ms, type name 84, Enter 22, select a.bcu 496, Ctrl+X 706, open archive 414, Ctrl+V 613. 2.5 s of tool time in total | 0 px | 0 |
+| edge | pass | same routes as v2 | 0 px | 0 |
+| edge_alert | pass | Invoke 10 ms | 0 px | 0 |
+| calc | pass. `Display is 144` | clicks 10 to 533 ms | 0 px | 2, restored |
+
+`invoke_menu` for Save As ranged from 299 to 476 ms over the round, depending on how fast the common dialog appears. Calculator's 2 changes come from `launch_app` re-activating the Calculator process left running by earlier checks (same pid every run). v2 shows the same 2 today (`acceptance-20261011-220723.json`; v3 reruns are `...220714` and `...220732`). The v2 report's 0 was a run where Calculator wasn't already running.
+
+Explorer's Ctrl+X and Ctrl+V take 600 to 700 ms because the hold waits for Explorer's UI thread, which is busy right after a selection change or a navigation. Repeated Ctrl+C in the same window took 130 to 150 ms.
+
+### What the front end can change
+
+- Drop the closed-menu workaround (menu path from tree indentation, then `menu()`) for WinForms-style menus. A plain click on the MenuItem token now does it in the driver. On non-classic hosts (WPF and the like) the driver still uses UIA Invoke for such items, so keep the workaround there only if it was needed.
+- Explorer: use `hotkey`, `press_key` and `type_text` in the background, and `click` with `action: "select"` to select a file without opening it. A `background_unavailable` whose cause mentions an XAML island means focus is in the address bar or search box. Selecting a file in the list moves focus back, or the command bar buttons work, before escalating to foreground.
+- `invoke_menu` no longer needs a foreground policy gate for classic and Win32-menu apps.
+
+### Limits
+
+- UIA `SetFocus` on Explorer's XAML parts, for example `press_key` with the address bar's element_token, activates Explorer. That's the existing element-focus path, unchanged here.
+- A Win32 menu item that is disabled or missing in the static HMENU takes the activate-and-walk route, since the app may only fill it in when the menu opens.
+- If a posted menu walk fails partway (a segment never shows), the drop-down it opened stays open in the background app.
+- The posted menu walk was tested on WinForms MenuStrip only. Other classic owner-drawn menus without a Win32 menu bar weren't tried.
+- When a target's UI thread doesn't get back to its message loop within 2 s of a shortcut, the call returns `background_unavailable`, but the key may still arrive later without its modifiers.

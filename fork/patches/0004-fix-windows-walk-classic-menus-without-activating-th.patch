@@ -1,0 +1,556 @@
+From a948ecbc70d7225ca0d6db6a94b7127169e36c93 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Sun, 11 Oct 2026 22:00:53 -0500
+Subject: [PATCH 4/5] fix(windows): walk classic menus without activating the
+ window
+
+invoke_menu activated the target to walk its menu and restored foreground
+afterwards, 2-4 foreground changes per dialog task. Activation also let the
+app keep foreground: a UIA Invoke on a WinForms menu header handed the app
+foreground rights, so its next dialog took over the screen.
+
+Now invoke_menu only activates where the menu needs it:
+- Win32 menu bars (HMENU): the path is resolved in the menu data and the
+  item's WM_COMMAND is posted. The menu never opens (win32/menu.rs).
+- Other menus of classic windows (WinForms MenuStrip): every hop is a
+  posted click, waiting for each drop-down to show before clicking into it.
+- Everything else (WPF, XAML, Win32 menus whose items only exist once
+  opened) keeps activate, UIA walk, restore.
+
+The record reports background delivery when the window was not activated,
+and structuredContent.windows lists windows the command opened or closed.
+---
+ .../platform-windows/src/tools/impl_.rs       | 210 ++++++++++++------
+ .../platform-windows/src/uia/activate.rs      |  11 +
+ .../crates/platform-windows/src/uia/mod.rs    |  80 ++++++-
+ .../crates/platform-windows/src/win32/menu.rs | 108 +++++++++
+ .../crates/platform-windows/src/win32/mod.rs  |   1 +
+ 5 files changed, 332 insertions(+), 78 deletions(-)
+ create mode 100644 libs/cua-driver/rust/crates/platform-windows/src/win32/menu.rs
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+index c474177..250bf24 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+@@ -4010,7 +4010,11 @@ impl Tool for ClickTool {
+                     }
+                 })
+                 .await;
+-                let host = if chromium { "Chromium element" } else { "element" };
++                let host = if chromium {
++                    "Chromium element"
++                } else {
++                    "element"
++                };
+                 return match clicked {
+                     Ok(Ok(Some((pattern, outcome)))) => background_element_click_result(
+                         match outcome {
+@@ -9523,6 +9527,61 @@ fn activate_window_for_menu(hwnd: windows::Win32::Foundation::HWND) -> Result<bo
+     }
+ }
+ 
++/// Whether [`run_menu_path`] had to activate the target window.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum MenuForeground {
++    /// Foreground was never touched (or the target already had it).
++    Untouched,
++    /// Activated for the walk, previous foreground restored afterwards.
++    Activated { assisted_retry: bool },
++}
++
++/// Run a menu path on top-level `hwnd_value`, taking foreground only where
++/// the menu needs it. Blocking; shared by `invoke_menu` and by `click` on a
++/// closed drop-down item.
++/// - Win32 menu bar: post the item's `WM_COMMAND` (`win32::menu`).
++/// - Other menus of classic windows (WinForms MenuStrip): posted clicks
++///   (`uia::menu_walks_in_background`).
++/// - Everything else (WPF, XAML, a Win32 menu whose path only exists once
++///   opened): activate the window, walk the menu through UIA, then restore
++///   the previous foreground.
++fn run_menu_path(
++    hwnd_value: u64,
++    path: &[String],
++) -> Result<(MenuForeground, crate::uia::MenuActivation), String> {
++    use windows::Win32::Foundation::HWND;
++    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
++    if let Some(id) = crate::win32::menu::resolve_command(hwnd_value, path) {
++        let mut pid = 0_u32;
++        unsafe {
++            windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
++                HWND(hwnd_value as *mut _),
++                Some(&mut pid),
++            )
++        };
++        let watch = crate::uia::activate::WindowWatch::start(pid);
++        crate::win32::menu::post_command(hwnd_value, id).map_err(|error| error.to_string())?;
++        let changes = watch.settle();
++        return Ok((
++            MenuForeground::Untouched,
++            crate::uia::MenuActivation::Command(id, changes),
++        ));
++    }
++    let hwnd = HWND(hwnd_value as *mut _);
++    let prior = unsafe { GetForegroundWindow() };
++    if prior == hwnd || crate::uia::menu_walks_in_background(hwnd_value) {
++        return crate::uia::invoke_menu_path(hwnd_value, path)
++            .map(|invoked| (MenuForeground::Untouched, invoked));
++    }
++    let assisted_retry = activate_window_for_menu(hwnd)?;
++    std::thread::sleep(std::time::Duration::from_millis(100));
++    let result = crate::uia::invoke_menu_path(hwnd_value, path);
++    if !prior.0.is_null() {
++        let _ = unsafe { crate::input::force_foreground_attached(prior) };
++    }
++    result.map(|invoked| (MenuForeground::Activated { assisted_retry }, invoked))
++}
++
+ #[async_trait]
+ impl Tool for InvokeMenuTool {
+     fn def(&self) -> &ToolDef {
+@@ -9542,14 +9601,8 @@ impl Tool for InvokeMenuTool {
+     }
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
+-        use cua_driver_core::action_record::{
+-            ActionEffect, ActionEvidence, ActionExecutionRecord, ActionTransport, ActualDelivery,
+-            EvidenceKind, RequestedDelivery,
+-        };
+         use windows::Win32::Foundation::HWND;
+-        use windows::Win32::UI::WindowsAndMessaging::{
+-            GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
+-        };
++        use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+ 
+         let input: InvokeMenuInput = match parse_typed_input("invoke_menu", args) {
+             Ok(input) => input,
+@@ -9570,76 +9623,91 @@ impl Tool for InvokeMenuTool {
+             return menu_refusal("invoke_menu: window_id does not belong to pid".into());
+         }
+ 
+-        let outcome = tokio::task::spawn_blocking(move || {
+-            // `HWND` wraps a raw pointer and is intentionally not `Send`.
+-            // Move the integer handle into the blocking worker and rebuild the
+-            // process-local wrapper there instead of carrying it across threads.
+-            let hwnd = HWND(hwnd_value as usize as *mut _);
+-            let prior = unsafe { GetForegroundWindow() };
+-            let needs_activation = prior != hwnd;
+-            let used_activation_retry = if needs_activation {
+-                activate_window_for_menu(hwnd)?
+-            } else {
+-                false
+-            };
+-            if needs_activation {
+-                std::thread::sleep(std::time::Duration::from_millis(100));
+-            }
+-            let result = crate::uia::invoke_menu_path(hwnd_value, &path);
+-            if needs_activation && !prior.0.is_null() {
+-                let _ = unsafe { crate::input::force_foreground_attached(prior) };
+-            }
+-            result.map(|invoked| (used_activation_retry, invoked))
+-        })
+-        .await;
+-
+-        use crate::uia::invoke::InvokeOutcome;
+-        use crate::uia::MenuActivation;
++        // `HWND` wraps a raw pointer and is intentionally not `Send`, so the
++        // blocking worker gets the integer handle.
++        let outcome = tokio::task::spawn_blocking(move || run_menu_path(hwnd_value, &path)).await;
+         match outcome {
+-            Ok(Ok((used_activation_retry, invoked))) => ToolResult::text(match &invoked {
+-                MenuActivation::Uia(InvokeOutcome::Returned) => "Resolved the live native menu path and dispatched its final accessibility action; verify the command's semantic effect from fresh state.".to_owned(),
+-                MenuActivation::Uia(InvokeOutcome::Dispatched) => {
+-                    crate::uia::invoke::dispatched_message("the menu path", input.pid)
+-                }
+-                MenuActivation::Posted(posted, changes) => format!(
+-                    "✅ Resolved the live menu path and clicked its final item ({}; classic message loop, no UIA call left running). {}",
+-                    posted.describe(),
+-                    changes.sentence(input.pid)
+-                ),
+-            })
+-            .with_action_record(
+-                ActionExecutionRecord::builder(
+-                    ActionEffect::Unverifiable,
+-                    match &invoked {
+-                        MenuActivation::Posted(..) => ActionTransport::WindowsPostMessage,
+-                        MenuActivation::Uia(_) => ActionTransport::WindowsUiaInvoke,
+-                    },
+-                    RequestedDelivery::Foreground,
+-                )
+-                .actual_delivery(ActualDelivery::Foreground)
+-                .evidence(ActionEvidence {
+-                    kind: EvidenceKind::NativeApiResult,
+-                    detail: match &invoked {
+-                        MenuActivation::Uia(InvokeOutcome::Returned) => "Every menu hop resolved uniquely and UI Automation accepted the final action",
+-                        MenuActivation::Uia(InvokeOutcome::Dispatched) => "Every menu hop resolved uniquely; an Invoke was still running at its deadline",
+-                        MenuActivation::Posted(..) => "Every menu hop resolved uniquely; the final item was clicked with posted window messages",
+-                    }
+-                    .into(),
+-                })
+-                .detail(if used_activation_retry {
+-                    "target activation required a bounded reserved-key foreground-lock retry"
+-                } else {
+-                    "target was already foreground or activated without a foreground-lock retry"
+-                })
+-                .build()
+-                .expect("invoke_menu record is valid"),
+-            ),
++            Ok(Ok((foreground, invoked))) => menu_path_result(&invoked, foreground, input.pid),
+             Ok(Err(error)) => menu_refusal(error),
+             Err(error) => menu_refusal(format!("invoke_menu: blocking task failed: {error}")),
+         }
+     }
+ }
+ 
++/// Tool result for a menu path run by [`run_menu_path`].
++fn menu_path_result(
++    invoked: &crate::uia::MenuActivation,
++    foreground: MenuForeground,
++    pid: u32,
++) -> ToolResult {
++    use crate::uia::invoke::InvokeOutcome;
++    use crate::uia::MenuActivation;
++    use cua_driver_core::action_record::{
++        ActionEffect, ActionEvidence, ActionExecutionRecord, ActionTransport, ActualDelivery,
++        EvidenceKind, RequestedDelivery,
++    };
++    let windows = match invoked {
++        MenuActivation::Posted(_, changes) | MenuActivation::Command(_, changes) => {
++            Some(changes.json())
++        }
++        MenuActivation::Uia(_) => None,
++    };
++    let mut result = ToolResult::text(match invoked {
++        MenuActivation::Uia(InvokeOutcome::Returned) => "Resolved the live native menu path and dispatched its final accessibility action; verify the command's semantic effect from fresh state.".to_owned(),
++        MenuActivation::Uia(InvokeOutcome::Dispatched) => {
++            crate::uia::invoke::dispatched_message("the menu path", pid)
++        }
++        MenuActivation::Posted(posted, changes) => format!(
++            "✅ Resolved the live menu path and clicked its final item ({}; classic message loop, no UIA call left running{}). {}",
++            posted.describe(),
++            if foreground == MenuForeground::Untouched { ", window left in the background" } else { "" },
++            changes.sentence(pid)
++        ),
++        MenuActivation::Command(id, changes) => format!(
++            "✅ Resolved the path in the window's Win32 menu bar and posted its WM_COMMAND (id {id}) without opening the menu or activating the window. {}",
++            changes.sentence(pid)
++        ),
++    })
++    .with_action_record(
++        ActionExecutionRecord::builder(
++            ActionEffect::Unverifiable,
++            match invoked {
++                MenuActivation::Posted(..) | MenuActivation::Command(..) => {
++                    ActionTransport::WindowsPostMessage
++                }
++                MenuActivation::Uia(_) => ActionTransport::WindowsUiaInvoke,
++            },
++            RequestedDelivery::Foreground,
++        )
++        .actual_delivery(match foreground {
++            MenuForeground::Untouched => ActualDelivery::Background,
++            MenuForeground::Activated { .. } => ActualDelivery::Foreground,
++        })
++        .evidence(ActionEvidence {
++            kind: EvidenceKind::NativeApiResult,
++            detail: match invoked {
++                MenuActivation::Uia(InvokeOutcome::Returned) => "Every menu hop resolved uniquely and UI Automation accepted the final action",
++                MenuActivation::Uia(InvokeOutcome::Dispatched) => "Every menu hop resolved uniquely; an Invoke was still running at its deadline",
++                MenuActivation::Posted(..) => "Every menu hop resolved uniquely and was clicked with posted window messages",
++                MenuActivation::Command(..) => "The path resolved uniquely to an enabled Win32 menu command, posted as WM_COMMAND",
++            }
++            .into(),
++        })
++        .detail(match foreground {
++            MenuForeground::Untouched => "target was not activated (already foreground, or walked with posted messages)",
++            MenuForeground::Activated { assisted_retry: true } => "target activation required a bounded reserved-key foreground-lock retry",
++            MenuForeground::Activated { assisted_retry: false } => "target was activated for the walk without a foreground-lock retry",
++        })
++        .build()
++        .expect("invoke_menu record is valid"),
++    );
++    if let (Some(windows), Some(Value::Object(map))) = (windows, result.structured_content.as_mut())
++    {
++        map.insert("windows".into(), windows);
++    }
++    result
++}
++
+ // ── set_window_frame ──────────────────────────────────────────────────────
+ 
+ fn outer_frame_for_visible_request(
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/activate.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/activate.rs
+index 0c3956f..8e11b78 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/activate.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/activate.rs
+@@ -191,6 +191,17 @@ pub(crate) unsafe fn activation_target(
+     if !is_activation_control(control_type) || is_submenu_parent(elem) {
+         return None;
+     }
++    posted_click_target(elem, point)
++}
++
++/// Where a posted click on `elem` goes, for any control type (the menu walk
++/// also opens submenus this way). `None` when the element's window is not
++/// classic or the element has no on-screen rectangle, e.g. an item of a
++/// closed drop-down.
++pub(crate) unsafe fn posted_click_target(
++    elem: &IUIAutomationElement,
++    point: Option<(i32, i32)>,
++) -> Option<PostedActivation> {
+     let owner = nearest_native_window(elem)?;
+     if !is_classic_window(owner.0 as u64) {
+         return None;
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+index c3e4fa1..7943bc1 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+@@ -174,20 +174,58 @@ pub enum MenuActivation {
+     /// so a modal dialog it opens cannot hold a UIA call (see `activate`),
+     /// with the windows of the app that opened or closed right after it.
+     Posted(activate::PostedActivation, activate::WindowChanges),
++    /// `WM_COMMAND` posted for a Win32 menu bar item (`crate::win32::menu`),
++    /// without opening the menu, with the windows that opened or closed.
++    Command(u32, activate::WindowChanges),
++}
++
++/// True when [`invoke_menu_path`] clicks through `hwnd`'s menus with posted
++/// messages: a classic message-loop window whose menu is not a Win32 menu bar
++/// (a WinForms MenuStrip and the like). That works while the window stays in
++/// the background. A UIA Invoke on a WinForms menu header instead lets the app
++/// take foreground, and a Win32 menu bar only opens for the active window.
++pub fn menu_walks_in_background(hwnd: u64) -> bool {
++    use windows::Win32::UI::WindowsAndMessaging::GetMenu;
++    activate::is_classic_window(hwnd)
++        && unsafe { GetMenu(windows::Win32::Foundation::HWND(hwnd as *mut _)) }
++            .0
++            .is_null()
+ }
+ 
+ unsafe fn pid_of(element: &IUIAutomationElement) -> u32 {
+     element.CurrentProcessId().map_or(0, |pid| pid as u32)
+ }
+ 
++/// Click one menu hop with posted messages (see [`menu_walks_in_background`]).
++/// Intermediate hops open their drop-down; the final one runs the command.
++unsafe fn post_menu_element(
++    element: &IUIAutomationElement,
++    final_segment: bool,
++) -> Result<MenuActivation, String> {
++    let target = if final_segment {
++        activate::activation_target(element, None)
++    } else {
++        activate::posted_click_target(element, None)
++    }
++    .ok_or("the item has no on-screen rectangle to click")?;
++    let watch = final_segment.then(|| activate::WindowWatch::start(pid_of(element)));
++    let posted = target.post().map_err(|error| error.to_string())?;
++    let changes = watch.map(|watch| watch.settle()).unwrap_or_default();
++    Ok(MenuActivation::Posted(posted, changes))
++}
++
+ unsafe fn invoke_menu_element(
+     element_ptr: usize,
+     final_segment: bool,
++    posted: bool,
+ ) -> Result<MenuActivation, String> {
+     use invoke::InvokeOutcome::Returned;
+     use MenuActivation::Uia;
+     let element =
+         std::mem::ManuallyDrop::new(IUIAutomationElement::from_raw(element_ptr as *mut _));
++    if posted {
++        return post_menu_element(&element, final_segment);
++    }
+     if !final_segment {
+         if let Ok(pattern) = element.GetCurrentPattern(UIA_ExpandCollapsePatternId) {
+             if let Ok(expand) = pattern.cast::<IUIAutomationExpandCollapsePattern>() {
+@@ -232,12 +270,34 @@ unsafe fn invoke_menu_element(
+ /// Resolve and invoke an exact application menu path from fresh UIA state at
+ /// every hop. No cached element index survives a menu mutation. Stops with
+ /// `Dispatched` as soon as an Invoke outlives its deadline (usually a modal
+-/// dialog), since the menu it would walk next is gone. On classic
+-/// message-loop windows the final item is clicked with posted messages.
++/// dialog), since the menu it would walk next is gone. When
++/// [`menu_walks_in_background`] holds, every hop is a posted click.
+ pub fn invoke_menu_path(hwnd: u64, path: &[String]) -> Result<MenuActivation, String> {
++    use std::time::{Duration, Instant};
++    let posted = menu_walks_in_background(hwnd);
++    let on_screen = |node: &UiaNode| {
++        node.rect
++            .is_some_and(|(left, top, right, bottom)| right > left && bottom > top)
++    };
+     for depth in 0..path.len() {
+-        let result = walk_tree(hwnd, None);
+-        let matches = exact_menu_path_matches(&result.nodes, &path[..=depth]);
++        // A drop-down opened by a posted click shows a moment later. WinForms
++        // keeps its items in the tree while closed, without a rectangle.
++        let deadline =
++            Instant::now() + Duration::from_millis(if posted && depth > 0 { 1000 } else { 0 });
++        let (result, matches) = loop {
++            let result = walk_tree(hwnd, None);
++            let matches = exact_menu_path_matches(&result.nodes, &path[..=depth]);
++            let ready = match matches.as_slice() {
++                [index] => !posted || on_screen(&result.nodes[*index]),
++                [] => false,
++                _ => true,
++            };
++            if ready || Instant::now() >= deadline {
++                break (result, matches);
++            }
++            unsafe { release_walk_nodes(result.nodes) };
++            std::thread::sleep(Duration::from_millis(40));
++        };
+         let target_index = match matches.as_slice() {
+             [index] => *index,
+             [] => {
+@@ -257,16 +317,22 @@ pub fn invoke_menu_path(hwnd: u64, path: &[String]) -> Result<MenuActivation, St
+                 "menu path segment {depth} is exposed only through MSAA, not UI Automation"
+             ))
+         } else {
+-            unsafe { invoke_menu_element(target.element_ptr, depth + 1 == path.len()) }
++            unsafe { invoke_menu_element(target.element_ptr, depth + 1 == path.len(), posted) }
+         };
+         unsafe { release_walk_nodes(result.nodes) };
+         let outcome = outcome.map_err(|error| format!("menu path segment {depth}: {error}"))?;
+         if depth + 1 == path.len()
+-            || !matches!(outcome, MenuActivation::Uia(invoke::InvokeOutcome::Returned))
++            || matches!(
++                outcome,
++                MenuActivation::Uia(invoke::InvokeOutcome::Dispatched)
++            )
+         {
+             return Ok(outcome);
+         }
+-        std::thread::sleep(std::time::Duration::from_millis(80));
++        if !posted {
++            // The posted walk polls for the next hop above instead.
++            std::thread::sleep(Duration::from_millis(80));
++        }
+     }
+     Ok(MenuActivation::Uia(invoke::InvokeOutcome::Returned))
+ }
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/win32/menu.rs b/libs/cua-driver/rust/crates/platform-windows/src/win32/menu.rs
+new file mode 100644
+index 0000000..cbc8835
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/win32/menu.rs
+@@ -0,0 +1,108 @@
++//! Win32 menu bars (`HMENU`) driven without opening them.
++//!
++//! A Win32 menu bar only opens for the active window, so walking it through
++//! UIA means activating the target. Its items are plain data instead: find the
++//! path by item text and post the item's `WM_COMMAND` to the window, which is
++//! what clicking it would send. No activation, no menu on screen, and a
++//! command that opens a modal dialog runs from the app's own message loop.
++
++use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
++use windows::Win32::UI::WindowsAndMessaging::{
++    GetMenu, GetMenuItemCount, GetMenuItemInfoW, PostMessageW, HMENU, MENUITEMINFOW, MFS_DISABLED,
++    MFT_SEPARATOR, MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, WM_COMMAND,
++};
++
++/// Item text as UIA names it: `&` mnemonics removed (`&&` is a literal `&`),
++/// the accelerator after a tab dropped.
++fn display_text(raw: &str) -> String {
++    let label = raw.split('\t').next().unwrap_or_default();
++    let mut out = String::with_capacity(label.len());
++    let mut chars = label.chars().peekable();
++    while let Some(ch) = chars.next() {
++        if ch == '&' {
++            if chars.peek() == Some(&'&') {
++                out.push('&');
++                chars.next();
++            }
++            continue;
++        }
++        out.push(ch);
++    }
++    out.trim().to_owned()
++}
++
++struct Item {
++    text: String,
++    id: u32,
++    submenu: HMENU,
++    enabled: bool,
++}
++
++unsafe fn items(menu: HMENU) -> Vec<Item> {
++    let count = GetMenuItemCount(menu);
++    (0..count.max(0) as u32)
++        .filter_map(|position| {
++            let mut buf = [0u16; 256];
++            let mut info = MENUITEMINFOW {
++                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
++                fMask: MIIM_STRING | MIIM_ID | MIIM_SUBMENU | MIIM_STATE | MIIM_FTYPE,
++                dwTypeData: windows::core::PWSTR(buf.as_mut_ptr()),
++                cch: buf.len() as u32,
++                ..Default::default()
++            };
++            GetMenuItemInfoW(menu, position, true, &mut info).ok()?;
++            if (info.fType & MFT_SEPARATOR).0 != 0 || info.cch == 0 {
++                return None; // separators and owner-drawn items have no text
++            }
++            Some(Item {
++                text: display_text(&String::from_utf16_lossy(&buf[..info.cch as usize])),
++                id: info.wID,
++                submenu: info.hSubMenu,
++                enabled: (info.fState & MFS_DISABLED).0 == 0,
++            })
++        })
++        .collect()
++}
++
++/// Command id of the enabled leaf item at `path` in `hwnd`'s menu bar.
++/// `None` when the window has no Win32 menu bar or the path does not resolve
++/// uniquely to an enabled command in it (for example a submenu the app fills
++/// in only when it opens); the caller then walks the menu through UIA.
++pub fn resolve_command(hwnd: u64, path: &[String]) -> Option<u32> {
++    let mut menu = unsafe { GetMenu(HWND(hwnd as *mut _)) };
++    for (depth, segment) in path.iter().enumerate() {
++        if menu.0.is_null() {
++            return None;
++        }
++        let items = unsafe { items(menu) };
++        let mut matching = items.iter().filter(|item| item.text == *segment);
++        let item = matching.next()?;
++        if matching.next().is_some() || !item.enabled {
++            return None;
++        }
++        let last = depth + 1 == path.len();
++        match (last, item.submenu.0.is_null()) {
++            (true, true) => return Some(item.id),
++            (true, false) => return None,
++            (false, _) => menu = item.submenu,
++        }
++    }
++    None
++}
++
++/// Post the menu command `id` to `hwnd`, as a click on the item would.
++pub fn post_command(hwnd: u64, id: u32) -> anyhow::Result<()> {
++    if let Some(message) = crate::input::post_message_blocked_by_uipi(hwnd) {
++        anyhow::bail!(message);
++    }
++    // wParam: high word 0 (sent by a menu), low word the item id.
++    unsafe {
++        PostMessageW(
++            HWND(hwnd as *mut _),
++            WM_COMMAND,
++            WPARAM(id as usize & 0xffff),
++            LPARAM(0),
++        )
++    }
++    .map_err(|error| anyhow::anyhow!("PostMessage(WM_COMMAND): {error}"))
++}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/win32/mod.rs b/libs/cua-driver/rust/crates/platform-windows/src/win32/mod.rs
+index f350108..ff471c4 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/win32/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/win32/mod.rs
+@@ -3,6 +3,7 @@
+ pub mod apps;
+ pub mod combo;
+ pub mod installed_apps;
++pub mod menu;
+ pub mod windows;
+ 
+ pub use apps::{list_descendants, list_processes, related_processes, ProcessInfo};

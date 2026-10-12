@@ -1,0 +1,179 @@
+From 36c1b17d136f190aca987c93f28e7e7277b3157b Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Sun, 11 Oct 2026 22:04:34 -0500
+Subject: [PATCH 5/5] fix(windows): click closed drop-down menu items through
+ their menu path
+
+A MenuItem token inside a closed drop-down (WinForms keeps those items in
+the tree, without a rectangle) had nothing to post a click to, so click
+fell back to a UIA Invoke. That blocks while the command's modal dialog is
+open, and clients had to work around it by computing the menu path
+themselves and calling invoke_menu.
+
+On windows whose menus walk in the background, click now resolves such an
+item's menu path from its UIA parent chain (same naming rules as
+invoke_menu's path matching) and walks it with posted clicks. The result
+names the path and the windows it opened or closed.
+---
+ .../platform-windows/src/tools/impl_.rs       | 45 ++++++++++-
+ .../crates/platform-windows/src/uia/mod.rs    | 77 +++++++++++++++++++
+ 2 files changed, 121 insertions(+), 1 deletion(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+index 250bf24..a5dee62 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+@@ -3299,6 +3299,37 @@ enum BackgroundElementClick {
+     },
+ }
+ 
++/// `click` on an item of a closed drop-down (`uia::closed_menu_item_path`):
++/// walk its menu path with posted clicks, as `invoke_menu` does, instead of a
++/// UIA Invoke that blocks while the command's modal dialog is open.
++fn closed_menu_click(
++    hwnd: u64,
++    pid: u32,
++    idx: usize,
++    path: &[String],
++) -> anyhow::Result<BackgroundElementClick> {
++    use crate::uia::MenuActivation;
++    let shown = path.join(" > ");
++    let invoked = crate::uia::invoke_menu_path(hwnd, path).map_err(|error| {
++        anyhow::anyhow!(
++            "[{idx}] is an item of a closed drop-down; walking its menu path {shown} failed: {error}"
++        )
++    })?;
++    let (how, changes) = match invoked {
++        MenuActivation::Posted(posted, changes) => (posted.describe(), changes),
++        MenuActivation::Command(id, changes) => (format!("posted WM_COMMAND {id}"), changes),
++        MenuActivation::Uia(_) => ("UI Automation".to_owned(), Default::default()),
++    };
++    Ok(BackgroundElementClick::Posted {
++        message: format!(
++            "✅ Clicked [{idx}], an item of a closed drop-down, by walking its menu path \
++             {shown} ({how}; window left in the background). {}",
++            changes.sentence(pid)
++        ),
++        changes,
++    })
++}
++
+ fn background_element_click_result(
+     message: String,
+     transport: ActionTransport,
+@@ -3364,7 +3395,9 @@ impl Tool for ClickTool {
+                 classic Win32 / WinForms / dialog / MFC windows, buttons, menu items, links and \
+                 tabs are clicked with posted window messages instead (BM_CLICK, or \
+                 WM_LBUTTONDOWN/UP), so a control that opens a modal dialog cannot hold the call; \
+-                the result names any window the click opened or closed. On Chromium windows \
++                the result names any window the click opened or closed. A menu item inside a \
++                closed drop-down is reached by walking its menu path, as `invoke_menu` does. \
++                On Chromium windows \
+                 the click goes through the matching UIA pattern (Invoke, Toggle, \
+                 SelectionItem.Select, ExpandCollapse). No cursor move, no focus steal. Requires a prior \
+                 `get_window_state(pid, window_id)` in this turn; the token is stale once \
+@@ -4109,6 +4142,16 @@ impl Tool for ClickTool {
+                         // so a button that opens a modal dialog would hold the
+                         // call and silence the app's UIA tree. Post the click
+                         // instead and report the windows it opened or closed.
++                        // An item of a closed drop-down has nothing on screen
++                        // to click: walk its menu path like invoke_menu.
++                        if delivery == DeliveryMode::Background
++                            && crate::uia::menu_walks_in_background(hwnd)
++                        {
++                            if let Some(path) = unsafe { crate::uia::closed_menu_item_path(&elem) } {
++                                std::mem::forget(elem);
++                                return closed_menu_click(hwnd, pid, idx, &path);
++                            }
++                        }
+                         if delivery == DeliveryMode::Background {
+                             if let Some(target) =
+                                 unsafe { crate::uia::activate::activation_target(&elem, None) }
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+index 7943bc1..30fae38 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+@@ -192,6 +192,83 @@ pub fn menu_walks_in_background(hwnd: u64) -> bool {
+             .is_null()
+ }
+ 
++/// Menu path of `elem` when it is an item of a closed drop-down: a MenuItem
++/// under another MenuItem, with no on-screen rectangle. WinForms keeps those
++/// items in the tree, and a click on one used to fall back to a UIA Invoke
++/// that blocks while the command's modal dialog is open. Names are collected
++/// like [`exact_menu_path_matches`] does (enabled menu ancestors a tree walk
++/// indexes), so [`invoke_menu_path`] resolves the same item.
++pub(crate) unsafe fn closed_menu_item_path(elem: &IUIAutomationElement) -> Option<Vec<String>> {
++    use windows::Win32::UI::Accessibility::{
++        UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
++    };
++    if elem.CurrentControlType().ok()? != UIA_MenuItemControlTypeId {
++        return None;
++    }
++    let rect = elem.CurrentBoundingRectangle().ok()?;
++    let offscreen = elem.CurrentIsOffscreen().is_ok_and(|value| value.as_bool());
++    if rect.right > rect.left && rect.bottom > rect.top && !offscreen {
++        return None;
++    }
++    let name = |element: &IUIAutomationElement| {
++        element
++            .CurrentName()
++            .map(|name| name.to_string().trim().to_owned())
++            .unwrap_or_default()
++    };
++    // A walk indexes enabled elements with a pattern; MenuItems always get one.
++    let indexed = |element: &IUIAutomationElement, is_item: bool| {
++        element
++            .CurrentIsEnabled()
++            .is_ok_and(|value| value.as_bool())
++            && (is_item
++                || [
++                    UIA_InvokePatternId,
++                    UIA_TogglePatternId,
++                    UIA_SelectionItemPatternId,
++                    UIA_ExpandCollapsePatternId,
++                    UIA_ValuePatternId,
++                    UIA_RangeValuePatternId,
++                    UIA_TextPatternId,
++                    UIA_ScrollPatternId,
++                ]
++                .iter()
++                .any(|&pattern| element.GetCurrentPattern(pattern).is_ok()))
++    };
++    let item = name(elem);
++    if item.is_empty() || !indexed(elem, true) {
++        return None;
++    }
++    let automation: IUIAutomation =
++        CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
++    let walker = automation.ControlViewWalker().ok()?;
++    let mut lineage = vec![item];
++    let mut inside_item = false;
++    let mut current = walker.GetParentElement(elem).ok();
++    for _ in 0..32 {
++        let Some(ancestor) = current else { break };
++        let control_type = ancestor.CurrentControlType().unwrap_or_default();
++        let is_item = control_type == UIA_MenuItemControlTypeId;
++        let is_menu = is_item
++            || control_type == UIA_MenuControlTypeId
++            || control_type == UIA_MenuBarControlTypeId;
++        if is_menu && indexed(&ancestor, is_item) {
++            inside_item |= is_item;
++            let ancestor_name = name(&ancestor);
++            if !ancestor_name.is_empty() {
++                lineage.push(ancestor_name);
++            }
++        }
++        current = walker.GetParentElement(&ancestor).ok();
++    }
++    if !inside_item {
++        return None;
++    }
++    lineage.reverse();
++    lineage.dedup();
++    Some(lineage)
++}
++
+ unsafe fn pid_of(element: &IUIAutomationElement) -> u32 {
+     element.CurrentProcessId().map_or(0, |pid| pid as u32)
+ }

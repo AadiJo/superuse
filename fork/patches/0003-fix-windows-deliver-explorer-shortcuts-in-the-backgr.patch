@@ -1,0 +1,326 @@
+From d346798a54029f571e0e7ca12995ffbf975adac3 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Sun, 11 Oct 2026 21:46:31 -0500
+Subject: [PATCH 3/5] fix(windows): deliver explorer shortcuts in the
+ background
+
+Background hotkeys in File Explorer (Ctrl+Shift+N, Ctrl+X/V) reported
+success and did nothing: the modifier-state technique only covered classic
+windows, so Explorer's file view got a bare N/X/V.
+
+hotkey and press_key now share post_key_background: post to the window
+that has keyboard focus on the target's UI thread (Explorer's DirectUIHWND
+or rename box), hold modifiers in that thread's key state until a WM_NULL
+round trip shows the key was handled (120 ms floor), and return
+background_unavailable when the key can't land (focus in an XAML island,
+UIPI, attach failure, busy thread).
+
+click with action "select" / "toggle" now pins that UIA pattern on any
+window, so an Explorer file can be selected without being opened.
+---
+ .../platform-windows/src/input/keyboard.rs    | 97 ++++++++++++++++---
+ .../crates/platform-windows/src/input/mod.rs  |  2 +-
+ .../platform-windows/src/tools/impl_.rs       | 74 ++++++++------
+ 3 files changed, 131 insertions(+), 42 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
+index 6632b15..892bfcb 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
+@@ -407,14 +407,51 @@ pub fn post_key(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
+     Ok(())
+ }
+ 
+-/// [`post_key`] for apps that read modifiers with `GetKeyState` (WinForms
+-/// shortcuts, `TranslateAccelerator`): posted `WM_KEYDOWN(VK_CONTROL)` does
+-/// not change the key state those read, so the shortcut silently became a
+-/// plain key. This thread attaches to the target thread's input for the
+-/// call, sets the shared keyboard state to hold `modifiers` while the posted
+-/// key is handled, then restores it and detaches (the technique AutoHotkey's
+-/// ControlSend uses). No foreground change and no system-wide key state.
+-pub fn post_key_with_modifier_state(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
++/// Input windows of XAML islands (Win11 Explorer's address bar, search box and
++/// command bar, other XAML-island hosts). Their input site only reads the
++/// system input queue, so a posted key is dropped.
++const XAML_ISLAND_INPUT_CLASSES: &[&str] = &[
++    "Microsoft.UI.Content.DesktopChildSiteBridge",
++    "InputSiteWindowClass",
++    "Windows.UI.Composition.DesktopWindowContentBridge",
++    "Windows.UI.Input.InputSite.WindowClass",
++];
++
++/// Background key delivery for Win32 targets (`hotkey`, `press_key`).
++///
++/// Posts `key` to the window that has keyboard focus on `hwnd`'s UI
++/// thread(s) (`GetGUIThreadInfo`), e.g. Explorer's file view `DirectUIHWND`
++/// or its inline rename box, and holds `modifiers` in that thread's key
++/// state while the key is handled. Explorer, WinForms and every
++/// `TranslateAccelerator` app read modifiers with `GetKeyState`, so a plain
++/// posted Ctrl+Shift+N arrived as a bare N and reported success.
++///
++/// Errors when the key cannot land: keyboard focus is inside an XAML island,
++/// UIPI blocks the post, or the target thread cannot be attached. Callers
++/// turn that into `background_unavailable` instead of a false success.
++pub fn post_key_background(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
++    let root = HWND(hwnd as *mut _);
++    let target = focused_descendant(root).unwrap_or(root);
++    if let Some(class) =
++        class_name(target).filter(|class| XAML_ISLAND_INPUT_CLASSES.contains(&class.as_str()))
++    {
++        bail!("keyboard focus is in an XAML island ({class}), which ignores posted keys");
++    }
++    if modifiers.is_empty() {
++        post_key(target.0 as u64, key, modifiers)
++    } else {
++        post_key_with_modifier_state(target.0 as u64, key, modifiers)
++    }
++}
++
++/// [`post_key`] to `hwnd` (the focus window itself) with `modifiers` held
++/// in its thread's key state: posted `WM_KEYDOWN(VK_CONTROL)` does not
++/// change the state `GetKeyState` reads. This thread attaches to the target
++/// thread's input, sets the shared keyboard state, posts the key, waits for
++/// the target to handle it, then restores the state and detaches (the
++/// technique AutoHotkey's ControlSend uses). No foreground change and no
++/// system-wide key state.
++fn post_key_with_modifier_state(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
+     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+     use windows::Win32::UI::Input::KeyboardAndMouse::{
+         GetKeyboardState, SetKeyboardState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
+@@ -450,11 +487,19 @@ pub fn post_key_with_modifier_state(hwnd: u64, key: &str, modifiers: &[&str]) ->
+             held[left.0 as usize] |= 0x80;
+         }
+         unsafe { SetKeyboardState(&held) }?;
+-        let posted = post_key(hwnd, key, modifiers);
+-        // The state must hold while the target pulls the key from its queue;
+-        // an idle UI thread does that within a few milliseconds.
+-        sleep(Duration::from_millis(120));
+-        posted
++        let started = Instant::now();
++        post_key(hwnd, key, modifiers)?;
++        // The state must hold until the target has pulled the key down from
++        // its queue. A sent WM_NULL is handled at the thread's next
++        // GetMessage, so after round trip j at least j-1 posted messages are
++        // done; the key down is message `modifiers.len() + 1`. A thread that
++        // was busy (Explorer right after a navigation) is covered too. Keep
++        // v2's 120 ms as a floor for loops that peek without removing.
++        for _ in 0..modifiers.len() + 2 {
++            wait_for_message_loop(HWND(hwnd as *mut _))?;
++        }
++        sleep(Duration::from_millis(120).saturating_sub(started.elapsed()));
++        Ok(())
+     })();
+     unsafe {
+         let _ = SetKeyboardState(&saved);
+@@ -463,6 +508,32 @@ pub fn post_key_with_modifier_state(hwnd: u64, key: &str, modifiers: &[&str]) ->
+     result
+ }
+ 
++/// Return once `hwnd`'s thread is back in its message loop (a sent `WM_NULL`
++/// was handled). Errors after 2 s or at once for a hung UI thread; the key may
++/// then arrive later without its modifiers.
++fn wait_for_message_loop(hwnd: HWND) -> Result<()> {
++    use windows::Win32::UI::WindowsAndMessaging::{SendMessageTimeoutW, SMTO_ABORTIFHUNG, WM_NULL};
++    let mut reply = 0usize;
++    let sent = unsafe {
++        SendMessageTimeoutW(
++            hwnd,
++            WM_NULL,
++            WPARAM(0),
++            LPARAM(0),
++            SMTO_ABORTIFHUNG,
++            2000,
++            Some(&mut reply),
++        )
++    };
++    if sent.0 == 0 {
++        bail!(
++            "the target's UI thread did not get back to its message loop within 2 s, so the \
++             shortcut may arrive without its modifiers"
++        );
++    }
++    Ok(())
++}
++
+ /// Press `key` (with optional `modifiers`) via `SendInput` against the system
+ /// input queue, briefly focusing `hwnd` so the keystrokes land there.
+ ///
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs
+index ea03053..c57210f 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs
+@@ -20,7 +20,7 @@ pub use inject::{
+     ForegroundLockGuard, NoActivateGuard,
+ };
+ pub use keyboard::{
+-    is_xaml_host_hwnd, post_char, post_key, post_key_with_modifier_state, post_type_text,
++    is_xaml_host_hwnd, post_char, post_key, post_key_background, post_type_text,
+     post_type_text_with_delay,
+     send_key_synthesized, send_key_synthesized_after_focus, send_text_synthesized,
+     send_text_synthesized_after_focus, wait_for_focused_descendant,
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+index 987ea64..c474177 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+@@ -3399,7 +3399,8 @@ impl Tool for ClickTool {
+                 tool). `action: \"expand\"` on an `element_token` opens the element \
+                 through UIA ExpandCollapsePattern (the dropdown half of an MSAA split \
+                 button). On Chromium windows `action` \"invoke\" / \"toggle\" / \"select\" \
+-                pins that UIA pattern; other actions use the default for the element's role. \
++                pins that UIA pattern; on other windows \"select\" / \"toggle\" do (e.g. select \
++                an Explorer file without opening it); other actions use the default. \
+                 `debug_image_out` isn't \
+                 supported yet.".into(),
+             input_schema: json!({
+@@ -3408,7 +3409,7 @@ impl Tool for ClickTool {
+                     "pid":{"type":"integer","description":"Target process ID for window scope. Optional with element_token (the token carries the pid). Omit with scope=desktop for screen-absolute coordinates from get_desktop_state."},
+                     "window_id":{"type":"integer","description":"HWND of the target window. Omit when element_token is supplied (the token carries it)."},
+                     "element_token": cua_driver_core::tool_schema::element_token_schema(),
+-                    "action":{"type":"string","description":"Accessibility action for an element_token target. \"expand\" opens the element through UIA ExpandCollapsePattern, or clicks the dropdown half of an MSAA split button. On Chromium windows \"invoke\", \"toggle\" or \"select\" (SelectionItem.Select, e.g. a <select> option) pins that UIA pattern. Omit for the default action."},
++                    "action":{"type":"string","description":"Accessibility action for an element_token target. \"expand\" opens the element through UIA ExpandCollapsePattern, or clicks the dropdown half of an MSAA split button. \"select\" (SelectionItem.Select, e.g. a <select> option or an Explorer file) and \"toggle\" pin that UIA pattern on any window; on Chromium windows \"invoke\" does too. Omit for the default action."},
+                     "capture_id":{"type":"string","minLength":1,"description":"Optional ID from get_window_state or get_desktop_state. When present, x and y are admitted against that exact capture and the ID is consumed before native dispatch."},
+                     "x":{"type":"number","description":"X in window-local screenshot pixels — same space as the PNG get_window_state returns. Must be provided together with y."},
+                     "y":{"type":"number","description":"Y in window-local screenshot pixels. Must be provided together with x."},
+@@ -3975,10 +3976,14 @@ impl Tool for ClickTool {
+             // that matches the element instead (`action` "invoke" / "toggle" /
+             // "select" pins one); the shield in `fg_bypass` keeps the browser
+             // from taking foreground. Without a pattern, refuse.
++            // `action` "select" / "toggle" pins that pattern on any UIA host:
++            // the default order invokes first, which opens an Explorer file
++            // instead of selecting it.
++            let chromium = crate::input::is_chromium_target_window(hwnd);
+             if delivery == DeliveryMode::Background
+                 && btn == "left"
+                 && count == 1
+-                && crate::input::is_chromium_target_window(hwnd)
++                && (chromium || matches!(action_req.as_deref(), Some("select" | "toggle")))
+             {
+                 let action = action_req.clone();
+                 let clicked = tokio::task::spawn_blocking({
+@@ -4005,11 +4010,12 @@ impl Tool for ClickTool {
+                     }
+                 })
+                 .await;
++                let host = if chromium { "Chromium element" } else { "element" };
+                 return match clicked {
+                     Ok(Ok(Some((pattern, outcome)))) => background_element_click_result(
+                         match outcome {
+                             crate::uia::invoke::InvokeOutcome::Returned => format!(
+-                                "✅ Performed UIA {} on Chromium element [{idx}] \
++                                "✅ Performed UIA {} on {host} [{idx}] \
+                                  (background, no foreground swap).",
+                                 pattern.name()
+                             ),
+@@ -4023,6 +4029,10 @@ impl Tool for ClickTool {
+                         pattern.transport(),
+                         vec![],
+                     ),
++                    Ok(Ok(None)) if !chromium => ToolResult::error(format!(
++                        "element [{idx}] does not expose the UIA pattern for action \"{}\"",
++                        action_req.as_deref().unwrap_or_default()
++                    )),
+                     Ok(Ok(None)) => crate::input::delivery::background_unavailable_error_with_cause(
+                         hwnd,
+                         EventKind::MouseClick,
+@@ -4038,7 +4048,7 @@ impl Tool for ClickTool {
+                     Ok(Err(error)) => crate::input::delivery::background_unavailable_error_with_cause(
+                         hwnd,
+                         EventKind::MouseClick,
+-                        format!("UIA pattern action on Chromium element [{idx}] failed: {error}"),
++                        format!("UIA pattern action on {host} [{idx}] failed: {error}"),
+                     ),
+                     Err(error) => ToolResult::error(format!("Task error: {error}")),
+                 };
+@@ -5748,11 +5758,18 @@ impl Tool for PressKeyTool {
+             move || {
+                 let _admission = &admitted;
+                 let m: Vec<&str> = mods.iter().map(String::as_str).collect();
+-                crate::input::post_key(hwnd, &key, &m)
++                crate::input::post_key_background(hwnd, &key, &m)
+             }
+         })
+         .await;
+         match result {
++            Ok(Err(e)) if delivery == DeliveryMode::Background => {
++                crate::input::delivery::background_unavailable_error_with_cause(
++                    hwnd,
++                    event_kind,
++                    e.to_string(),
++                )
++            }
+             Ok(Ok(())) => ToolResult::text(format!(
+                 "📨 Sent {key_display} to pid {raw_pid} via PostMessage (not verified). \
+                  If it didn't land, retry with delivery_mode:\"foreground\"."
+@@ -5804,20 +5821,15 @@ impl Tool for HotkeyTool {
+                 - **Modern XAML / WinUI / UWP targets** route through UI Automation: the driver \
+                 walks the target's accessibility subtree, finds a descendant whose AcceleratorKey \
+                 matches the combo, and invokes it. No focus steal, no system-queue input.\n\n\
+-                - **Legacy Win32 targets with modifiers** (Ctrl+S, Alt+Tab, etc.) route through \
+-                `SendInput` against the system input queue, with a brief `SetForegroundWindow` \
+-                swap so the events land on the target. This path is necessary because \
+-                PostMessage(WM_KEYDOWN, VK_CONTROL) does NOT update the OS-wide modifier state \
+-                visible to `GetKeyState` / `TranslateAccelerator`, so Win32 apps that bind \
+-                accelerators via `TranslateAccelerator` (LibreOffice, FAR, classic Notepad, etc.) \
+-                never see the combo as a real accelerator on the PostMessage-only path. \
+-                Trade-off: brief foreground swap (mitigated by restoring the previous foreground \
+-                after the keystrokes flush). Requires the daemon to have UIAccess integrity so \
+-                `SetForegroundWindow` is permitted — the MCP proxy auto-prefers the \
+-                `cua-driver-uia.exe` worker pipe when both daemons are running.\n\n\
+-                - **Legacy Win32 targets without modifiers** (plain `enter`, `tab`, `f5`, etc.) \
+-                route through `PostMessage(WM_KEYDOWN/UP)` — no focus steal, no need to update \
+-                modifier state.\n\n\
++                - **Win32 targets** (WinForms, dialogs, File Explorer, ...) get \
++                `PostMessage(WM_KEYDOWN/UP)` to the window that has keyboard focus on the \
++                target's UI thread (Explorer's file view or rename box, an editor child). \
++                Modifiers are held in that thread's key state while the key is handled, so \
++                `GetKeyState` / `TranslateAccelerator` shortcuts (Ctrl+S, Ctrl+Shift+N, \
++                Ctrl+X/V) fire. No focus steal. If the key can't land (focus inside an XAML \
++                island such as Explorer's address bar, UIPI), the result is \
++                `background_unavailable`. `delivery_mode:\"foreground\"` uses `SendInput` \
++                with a brief foreground swap instead.\n\n\
+                 The target does NOT need to be frontmost in any branch.\n\n\
+                 **`window_id`** (optional): explicit HWND when the pid owns more than one \
+                 window; otherwise the pid's first visible window is used.\n\n\
+@@ -6145,28 +6157,34 @@ impl Tool for HotkeyTool {
+                         }
+                         Ok(())
+                     })
+-                } else if !m.is_empty() && crate::uia::activate::is_classic_window(hwnd) {
+-                    // WinForms / TranslateAccelerator read modifiers with
+-                    // GetKeyState, which posted modifier keys do not set.
+-                    crate::input::post_key_with_modifier_state(hwnd, &key, &m)
+                 } else {
+-                    crate::input::post_key(hwnd, &key, &m)
++                    // Posted to the thread's focus window with the modifiers
++                    // in its key state (Explorer, WinForms and
++                    // TranslateAccelerator read them with GetKeyState).
++                    crate::input::post_key_background(hwnd, &key, &m)
+                 }
+             }
+         })
+         .await;
+         let path = if use_send_input {
+             "SendInput"
+-        } else if has_modifiers && crate::uia::activate::is_classic_window(hwnd) {
+-            "PostMessage with the target thread's modifier key state"
++        } else if has_modifiers {
++            "PostMessage to the focus window, modifiers held in its thread's key state"
+         } else {
+-            "PostMessage"
++            "PostMessage to the focus window"
+         };
+         match result {
+             Ok(Ok(())) => ToolResult::text(format!(
+                 "✅ Pressed {key_display} on pid {raw_pid} via {path} \
+                  (Win32 target)."
+             )),
++            Ok(Err(e)) if !use_send_input => {
++                crate::input::delivery::background_unavailable_error_with_cause(
++                    hwnd,
++                    event_kind,
++                    e.to_string(),
++                )
++            }
+             Ok(Err(e)) => ToolResult::error(e.to_string()),
+             Err(e) => ToolResult::error(format!("Task error: {e}")),
+         }

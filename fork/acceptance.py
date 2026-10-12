@@ -1,17 +1,21 @@
-"""Live acceptance checks for the fork-v2 Cua Driver on the Windows desktop.
+"""Live acceptance checks for the forked Cua Driver on the Windows desktop.
 
-    python3 fork/acceptance.py [saveas] [replace] [edge] [calc]
+    python3 fork/acceptance.py [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu]
 
-Drives v2/cua-driver.exe over MCP stdio against windows this script opens
-itself (TestPad, the throwaway-profile Edge form, Calculator), records every
-tool call with its time, samples the real cursor and foreground window, and
-writes fork/acceptance-runs/acceptance-<time>.json. Only windows of pids this script launched
-are listed or read.
+Drives the driver (BCU_CUA_DRIVER, default plugin/driver/cua-driver.exe) over
+MCP stdio against windows this script opens itself (TestPad, MenuPad from
+fork/apps, an Explorer window on %TEMP%\\bcu\\explorer_move, the throwaway-profile
+Edge form, Calculator), records every tool call with its time, samples the
+real cursor and foreground window, and writes
+fork/acceptance-runs/acceptance-<time>.json. Tool calls only target windows
+this script opened. Explorer windows share the shell's pid, so the explorer
+check matches titles in memory to find its own window and logs none of them.
 """
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -128,6 +132,35 @@ def check_saveas(run: Run) -> dict:
     res.update(sampler=res_s, file_lines=lines, title=title,
                passed=lines == ["alpha", "beta"] and title == "saved.txt - TestPad"
                and res["invoke_menu_ms"] < 500 and res["dialog_elements"] > 0)
+    return res
+
+
+# --- 1b. Click a MenuItem token of a closed drop-down ------------------------
+
+def check_closedmenu(run: Run) -> dict:
+    T.edit_saveas_setup()
+    tp = testpad()
+    pid = tp.pid
+
+    def body() -> dict:
+        res: dict = {}
+        _, rows, _ = run.state(pid, tp.hwnd)
+        # File is closed: "Save As..." is in the tree but has no rectangle.
+        r, res["click_ms"] = run.call("click", {"pid": pid, "element_token": find(rows, "MenuItem", "Save As...")[0]})
+        res["click_text"] = text_of(r)
+        res["click_error"] = bool(r.get("isError"))
+        dlg = wait_window({pid}, lambda w: w.title == "Save As", timeout=5)
+        _, rows, res["dialog_state_ms"] = run.state(pid, dlg.hwnd)
+        res["dialog_elements"] = len(rows)
+        run.call("click", {"pid": pid, "element_token": find(rows, "Button", "Cancel")[0]})
+        time.sleep(0.3)
+        return res
+
+    res, res_s = sampled(body)
+    res.update(sampler=res_s,
+               passed=not res["click_error"] and "closed drop-down" in res["click_text"]
+               and res["click_ms"] < 1000 and res["dialog_elements"] > 0
+               and res_s.get("foreground_changes") == 0 and res_s.get("cursor_max_displacement_px") == 0)
     return res
 
 
@@ -263,6 +296,114 @@ def check_edge_alert(run: Run) -> dict:
     return res
 
 
+# --- 5. File Explorer: new folder, move a file, all in the background ---------
+
+def check_explorer(run: Run) -> dict:
+    T.explorer_move_setup()
+    ew = wait_window({w.pid for w in win.list_windows() if w.proc == "explorer"},
+                     lambda w: w.cls == "CabinetWClass" and w.title.startswith("explorer_move"), timeout=10)
+    pid, hwnd = ew.pid, ew.hwnd
+    d = win.WSL_TEMP / "explorer_move"
+
+    def wait_for(pred, timeout: float = 3.0) -> bool:
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return True
+            time.sleep(0.1)
+        return False
+
+    def body() -> dict:
+        res: dict = {"steps": []}
+
+        def step(name: str, tool: str, args: dict) -> dict:
+            r, ms = run.call(tool, args)
+            res["steps"].append({"step": name, "ms": round(ms, 1), "error": bool(r.get("isError"))})
+            return r
+
+        run.state(pid, hwnd)
+        step("new folder", "hotkey", {"pid": pid, "window_id": hwnd, "keys": ["ctrl", "shift", "n"]})
+        res["new_folder_created"] = wait_for(lambda: (d / "New folder").exists())
+        step("type name", "type_text", {"pid": pid, "window_id": hwnd, "text": "archive"})
+        step("enter", "press_key", {"pid": pid, "window_id": hwnd, "key": "return"})
+        res["renamed"] = wait_for(lambda: (d / "archive").is_dir())
+        for _ in range(10):  # the view lists the renamed folder a moment after the disk does
+            _, rows, _ = run.state(pid, hwnd)
+            if any(r[1] == "ListItem" and r[2] == "archive" for r in rows):
+                break
+            time.sleep(0.2)
+        step("select a.bcu", "click", {"pid": pid, "element_token": find(rows, "ListItem", "a.bcu")[0], "action": "select"})
+        step("cut", "hotkey", {"pid": pid, "window_id": hwnd, "keys": ["ctrl", "x"]})
+        step("open archive", "click", {"pid": pid, "element_token": find(rows, "ListItem", "archive")[0]})
+        res["navigated"] = wait_for(lambda: any(w.hwnd == hwnd and w.title.startswith("archive")
+                                                for w in windows_of({pid})), timeout=5)
+        step("paste", "hotkey", {"pid": pid, "window_id": hwnd, "keys": ["ctrl", "v"]})
+        res["moved"] = wait_for(lambda: (d / "archive" / "a.bcu").exists() and not (d / "a.bcu").exists())
+        res["tool_ms_total"] = round(sum(s["ms"] for s in res["steps"]), 1)
+        return res
+
+    res, res_s = sampled(body)
+    contents = sorted(str(p.relative_to(d)).replace("\\", "/") for p in d.rglob("*"))
+    res.update(sampler=res_s, contents=contents,
+               passed=contents == ["archive", "archive/a.bcu", "b.bcu"]
+               and not any(s["error"] for s in res["steps"])
+               and res_s.get("cursor_max_displacement_px") == 0)
+    return res
+
+
+# --- 6. Win32 menu bar (HMENU): commands posted without opening the menu -----
+
+MENUPAD_SRC = HERE / "apps" / "MenuPad.cs"
+
+
+def open_menupad() -> win.Win:
+    """Build fork/apps/MenuPad.cs into %TEMP%\\bcu\\MenuPad.exe (like TestPad) and start it."""
+    exe = win.WSL_TEMP / "MenuPad.exe"
+    if not exe.exists() or exe.stat().st_mtime < MENUPAD_SRC.stat().st_mtime:
+        shutil.copy(MENUPAD_SRC, win.WSL_TEMP / "MenuPad.cs")
+        win.ps(f"""Remove-Item '{win.WIN_TEMP}\\MenuPad.exe' -ErrorAction SilentlyContinue
+Add-Type -TypeDefinition (Get-Content -Raw '{win.WIN_TEMP}\\MenuPad.cs') -OutputAssembly '{win.WIN_TEMP}\\MenuPad.exe' -OutputType WindowsApplication -ReferencedAssemblies System.Windows.Forms,System.Drawing""", timeout=120)
+    T.start(f"{win.WIN_TEMP}\\MenuPad.exe")
+    end = time.time() + 10
+    while time.time() < end:
+        found = [w for w in win.list_windows(titles=True) if w.proc == "MenuPad" and w.title == "MenuPad"]
+        if found:
+            return found[0]
+        time.sleep(0.3)
+    raise LookupError("MenuPad window not found")
+
+
+def check_win32menu(run: Run) -> dict:
+    mp = open_menupad()
+    pid = mp.pid
+
+    def body() -> dict:
+        res: dict = {}
+        r, res["stamp_ms"] = run.call("invoke_menu", {"pid": pid, "window_id": mp.hwnd, "path": ["Edit", "Stamp"]})
+        res["stamp_text"] = text_of(r)
+        time.sleep(0.2)
+        _, rows, _ = run.state(pid, mp.hwnd)
+        res["editor_row"] = find(rows, "Edit", "Text editor")[3]
+        r, res["saveas_ms"] = run.call("invoke_menu", {"pid": pid, "window_id": mp.hwnd, "path": ["File", "Save As..."]})
+        res["saveas_text"] = text_of(r)
+        dlg = wait_window({pid}, lambda w: w.title == "Save As", timeout=5)
+        _, rows, res["dialog_state_ms"] = run.state(pid, dlg.hwnd)
+        res["dialog_elements"] = len(rows)
+        r, res["cancel_ms"] = run.call("click", {"pid": pid, "element_token": find(rows, "Button", "Cancel")[0]})
+        time.sleep(0.3)
+        return res
+
+    try:
+        res, res_s = sampled(body)
+    finally:
+        win.ps("Stop-Process -Name MenuPad -Force -ErrorAction SilentlyContinue")
+    res.update(sampler=res_s,
+               passed="WM_COMMAND" in res["stamp_text"] and "stamped" in res["editor_row"]
+               and "WM_COMMAND" in res["saveas_text"] and res["dialog_elements"] > 0
+               and res_s.get("foreground_changes") == 0 and res_s.get("cursor_max_displacement_px") == 0)
+    return res
+
+
 # --- 4. Calculator (UWP regression) ------------------------------------------
 
 def check_calc(run: Run) -> dict:
@@ -292,8 +433,9 @@ def check_calc(run: Run) -> dict:
     return res
 
 
-CHECKS = {"saveas": check_saveas, "replace": check_replace, "edge": check_edge,
-          "edge_alert": check_edge_alert, "calc": check_calc}
+CHECKS = {"saveas": check_saveas, "closedmenu": check_closedmenu, "replace": check_replace, "edge": check_edge,
+          "edge_alert": check_edge_alert, "calc": check_calc, "explorer": check_explorer,
+          "win32menu": check_win32menu}
 
 
 def main() -> None:

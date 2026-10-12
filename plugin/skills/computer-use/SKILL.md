@@ -1,6 +1,6 @@
 ---
 name: computer-use
-description: Windows desktop apps through the bcu `js` tool. Use for GUI-only work in native apps (menus, dialogs, forms, Calculator, File Explorer, an Edge or Chrome window) when no CLI, API or browser tool reaches it.
+description: Windows desktop apps and the user's open browser through the bcu `js` tool. Use for GUI-only work in native apps (menus, dialogs, forms, Calculator, File Explorer) and for web pages in the user's Chrome, Edge or Helium.
 ---
 
 # Windows computer use
@@ -20,7 +20,7 @@ The task is done when the postcondition is observed, not when the last action re
 
 - **Text boxes and combo boxes.** `setValue` and `select` write the value directly and work in the background in every app type. Prefer them to `type`.
 - **Menus and modal dialogs** (Save As, Replace, Options). `w.menu("File > Save As...")`. The result notes the new window; bind it with `cua.window({pid: w.pid, title: "Save As"})`, set its fields, click its button, then check the parent window's state.
-- **Edge and Chrome pages.** Fields, selects, checkboxes and buttons work by element number. Background typing and key presses are refused in Chromium, so fill fields with `setValue`. If the page tree is empty, take `w.screenshot()` and click pixels.
+- **Web pages** (Chrome, Edge, Helium). Use the page API, not the window's tree: `const p = await w.page()` for the tab the user means, or `await w.page().newTab(url)` for your own work. Read with `p.read({query})`, act with refs from that read, and check the result with another read. Typing, keys and clicks go through DevTools in the background. `p.screenshot()` only works on the tab the user has selected: background tabs aren't painted, so read them instead. `p.select` fires script events; if a site ignores the change, set the same list with `w.select` on the window's tree. If `w.page()` is refused (the browser's DevTools are off), fall back to the window: `setValue`, `select` and `click` work on page fields, but typing and keys don't.
 - **UWP apps** (Calculator, Settings). Element clicks work; `w.type("1234*5678=")` into the window works for Calculator.
 - **File Explorer.** Shortcuts work in the background while focus is in the file list: `ctrl+shift+n` then `type("archive")` and `key("enter")` makes a folder; `click(N)` on a file selects it (`{double: true}` opens it); `ctrl+x`, open the target folder, `ctrl+v` moves it. If a key is refused because focus is in the address or search box, click a file first or use the command bar buttons. Check the result in the folder's item list.
 

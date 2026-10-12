@@ -19,7 +19,7 @@ import { Desktop } from "./desktop.ts";
 import { Policy, type Ask } from "./policy.ts";
 import { Sandbox } from "./sandbox.ts";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const TEXT_LIMIT = 20_000;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DRIVER = process.env.BCU_CUA_DRIVER ?? path.join(here, "..", "driver", "cua-driver.exe");
@@ -43,6 +43,14 @@ w.menu("File > Save As...")                  invoke a menu item by its labels (b
 w.waitFor("text", ms?)                       wait until text shows up in the tree; returns matching rows
 w.screenshot()                               attach an image of the window
 
+Web pages in Chrome, Edge, Helium and other Chromium browsers, over the browser's DevTools (background, keys included):
+w.page(tabText?) -> Page               the selected tab, or the tab whose title or URL contains tabText
+p.newTab(url) -> Page                  open your own background tab; leaves the user's tabs alone
+p.read({query?, screenshot?}) -> string  page outline, then actionable refs like [p3:12]
+p.click(ref | [x, y])   p.type(ref, "text", {replace?})   p.key("Enter" | "ctrl+a")   p.select(ref, "Pro")
+p.go(url)   p.tabs()   p.waitFor("text", ms?)   p.screenshot() (selected tab only)   p.close()  (tabs you opened)
+Refs come from the latest p.read() of that tab. Work in a tab you opened, unless the user asked about a page they have open.
+
 Input goes to the target window in the background: the user's mouse and focus are not touched.
 If an action is refused in the background, click/type/key/drag/menu accept {foreground: true}, which briefly takes focus and the real cursor; the user may be asked first. Use it only when setValue/select can't do the job.
 Don't sleep: state(), find() and waitFor() already wait for the UI to settle after actions.
@@ -61,7 +69,7 @@ const TOOLS = [
   { name: "js_reset", description: "Reset the JavaScript context (clears variables).", inputSchema: { type: "object", properties: {} } },
 ];
 
-const INSTRUCTIONS = "Windows desktop computer use through one `js` tool. Use it for GUI-only tasks in native apps (no CLI or API). Batch actions and checks into few calls; input runs in the background without taking the user's mouse.";
+const INSTRUCTIONS = "Windows desktop computer use through one `js` tool: native apps, and web pages in the user's open Chrome, Edge or Helium (w.page(), which attaches to the running browser without a prompt). Batch actions and checks into few calls; input runs in the background without taking the user's mouse.";
 
 // --- JSON-RPC over stdio, in both directions (we send elicitation requests to the client) ---
 
@@ -101,7 +109,7 @@ const ask: Ask = async (message, rememberLabel) => {
 };
 
 const policy = new Policy(ask);
-const desktop = new Desktop(new Driver(DRIVER, CURSOR), policy);
+const desktop = new Desktop(new Driver(DRIVER, CURSOR, () => (policy.browserAttach ? ["--grant", "existing-profile"] : [])), policy);
 const sandbox = await Sandbox.create((method, args) => desktop.dispatch(method, args), userWait);
 process.on("unhandledRejection", () => {}); // every API promise is tracked by the sandbox; nothing should land here
 

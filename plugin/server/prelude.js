@@ -11,6 +11,7 @@
   delete globalThis.__bcu_host;
 
   const METHODS = ["state", "find", "click", "setValue", "select", "type", "key", "drag", "menu", "screenshot", "waitFor"];
+  const PAGE_METHODS = ["read", "click", "type", "key", "select", "go", "close", "tabs", "waitFor", "screenshot"];
   const isThenable = (x) => !!x && typeof x.then === "function";
   const message = (e) => (e && typeof e.message === "string" ? e.message : String(e));
   const show = (v) => {
@@ -21,7 +22,7 @@
   let tail = Promise.resolve();
   let epoch = 0; // bumped when a timed-out js call's queue is abandoned
   let pending = []; // every API call and log() started during the current js call
-  let errors = []; // failures of API calls, reported even when nobody awaited them
+  let errors = []; // failures of API calls: {message, seen()}; reported unless the model handled them
   let logs = [];
   let nextHandle = 0;
 
@@ -35,9 +36,16 @@
       return JSON.parse(await host(method, JSON.stringify(resolved)));
     });
     tail = run.then(() => {}, () => {});
-    // Failures of an abandoned (timed-out) run's calls belong to that run, not the next one.
-    pending.push(run.then(() => {}, (e) => { if (queuedIn === epoch) errors.push(message(e)); }));
-    return run;
+    // A failure is reported only if the model never awaited or attached a handler to this call
+    // (awaiting runs `then`), so `try { await w.find(...) } catch {}` stays quiet. Failures of an
+    // abandoned (timed-out) run's calls belong to that run, not the next one.
+    let observed = false;
+    pending.push(run.then(() => {}, (e) => { if (queuedIn === epoch) errors.push({ message: message(e), seen: () => observed }); }));
+    return {
+      then: (ok, err) => { observed = true; return run.then(ok, err); },
+      catch: (err) => { observed = true; return run.catch(err); },
+      finally: (f) => { observed = true; return run.finally(f); },
+    };
   }
 
   /** Resolve promises the model returned without awaiting, e.g. `return [cua.windows(), w.state()]`. */
@@ -54,7 +62,24 @@
   function methodsFor(handle) {
     const m = {};
     for (const name of METHODS) m[name] = (...a) => call(`w.${name}`, [handle, ...a]);
+    m.page = (query) => bindPage((h) => call("w.page", [handle, h, query]));
     return m;
+  }
+
+  function pageMethodsFor(handle) {
+    const m = {};
+    for (const name of PAGE_METHODS) m[name] = (...a) => call(`p.${name}`, [handle, ...a]);
+    m.newTab = (url) => bindPage((h) => call("p.newTab", [handle, h, url]));
+    return m;
+  }
+
+  /** Like bindWindow, for a browser tab: usable with or without `await`. */
+  function bindPage(start) {
+    const handle = ++nextHandle;
+    const binding = start(handle);
+    const methods = pageMethodsFor(handle);
+    const bound = (info) => Object.freeze({ ...info, ...methods, toJSON: () => info });
+    return Object.freeze({ ...methods, then: (ok, err) => binding.then(bound).then(ok, err) });
   }
 
   /** `cua.window(...)` and `cua.open(...)` work with or without `await`: methods queue behind the
@@ -98,7 +123,8 @@
       pending = [];
       await Promise.all(batch);
     }
-    return JSON.stringify({ value: value === undefined ? null : show(value), hasValue: value !== undefined, error, errors, logs });
+    const unhandled = errors.filter((x) => !x.seen()).map((x) => x.message);
+    return JSON.stringify({ value: value === undefined ? null : show(value), hasValue: value !== undefined, error, errors: unhandled, logs });
   });
 
   /** After a timed-out call: cancel everything it queued, and let new calls start right away. */

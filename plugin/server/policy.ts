@@ -7,7 +7,9 @@
 // Policy file (BCU_POLICY, default ~/.config/bcu/policy.json), re-read whenever it changes:
 //   { "allow": ["testpad", "uwp:calculator"],   apps allowed without asking; "*" allows every app
 //     "deny": ["slack"],                          apps never shown or controlled
-//     "foreground": "ask" }                       "ask" | "allow" | "deny" for {foreground: true}
+//     "foreground": "ask",                        "ask" | "allow" | "deny" for {foreground: true}
+//     "browsers": "attach" }                      let w.page() attach to a running Chromium browser's own
+//                                                 profile over DevTools (cookies, logins); default "off"
 // The built-in blocks (shells, password managers, security prompts, agents) stay in force under
 // "*"; lift one by naming its exact key in "allow", e.g. "windowsterminal".
 // Env: BCU_APPS        comma list of apps pre-approved for this process (benchmarks, headless runs); "*" for all
@@ -22,7 +24,7 @@ export type Ask = (message: string, rememberLabel: string) => Promise<"once" | "
 
 export type App = { key: string; label: string };
 type ForegroundMode = "ask" | "allow" | "deny";
-type PolicyFile = { allow?: string[]; deny?: string[]; foreground?: ForegroundMode };
+type PolicyFile = { allow?: string[]; deny?: string[]; foreground?: ForegroundMode; browsers?: "attach" | "off" };
 
 // Hidden and refused unless the policy file's "allow" names them: shells (a terminal window is
 // shell access), password managers, credential and security prompts, and agents (including us).
@@ -43,6 +45,12 @@ const LABELS: Record<string, string> = {
 export function appOf(w: { app_name?: string; title?: string }): App {
   const exe = (w.app_name ?? "").replace(/\.exe$/i, "");
   const lower = exe.toLowerCase();
+  // Chromium builds that keep Chrome's exe name (Helium, Chromium) still end their window titles
+  // with their own name: "Inbox - Helium". The browser adds that suffix, so a page title can't set it.
+  if (lower === "chrome") {
+    const name = (w.title ?? "").match(/ - ([^-]+)$/)?.[1]?.trim();
+    if (name) return { key: lower, label: name };
+  }
   if (lower === "applicationframehost") {
     const name = (w.title ?? "").split(" - ").pop()?.trim() || "Windows app";
     return { key: `uwp:${name.toLowerCase()}`, label: name };
@@ -144,6 +152,13 @@ export class Policy {
     this.launchedPids.add(pid);
     if (app) this.approved.add(app.key);
     if (app && remember) this.persistAllow(app.key);
+  }
+
+  /** May w.page() attach to a running browser's existing profile? Read when the driver starts,
+   *  because the driver takes the matching grant (`--grant existing-profile`) at launch. */
+  get browserAttach(): boolean {
+    this.refresh();
+    return (process.env.BCU_BROWSERS ?? this.conf.browsers) === "attach";
   }
 
   /** Throws unless foreground input (real cursor and focus) is allowed for this app. */

@@ -6,7 +6,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 
 export type Image = { data: string; mimeType: string };
-export type DriverWindow = { pid: number; window_id: number; title?: string; app_name?: string };
+export type DriverWindow = { pid: number; window_id: number; title?: string; app_name?: string; z_index?: number };
 
 /** Fields the driver returns in structuredContent (or as JSON text). Each tool fills a subset. */
 export type DriverData = Partial<{
@@ -22,7 +22,20 @@ export type DriverData = Partial<{
   screenshot_width: number;
   screenshot_height: number;
   windows: DriverWindow[];
+  // Browser route (get_browser_state, browser_*): every refusal comes back as status "refused".
+  status: string;
+  refusal: { code?: string; message?: string };
+  target_id: string;
+  tab_id: string;
+  tabs: BrowserTab[];
+  mutation_allowed: boolean;
+  page: { url?: string; title?: string };
+  outline: string;
+  refs: Array<{ ref: string; role?: string; name?: string | null; actions?: string[] }>;
+  snapshot: { id?: string; complete?: boolean; continuation?: string | null };
 }>;
+
+export type BrowserTab = { tab_id: string; title?: string; url?: string; active?: boolean | null };
 
 export type DriverResult = { text: string; data: DriverData; images: Image[]; isError: boolean };
 export type Args = Record<string, unknown>;
@@ -53,18 +66,25 @@ export class Driver {
   private nextId = 1;
   private pending = new Map<number, Pending>();
   private sessionTools = new Set<string>(); // tools whose schema takes a `session` label
+  private toolNames = new Set<string>();
   private tail: Promise<unknown> = Promise.resolve();
   private readonly exe: string;
   private readonly cursor: CursorMode;
+  private readonly launchArgs: () => string[];
 
-  constructor(exe: string, cursor: CursorMode) {
+  /** `launchArgs` is read each time the driver process starts (e.g. the existing-profile grant). */
+  constructor(exe: string, cursor: CursorMode, launchArgs: () => string[] = () => []) {
     this.exe = exe;
     this.cursor = cursor;
+    this.launchArgs = launchArgs;
   }
+
+  /** Whether the running driver offers a tool. Valid once a call has completed the handshake. */
+  has(tool: string) { return this.toolNames.has(tool); }
 
   private start() {
     const wslenv = ["DO_NOT_TRACK", process.env.WSLENV].filter(Boolean).join(":");
-    const proc = spawn(this.exe, ["mcp"], { env: { ...process.env, DO_NOT_TRACK: "1", WSLENV: wslenv } });
+    const proc = spawn(this.exe, ["mcp", ...this.launchArgs()], { env: { ...process.env, DO_NOT_TRACK: "1", WSLENV: wslenv } });
     this.proc = proc;
     createInterface({ input: proc.stdout }).on("line", (line) => this.onLine(line));
     proc.stderr.on("data", () => {}); // driver logs; ignored
@@ -81,10 +101,13 @@ export class Driver {
   }
 
   private async handshake() {
-    await this.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "bcu", version: "0.3.0" } });
+    await this.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "bcu", version: "0.4.0" } });
     this.send({ jsonrpc: "2.0", method: "notifications/initialized" });
     const list = (await this.request("tools/list", {})) as { tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }> };
-    for (const t of list.tools ?? []) if (t.inputSchema?.properties?.session) this.sessionTools.add(t.name);
+    for (const t of list.tools ?? []) {
+      this.toolNames.add(t.name);
+      if (t.inputSchema?.properties?.session) this.sessionTools.add(t.name);
+    }
     // The agent cursor glides to every click target before acting: about 430 ms per click when
     // animated, 65 ms with an 80 ms fixed glide, 7 ms hidden (measured on Calculator).
     if (this.cursor === "off") await this.request("tools/call", { name: "set_agent_cursor_enabled", arguments: { session: SESSION, enabled: false } });

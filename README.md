@@ -16,9 +16,10 @@ Requirements: Windows 11 with WSL2, Node 24+ in WSL, and Rust (rustup) only if t
 
 ## Approvals and privacy
 
-- The first time Claude binds an app, Claude Code asks you to allow it. "Always allow" writes the app to `~/.config/bcu/policy.json`, which you can edit by hand (`allow`, `deny`, `foreground`).
+- The first time Claude binds an app, Claude Code asks you to allow it. "Always allow" writes the app to `~/.config/bcu/policy.json`, which you can edit by hand (`allow`, `deny`, `foreground`); edits apply to running sessions. `"allow": ["*"]` approves every app, and `"foreground": "allow"` skips the foreground prompt.
+- Some clients never show these prompts. T3 Code declines them automatically, so use the policy file there.
 - Until you approve an app, Claude sees its name but none of its window titles.
-- Terminals, password managers, security prompts and other agents are blocked unless the policy file's `allow` names them.
+- Terminals, password managers, security prompts and other agents are blocked unless the policy file's `allow` names them by exact key (`"*"` doesn't lift these blocks).
 - `{foreground: true}` (real cursor and focus) asks first by default.
 - Every action is logged, without typed text, to `~/.local/state/bcu/actions.jsonl`.
 - Model code runs in a QuickJS sandbox with no filesystem, network or process access.

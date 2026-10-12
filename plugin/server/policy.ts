@@ -4,11 +4,13 @@
 // session, "always" approvals persist in the policy file, and a client that can't show a prompt
 // gets a clear refusal that says how to approve instead of a hang.
 //
-// Policy file (BCU_POLICY, default ~/.config/bcu/policy.json):
-//   { "allow": ["testpad", "uwp:calculator"],   apps allowed without asking
+// Policy file (BCU_POLICY, default ~/.config/bcu/policy.json), re-read whenever it changes:
+//   { "allow": ["testpad", "uwp:calculator"],   apps allowed without asking; "*" allows every app
 //     "deny": ["slack"],                          apps never shown or controlled
 //     "foreground": "ask" }                       "ask" | "allow" | "deny" for {foreground: true}
-// Env: BCU_APPS        comma list of apps pre-approved for this process (benchmarks, headless runs)
+// The built-in blocks (shells, password managers, security prompts, agents) stay in force under
+// "*"; lift one by naming its exact key in "allow", e.g. "windowsterminal".
+// Env: BCU_APPS        comma list of apps pre-approved for this process (benchmarks, headless runs); "*" for all
 //      BCU_FOREGROUND  overrides the file's "foreground"
 
 import fs from "node:fs";
@@ -48,16 +50,17 @@ export function appOf(w: { app_name?: string; title?: string }): App {
   return { key: lower, label: LABELS[lower] ?? exe };
 }
 
-/** Lenient match used for BCU_APPS and the file's allow/deny lists: "calculator" matches the key
- *  "uwp:calculator", "File Explorer" matches explorer's label. */
+/** Lenient match used for BCU_APPS and the file's allow/deny lists: "*" matches every app,
+ *  "calculator" matches the key "uwp:calculator", "File Explorer" matches explorer's label. */
 function listed(list: readonly string[], app: App): boolean {
   const label = app.label.toLowerCase();
-  return list.some((e) => e === app.key || app.key.endsWith(`:${e}`) || label === e || (e.length > 3 && (app.key.includes(e) || label.includes(e))));
+  return list.some((e) => e === "*" || e === app.key || app.key.endsWith(`:${e}`) || label === e || (e.length > 3 && (app.key.includes(e) || label.includes(e))));
 }
 
 export class Policy {
   readonly file: string;
   private conf: PolicyFile;
+  private confMtimeMs = -1; // the policy file's mtime when last read, so edits apply without a restart
   private readonly preapproved: string[];
   private readonly approved = new Set<string>(); // app keys approved this session
   private readonly declined = new Set<string>(); // asked this session and refused: don't nag
@@ -73,12 +76,25 @@ export class Policy {
   }
 
   private load(): PolicyFile {
-    try { return JSON.parse(fs.readFileSync(this.file, "utf8")) as PolicyFile; } catch { return {}; }
+    try {
+      this.confMtimeMs = fs.statSync(this.file).mtimeMs;
+      return JSON.parse(fs.readFileSync(this.file, "utf8")) as PolicyFile;
+    } catch {
+      return {};
+    }
+  }
+
+  /** Pick up edits to the policy file made while this session runs. */
+  private refresh() {
+    let mtime = -1;
+    try { mtime = fs.statSync(this.file).mtimeMs; } catch { /* no file: empty policy */ }
+    if (mtime !== this.confMtimeMs) { this.conf = this.load(); this.confMtimeMs = mtime; }
   }
 
   private lower(list?: string[]) { return (list ?? []).map((s) => s.toLowerCase()); }
 
   status(app: App): "denied" | "approved" | "unapproved" {
+    this.refresh();
     const allow = this.lower(this.conf.allow), deny = this.lower(this.conf.deny);
     if (listed(deny, app)) return "denied";
     if (BUILTIN_DENY.has(app.key) && !allow.includes(app.key)) return "denied";
@@ -132,6 +148,7 @@ export class Policy {
 
   /** Throws unless foreground input (real cursor and focus) is allowed for this app. */
   async requireForeground(app: App): Promise<void> {
+    this.refresh();
     const mode = (process.env.BCU_FOREGROUND as ForegroundMode | undefined) ?? this.conf.foreground ?? "ask";
     if (mode === "allow" || this.foregroundOk.has(app.key)) return;
     if (mode === "deny") throw new Error("foreground input is disabled by policy. Use setValue/select, or ask the user to do this step.");

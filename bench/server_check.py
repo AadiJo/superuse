@@ -89,6 +89,13 @@ def main() -> int:
         other = next((r["app"] for r in rows if r.get("approved") is False), None)
         t, err = js(c, f"return await cua.window({json.dumps(other)})") if other else ("no unapproved app on screen", True)
         check("no elicitation: refusal says how to approve", err and "allow" in t and str(policy) in t, t)
+        # Allowing every app with "*", written while the session runs, applies without a restart.
+        policy.write_text(json.dumps({"allow": ["*"], "foreground": "allow"}))
+        t, err = js(c, f"const w = await cua.window({json.dumps(other)}); return w.app") if other else ("", False)
+        check('"*" in the policy file approves apps mid-session', not err and bool(t), t)
+        t, err = js(c, "return await cua.window('WindowsTerminal')")
+        check('built-in blocks still apply under "*"', err and "no window matches" in t, t)
+        policy.unlink()
 
     # Timeouts, with a 3 s limit: calls queued by the timed-out js call must not run afterwards,
     # and js_reset right after a timeout (live host calls) must not crash the server.

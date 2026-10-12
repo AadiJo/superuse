@@ -305,7 +305,8 @@ function wholeNumber(name: string, value: string): number {
 async function main() {
   const { values } = parseArgs({
     options: {
-      arms: { type: "string", default: "claude-codexcu,claude-cua" },
+      // Not the baselines by default: claude-codexcu sends whole-desktop window titles to the model.
+      arms: { type: "string", default: "claude-bcu3" },
       tasks: { type: "string", default: SUITE.join(",") },
       reps: { type: "string", default: "1" },
       timeout: { type: "string", default: "420" },

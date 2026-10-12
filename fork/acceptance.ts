@@ -619,6 +619,7 @@ async function servePage(html: string): Promise<{ server: Server; url: string }>
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
+  server.unref(); // like the Python's daemon thread: a check that throws early can't hang the run
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("the test page server has no port");
   return { server, url: `http://127.0.0.1:${address.port}/form.html` };
@@ -655,6 +656,17 @@ async function heliumStripStrays(run: Run, wins: Win[]): Promise<string[]> {
     }
   }
   return strays;
+}
+
+/** Names in `after` beyond those already in `before`, counting duplicates. */
+function newNames(before: string[], after: string[]): string[] {
+  const left = [...before];
+  return after.filter((name) => {
+    const i = left.indexOf(name);
+    if (i < 0) return true;
+    left.splice(i, 1);
+    return false;
+  });
 }
 
 /** Fill a form in a background tab of the user's Helium through browser_* tools only, then close
@@ -699,6 +711,7 @@ async function checkHelium(run: Run) {
   };
 
   const titleBefore = w.title;
+  const strayBefore = await heliumStripStrays(run, wins); // the user's own inspect tabs aren't ours
   const promptsBefore = await debuggingPrompts();
   const S = "acceptance-helium";
   // The test tab while it's open. The shared teardown skips this check, so a step that throws
@@ -760,7 +773,7 @@ async function checkHelium(run: Run) {
 
     const foreignCloseRefusal = await closeFromOtherDriver();
     const closed = out.tab_id ? !!(await call("browser_close_tab", { session: S, target_id: target, tab_id: out.tab_id }, "close_tab")).sc.closed : undefined;
-    openTab = null;
+    if (closed) openTab = null; // a refused or failed close leaves it to the finally below
     const after = (await call("get_browser_state", { session: S, pid: w.pid, window_id: w.hwnd }, "bind")).sc;
     await call("end_session", { session: S }, "end_session", { record: false });
     return {
@@ -779,7 +792,7 @@ async function checkHelium(run: Run) {
     server.closeAllConnections();
   });
   await sleep(500);
-  const stripStrays = await heliumStripStrays(run, wins);
+  const stripStrays = newNames(strayBefore, await heliumStripStrays(run, wins));
   const promptsLeft = await debuggingPrompts();
   const selectedTabUnchanged = equalLists((await heliumWindows()).filter((x) => x.hwnd === w.hwnd).map((x) => x.title), [titleBefore]);
   const timed = steps.filter((s) => s.step !== "prepare" && s.step !== "bind");

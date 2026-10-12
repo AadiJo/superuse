@@ -39,8 +39,9 @@ const PAGE = FORM_HTML
   .replaceAll('<button type="submit">Submit</button>',
     '<label>Notes <div id="notes" contenteditable="true" role="textbox" aria-label="Notes" '
     + 'style="border:1px solid #888;min-height:40px"></div></label>\n<button type="submit">Submit</button>')
+  // The title keeps "BCU Helium test" after submit, whatever was typed, so cleanup can find the tab.
   .replaceAll("document.title = 'SUBMITTED ' + s;",
-    "document.title = 'SUBMITTED ' + s; fetch('/submitted?' + new URLSearchParams({name: v('name').value, "
+    "document.title = 'BCU Helium test: SUBMITTED ' + s; fetch('/submitted?' + new URLSearchParams({name: v('name').value, "
     + "email: v('email').value, plan: v('plan').value, agree: v('agree').checked ? 'yes' : 'no', "
     + "notes: v('notes').textContent}));");
 
@@ -86,9 +87,9 @@ async function cleanup(): Promise<string[]> {
       const { result } = await c.call("get_window_state", { pid: w.pid, window_id: w.hwnd, include_screenshot: false, max_elements: 600 });
       const d: Structured = result.structuredContent ?? JSON.parse(textOf(result));
       const lines = (d.tree_markdown ?? "").split(/\r?\n/);
-      // Only the test page's own titles: before and after it submits the test's fixed values. Any
-      // other tab is the user's, even one whose title merely looks related.
-      const hit = lines.findIndex((l) => l.includes("TabItem") && /"(BCU Helium test|SUBMITTED name=Ada Lovelace\|email=ada@example\.com)/.test(l));
+      // Only the test page, whose title always starts with its marker. Any other tab may be the
+      // user's, including a chrome://inspect page, which the driver's setup can also open.
+      const hit = lines.findIndex((l) => l.includes("TabItem") && l.includes('"BCU Helium test'));
       if (hit < 0) break;
       // The tab's own Close button: one of the next few rows, nested under the tab.
       const close = lines.slice(hit + 1, hit + 6).find((l) => indent(l) > indent(lines[hit]) && l.includes('Button "Close"'));

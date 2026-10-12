@@ -72,6 +72,6 @@ Teardown only closes windows that appeared during the run and belong to the task
 - `codex-cu-bridge.ts` is a port of `~/.local/bin/codex-cu-mcp` with Codex's browser backends disabled and browser tab records redacted.
 - The GPT arm (`gpt-codexcu`, the Windows Codex CLI) is retired and no longer in `run.ts`; older batches still hold its runs. When Windows `codex.exe` is the MCP client, Codex's runtime attaches to the user's Chrome extension and `cua.getState()` returns their real open tabs (titles and URLs), which the bridge did not reliably strip. Run standalone, it also isn't a fair Codex baseline: without the desktop app's native pipe, `cua.listWindows` disappears after `getState()` on most tasks.
 
-- Transcripts include window titles from the whole desktop (Codex's `listWindows` returns all of them). Keep `out/` local.
+- The `claude-codexcu` arm sends window titles from the whole desktop to the model (Codex's `listWindows` returns all of them), and they land in its transcripts. That's why the default arm is the plugin (`claude-bcu3`), which hides unapproved apps' titles. Run the baseline only on a desktop with nothing private open, and keep `out/` local.
 - Elevated windows can't be closed from a normal process. A task that opens one (for example `sysdm.cpl`) leaves it behind, so it's not in the default suite.
 - Cost for the GPT arm isn't reported, because it runs on a ChatGPT plan.

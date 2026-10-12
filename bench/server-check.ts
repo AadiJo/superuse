@@ -77,8 +77,16 @@ let other: string | undefined; // an app on screen that isn't approved
   check("denied apps (terminals) are hidden", !terminals.length, `terminal rows: ${terminals.length}`);
   r = await js(c, "return await cua.window('WindowsTerminal')");
   check("denied app can't be bound", r.error && r.text.includes("no window matches"), r.text);
-  other = rows.find((w) => w.approved === false)?.app;
-  r = other ? await js(c, `return await cua.window(${JSON.stringify(other)})`) : { text: "no unapproved app on screen", error: true };
+  // The test subject is the first unapproved app that can still be bound: some (dwm, shell hosts)
+  // show a window for a moment and are gone by the time the check binds them.
+  r = { text: "no unapproved app on screen", error: true };
+  for (const app of [...new Set(rows.filter((w) => w.approved === false).map((w) => w.app as string))]) {
+    const attempt = await js(c, `return await cua.window(${JSON.stringify(app)})`);
+    if (attempt.text.includes("no window matches")) continue;
+    other = app;
+    r = attempt;
+    break;
+  }
   check("no elicitation: refusal says how to approve", r.error && r.text.includes("allow") && r.text.includes(policy), r.text);
   // Allowing every app with "*", written while the session runs, applies without a restart.
   writeFileSync(policy, JSON.stringify({ allow: ["*"], foreground: "allow" }));

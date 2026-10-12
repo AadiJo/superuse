@@ -54,7 +54,7 @@ The question was whether the stack would be faster in another language. It would
 - **Fork v6** (`fork/patches/0020`, `0021`, details in [`fork/NOTES.md`](../fork/NOTES.md)):
   - *Keys reach a UWP app after it loses the foreground.* When `launch_app` gives the user their foreground back, Calculator stops reporting a focus window, and posted keys went to its outer frame, which drops them. The tools still reported success. Keys now go to the frame's `CoreWindow`.
   - *Tree rows show `checked`, `unchecked` and `selected`.* The walker read this state and never printed it, so Claude took screenshots to see whether a checkbox was ticked.
-- **Settle once per action** in the server. A read within 2 s of any action used to read, sleep 100 ms and read again, every time. Now only the first read after a click, key, type, menu, drag or launch waits, and `setValue` (which the driver reads back before returning) needs none. In a TestPad session replayed without a model, calls 2 to 6 took 1.34 s of tool time against 2.24 s, and three `find()` calls after `setValue` dropped from about 180 ms to 37 ms each.
+- **Settle once per action** in the server, measured in batch `v5` and then reverted. A read within 2 s of any action reads, sleeps 100 ms and reads again until two reads match, every time. The change let only the first read after a click, key, type, menu, drag or launch wait, and skipped the wait after `setValue`. In a TestPad session replayed without a model, calls 2 to 6 took 1.34 s of tool time against 2.24 s. Review then found two ways it returns stale UI (see Next), and the batch showed no gain, so the PR ships without it.
 
 ### How the bugs were found
 
@@ -89,7 +89,7 @@ Both arms in one batch: the round 3 code frozen as `claude-bcu3-v4` (server and 
 - **The invoice task is 21 s faster** (median, 38%), and its worst run dropped from 57.5 s to 36.1 s. The foreground changed in all 6 invoice runs, Calculator taking it at launch and having it restored. Round 3's typed keys were lost in all 3, and round 4's landed in all 3.
 - **The screenshots are gone** from both form tasks (0 of 6 runs, against 6 of 6). It saved fewer turns than expected, because round 3 usually took the screenshot inside a call that was doing other work anyway.
 - **Most tasks didn't move.** On the other seven tasks both arms spent about 2 s per task in tools and 12 to 30 s in the model. Run-to-run model variance there is several seconds, more than anything the tools can save. Today's runs were slower than last night's for both arms: the same round 3 code took 18.9 s against 12.3 s in batch `v4`.
-- **The settle change doesn't show at batch level** for the same reason. It's real in the traces: 122 `state`/`find` calls cost 218 tree reads, against at least two reads for every read within 2 s of an action before.
+- **The settle change doesn't show at batch level** for the same reason. It's real in the traces (122 `state`/`find` calls cost 218 tree reads, against at least two reads for every read within 2 s of an action before), but a few hundred milliseconds per task disappear in the model's variance.
 - **The remaining slow runs are model habits.** In one Save As run Claude re-bound the window at the top of each call (`const w = cua.window("TestPad")`), and a fresh binding has no snapshot, so its element numbers failed twice. In one Explorer run it passed `"This folder is empty|Items View"` to `waitFor()`, which matches literally, and waited out its 3 s timeout. The v4 server behaves the same in both cases.
 - **Where tool time goes** (round 4 traces, 27 runs): tree reads 17.8 s in 218 calls (82 ms each), launches 8.1 s in 6 (1.35 s each), menus 5.9 s in 17, window lists 5.2 s in 71, everything else under 4.5 s. Driver start costs the first call about 250 ms. Starting the driver with the server would save that, at the price of an idle `cua-driver.exe` in every Claude session that never uses computer use, so it isn't done.
 
@@ -103,6 +103,7 @@ Both arms in one batch: the round 3 code frozen as `claude-bcu3-v4` (server and 
 
 ### Next
 
+- A settle that waits once per action has to track it per window and per read. The reverted version failed two ways, which are the first tests to write: a quiet read of window B, or a `find()` filtered to rows that don't change, cleared a desktop-wide flag while window A was still updating, so the next read of A skipped the wait. And `setValue` returns without reading back on the common `ValuePattern` and `RangeValuePattern` paths, while dependent UI can change after it returns anyway.
 - `waitFor("a|b")` should match either, like `state({query})` does.
 - Binding the same window again should keep its latest snapshot, so earlier element numbers still work.
 - When an action opens a dialog, the parent window's `state()` already includes the dialog's rows. Saying so in the API description could save the turn Claude spends finding the dialog (3 of 9 dialog runs in `v4`).

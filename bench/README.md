@@ -65,7 +65,7 @@ TestPad (`apps/TestPad.cs`, compiled to its own exe) stands in for Windows Notep
 - `windows-closed.txt`: what teardown closed.
 - `server-trace.jsonl` (`claude-bcu3`): the server's timing for each `js` call, API call and driver call, written through `BCU_TRACE`. Servers older than round 4 write none.
 
-Teardown only closes windows that appeared during the run and belong to the task apps (`TASK_WINDOWS` in `win.ts`, plus File Explorer windows showing a folder under `%TEMP%\bcu`). It only ever kills TestPad, the benchmark's own exe; everything else gets a normal close.
+Teardown only closes windows that appeared during the run and belong to the task apps (`TASK_WINDOWS` in `win.ts`, plus File Explorer windows showing a folder under `%TEMP%\bcu`). It force-kills only processes a run started: TestPad (the benchmark's own exe), an Open With picker that appeared during the run, and Edge in the throwaway profile. Everything else gets a normal close. Teardown can't tell a window the agent opened from one a person opened mid-run, so a Notepad or UWP window opened by hand during a run gets the same close; keep the desktop idle while a batch runs.
 
 ## Caveats
 

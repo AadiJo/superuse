@@ -1,8 +1,7 @@
-From 60c4a7e75d338d420d2bd47bee3a286217a95315 Mon Sep 17 00:00:00 2001
+From b058d0e3ecb7fb02ac8cc518408c526215d800df Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Mon, 12 Oct 2026 13:27:25 -0500
-Subject: [PATCH 21/21] feat(windows): show toggle and selection state in tree
- rows
+Subject: [PATCH] feat(windows): show toggle and selection state in tree rows
 
 The walker already caches TogglePattern and SelectionItem state but never
 rendered it, so a client had to take a screenshot to see whether a checkbox

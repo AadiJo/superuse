@@ -1,8 +1,7 @@
 From 46af3b054f1509f988fcfc7b5c9ab528bbb189db Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Mon, 12 Oct 2026 13:52:05 -0500
-Subject: [PATCH 17/19] feat(browser): press keys with modifiers in a
- background tab
+Subject: [PATCH] feat(browser): press keys with modifiers in a background tab
 
 Only browser_type keystrokes could deliver keys, and only printable text plus
 \r for Enter. Tab, Escape, arrows and shortcuts like Ctrl+A had no route.

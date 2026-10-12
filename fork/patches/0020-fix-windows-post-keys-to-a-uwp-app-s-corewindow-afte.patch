@@ -1,8 +1,8 @@
-From 3d7664c55c2575a1239768d1eb83765fc641aade Mon Sep 17 00:00:00 2001
+From c571fec547e5ec9b70cb1410259a1fe9fe31e3b6 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Mon, 12 Oct 2026 13:27:25 -0500
-Subject: [PATCH 20/21] fix(windows): post keys to a uwp app's corewindow after
- it loses the foreground
+Subject: [PATCH] fix(windows): post keys to a uwp app's corewindow after it
+ loses the foreground
 
 A packaged-app launch that steals the foreground is restored to the user's
 window. After that, no thread of the app reports a focus window, so keys

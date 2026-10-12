@@ -1,8 +1,8 @@
 From a35487a6d602f534a3047b8f46ea18217cba1f1e Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Mon, 12 Oct 2026 13:52:05 -0500
-Subject: [PATCH 16/19] feat(browser): open and close background tabs in the
- bound window
+Subject: [PATCH] feat(browser): open and close background tabs in the bound
+ window
 
 Agents could only act in tabs that already existed, so working on a page
 meant navigating the user's current tab away.

@@ -1,7 +1,7 @@
 From a948ecbc70d7225ca0d6db6a94b7127169e36c93 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 22:00:53 -0500
-Subject: [PATCH 04/19] fix(windows): walk classic menus without activating the
+Subject: [PATCH] fix(windows): walk classic menus without activating the
  window
 
 invoke_menu activated the target to walk its menu and restored foreground

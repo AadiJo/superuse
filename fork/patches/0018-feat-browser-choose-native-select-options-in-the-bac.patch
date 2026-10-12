@@ -1,8 +1,7 @@
 From 08416b30a3ec08e4c29115ad7a416d40b2cb94aa Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Mon, 12 Oct 2026 13:52:05 -0500
-Subject: [PATCH 18/19] feat(browser): choose native select options in the
- background
+Subject: [PATCH] feat(browser): choose native select options in the background
 
 A closed <select> draws its options in a browser-owned popup, so their refs
 have no layout box and browser_click refused them as stale.

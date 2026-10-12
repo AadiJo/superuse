@@ -1,8 +1,8 @@
 From c472531e01c6c30a73104f03a3f961610c0cd366 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 23:26:58 -0500
-Subject: [PATCH 07/19] fix(windows): refuse foreground clicks and drags that
- would land on another window
+Subject: [PATCH] fix(windows): refuse foreground clicks and drags that would
+ land on another window
 
 SendInput delivers to whatever window is under the point, not to the target. A foreground pixel click or drag whose point was outside the target window, or covered by another app's always-on-top window, clicked that window instead. The SendInput click and window drag now refuse with target_not_at_point when the top-level window under the point is not the target's own or one of its UI thread (an open menu, drop-down or dialog). Before activating or raising the target they refuse points outside it and points under another app's always-on-top window, which activation can't uncover, so those refusals don't touch foreground. After the raise the check runs again, polled for up to 250 ms because activating another thread's window raises it only when that thread handles the activation. Desktop-scope drags keep screen semantics through a separate entry point.
 ---

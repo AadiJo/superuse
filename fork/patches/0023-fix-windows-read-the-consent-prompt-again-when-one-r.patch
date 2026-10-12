@@ -1,0 +1,64 @@
+From 362cd3e99c5cb7b23b90df7ede9fd433d1800bdf Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Mon, 12 Oct 2026 16:42:30 -0500
+Subject: [PATCH] fix(windows): read the consent prompt again when one read
+ contradicts itself
+
+One read of the prompt whose layout and focus disagreed ("focus contradicted the
+structural cancel button") failed the whole attempt, which happened once while
+Chromium was restoring a minimized window to show the prompt. Keep reading until
+the attempt's deadline instead. Allow is still invoked only on a single read whose
+layout and focus agree, so no check is weaker.
+---
+ .../src/browser_consent_ui.rs                 | 22 ++++++++++++-------
+ 1 file changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/browser_consent_ui.rs b/libs/cua-driver/rust/crates/platform-windows/src/browser_consent_ui.rs
+index 25f9130..a912f79 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/browser_consent_ui.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/browser_consent_ui.rs
+@@ -437,6 +437,7 @@ pub async fn handle(
+     prove_window_owner(request.window_id, pid)?;
+     let deadline = Instant::now() + Duration::from_secs(4);
+     let mut saw_prompt = false;
++    let mut last_error = None;
+     loop {
+         prove_window_owner(request.window_id, pid)?;
+         let hwnd = request.window_id;
+@@ -460,9 +461,12 @@ pub async fn handle(
+                 return Ok(BrowserConsentOutcome::Accepted);
+             }
+             Ok(None) => drop(tree),
++            // A read taken while Chromium is still showing the prompt (or restoring a minimized
++            // window for it) can contradict itself; read again. Allow is only ever invoked on a
++            // single read whose layout and focus agree.
+             Err(error) => {
+                 drop(tree);
+-                return Err(error);
++                last_error = Some(error);
+             }
+         }
+         if saw_prompt && !prompt_present {
+@@ -472,13 +476,15 @@ pub async fn handle(
+             ));
+         }
+         if Instant::now() >= deadline {
+-            return Err(refusal(
+-                BrowserRefusalCode::BrowserWrongTargetRefused,
+-                format!(
+-                    "no exact Chromium remote-debugging consent prompt appeared for reconnect attempt {}",
+-                    request.attempt
+-                ),
+-            ));
++            return Err(last_error.unwrap_or_else(|| {
++                refusal(
++                    BrowserRefusalCode::BrowserWrongTargetRefused,
++                    format!(
++                        "no exact Chromium remote-debugging consent prompt appeared for reconnect attempt {}",
++                        request.attempt
++                    ),
++                )
++            }));
+         }
+         tokio::time::sleep(Duration::from_millis(100)).await;
+     }

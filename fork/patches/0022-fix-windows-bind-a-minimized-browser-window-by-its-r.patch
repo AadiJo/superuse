@@ -1,0 +1,58 @@
+From a52fece4127eedb23c648fe7c37ed226b55f6870 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Mon, 12 Oct 2026 16:42:17 -0500
+Subject: [PATCH] fix(windows): bind a minimized browser window by its restored
+ bounds
+
+A minimized window sits at (-32000, -32000), while Chromium reports the window's
+restored bounds over CDP, so binding found no exact match and the page came back
+read-only. For a minimized window, compare GetWindowPlacement's normal position
+instead, shifted from work-area to screen coordinates.
+---
+ .../platform-windows/src/browser_platform.rs  | 33 +++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/browser_platform.rs b/libs/cua-driver/rust/crates/platform-windows/src/browser_platform.rs
+index 6c71b2c..02c0fb4 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/browser_platform.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/browser_platform.rs
+@@ -1119,6 +1119,39 @@ fn cdp_comparable_window_bounds(window_id: u64) -> Result<Rect, BrowserRefusal>
+             format!("could not read Windows outer bounds for window {window_id}: {error}"),
+         )
+     })?;
++    // A minimized window is parked at (-32000, -32000), while Chromium reports its restored
++    // bounds. Compare those instead: GetWindowPlacement's normal position, which is in work-area
++    // coordinates, shifted by the work area's offset on the window's monitor.
++    if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(hwnd) }.as_bool() {
++        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
++        use windows::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, WINDOWPLACEMENT};
++        let mut placement = WINDOWPLACEMENT {
++            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
++            ..Default::default()
++        };
++        if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_ok() {
++            let mut info = MONITORINFO {
++                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
++                ..Default::default()
++            };
++            let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
++            let (dx, dy) = if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
++                (
++                    info.rcWork.left - info.rcMonitor.left,
++                    info.rcWork.top - info.rcMonitor.top,
++                )
++            } else {
++                (0, 0)
++            };
++            let normal = placement.rcNormalPosition;
++            outer = RECT {
++                left: normal.left + dx,
++                top: normal.top + dy,
++                right: normal.right + dx,
++                bottom: normal.bottom + dy,
++            };
++        }
++    }
+     let physical = (
+         outer.left,
+         outer.top,

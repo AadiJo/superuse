@@ -322,3 +322,33 @@ After rebasing onto fork v5 (patches 0013 to 0019), `acceptance-20261012-151206.
 
 - The CoreWindow fallback only applies to `ApplicationFrameWindow` frames. A WinUI 3 or XAML-island app that loses focus the same way still gets its keys posted to the top-level window.
 - `selected` shows up on whichever list item, tab or radio button is selected, so trees with many selected items get a little longer.
+
+## Fork v7: a minimized Helium
+
+The user's Helium windows were both minimized when the Helium checks ran, and three things broke. The plugin listed only on-screen windows, so `cua.window("Helium")` found nothing (fixed in `plugin/server/desktop.ts`, which now lists minimized windows too). Attaching restored the minimized window, because Chromium shows its "Allow remote debugging?" prompt that way. And the page came back bound read-only. Three commits on `bcu`, patches 0022 to 0024. `fork/export-patches.sh` now writes unnumbered subjects (`[PATCH]`), so adding a commit adds a file instead of rewriting every patch's `[PATCH n/m]`.
+
+### 1. Bind by restored bounds (patch 0022)
+
+Binding is exact only when the native window's bounds match the CDP window's. A minimized window's `GetWindowRect` is parked at (-32000, -32000), while `Browser.getWindowBounds` reports the restored bounds. `cdp_comparable_window_bounds` now uses `GetWindowPlacement`'s `rcNormalPosition` for a minimized window, shifted from workspace to screen coordinates by its monitor's work-area offset (the same conversion Chromium does).
+
+### 2. Read the prompt again after a contradictory read (patch 0023)
+
+One headless Claude run failed with "the native Chromium consent prompt focus contradicted the structural cancel button": the matcher's layout and focus checks disagreed on one read, and any failed read ended the attempt. I couldn't reproduce it in 18 later attaches, so the cause is a guess (a read taken while Chromium was restoring the window). The handler now keeps reading until its deadline. Allow is still only invoked on a single read whose layout and focus agree.
+
+### 3. Undo what the prompt does to the desktop (patch 0024)
+
+Preparation now reads the desktop before it connects (`BrowserPlatform::desktop_state`) and restores it afterwards, whether or not the attach worked (`restore_desktop_state`). It minimizes the window again with `SW_SHOWMINNOACTIVE`, and if the browser still holds the foreground, it hands the foreground back to the window that had it. Attaching to the browser's input queue alone was refused every time. The driver's existing fallback, one `VK_NONAME` key press (the same one `launch_app` uses), is what works. Repro with TestPad in the foreground and Helium minimized: before, the foreground went TestPad, Helium, prompt, Helium and stayed there. After, it went back to TestPad 10 ms after the prompt closed, and Helium was minimized again.
+
+The prompt fix exposed another bug. When an attempt fails, its prompt stays open, but nothing can use it anymore, and once the window is minimized again it's hidden. Every later attempt saw two prompts and refused ("multiple bound native Chromium consent prompts"), so one failure blocked Helium until someone closed it. Eight hidden prompts had piled up before I found it. Failed attempts now call `deny_open_consent_prompts`: it reads the prompt titles from the browser window's UIA tree and closes (`WM_CLOSE`, which Chromium treats as Cancel) the top-level windows the browser window owns in the same process with exactly that title, then waits up to 1 s for them to go. The deny has to run in `prepare.rs`'s failure branches, not in the consent handler: the outer 4 s bound in `claim_with_optional_consent` drops the handler before its own 4 s deadline. Two sessions attaching at the same moment still both fail, because two prompts are ambiguous, but they leave 0 prompts, and the next attach works (1.4 s).
+
+### Results
+
+- `bench/helium-check.ts` with both Helium windows minimized: direct run PASS (`helium-check-20261012-163518.json`), 17 to 250 ms per action after a 1.2 s bind, and the headless Claude run PASS in 21.7 s. Both had 0 px of cursor movement, the foreground restored, Helium still minimized, and 0 prompts left. The direct run now fails unless the foreground and cursor end where they started.
+- `fork/acceptance.ts helium` on the final driver: 2 passes (`acceptance-20261012-163854.json`, `-164011.json`), 0 foreground changes. The two runs before them (`-163628`, `-163807`) refused at `browser_prepare` after 13 s, a few minutes after the collision tests, and the check hid the message. It now records a refusal's message (`refusal_message`), which is the driver's own text. The cause is still unknown.
+- `bench/server-check.ts`: 27/27. `cargo test -p cua-driver-core --lib browser::`: 189 pass. The Windows `browser_consent_ui` (17) and `browser_platform` (45) unit tests pass, cross-built and run through WSL interop.
+
+### Limits
+
+- The bounds conversion was only verified with the taskbar at the bottom, where workspace and screen coordinates are the same.
+- The foreground hand-back presses `VK_NONAME` once. It has no meaning to applications, but it is global input.
+- Two attaches at the same moment both fail (see above). The plugin's sessions don't retry on their own.

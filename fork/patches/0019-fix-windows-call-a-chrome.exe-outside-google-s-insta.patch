@@ -1,8 +1,8 @@
 From 2ee92210b90423270a3a1c7504a3f021dc8e461f Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Mon, 12 Oct 2026 13:52:05 -0500
-Subject: [PATCH 19/19] fix(windows): call a chrome.exe outside google's
- install chromium
+Subject: [PATCH] fix(windows): call a chrome.exe outside google's install
+ chromium
 
 Classification named every chrome.exe Google Chrome, so Chromium builds that
 keep the name, like Helium, were described as Google Chrome. A chrome.exe whose

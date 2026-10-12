@@ -1,7 +1,7 @@
 From 3ce4476f5b6408574640b096dd7a4ee6e57d6240 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Mon, 12 Oct 2026 13:42:05 -0500
-Subject: [PATCH 15/19] fix(browser): replace text in email and number inputs
+Subject: [PATCH] fix(browser): replace text in email and number inputs
 
 browser_type replace:true selected a field's text with setSelectionRange,
 which throws on type=email and type=number. Its select() fallback worked but

@@ -1,8 +1,7 @@
 From cd442f081ab912041d4c528f06455914c8db6b36 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 21:32:35 -0500
-Subject: [PATCH 01/19] build: cross-compile the windows driver from linux with
- zig
+Subject: [PATCH] build: cross-compile the windows driver from linux with zig
 
 ---
  libs/cua-driver/rust/Cargo.lock                   |  1 +

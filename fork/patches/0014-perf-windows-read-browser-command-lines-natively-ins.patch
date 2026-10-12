@@ -1,8 +1,8 @@
 From 6a87f26f8d143a739bc4b63ecadba4c3538798a9 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Mon, 12 Oct 2026 13:42:05 -0500
-Subject: [PATCH 14/19] perf(windows): read browser command lines natively
- instead of spawning powershell
+Subject: [PATCH] perf(windows): read browser command lines natively instead of
+ spawning powershell
 
 Every browser action re-proves its binding three times (authorize, validate,
 invoke), and each proof read the browser's command line twice through

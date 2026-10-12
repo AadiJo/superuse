@@ -168,9 +168,15 @@ export class Driver {
     const clean: Args = Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== null));
     if (this.sessionTools.has(name)) clean.session = SESSION;
     const started = performance.now();
-    const res = (await withTimeout(this.request("tools/call", { name, arguments: clean }), name,
-      "the app is probably blocked by a modal dialog. Check cua.windows() for a new window.")) as ToolResult;
-    trace({ driver: name, ms: Math.round(performance.now() - started), ok: !res.isError });
+    let ok = false;
+    let res: ToolResult;
+    try {
+      res = (await withTimeout(this.request("tools/call", { name, arguments: clean }), name,
+        "the app is probably blocked by a modal dialog. Check cua.windows() for a new window.")) as ToolResult;
+      ok = !res.isError;
+    } finally {
+      trace({ driver: name, ms: Math.round(performance.now() - started), ok }); // timeouts too: they're the slow calls
+    }
     const content = res.content ?? [];
     const text = content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
     const images = content.filter((c) => c.type === "image" && c.data).map((c) => ({ data: c.data!, mimeType: c.mimeType ?? "image/png" }));

@@ -775,7 +775,6 @@ async function checkHelium(run: Run) {
     const closed = out.tab_id ? !!(await call("browser_close_tab", { session: S, target_id: target, tab_id: out.tab_id }, "close_tab")).sc.closed : undefined;
     if (closed) openTab = null; // a refused or failed close leaves it to the finally below
     const after = (await call("get_browser_state", { session: S, pid: w.pid, window_id: w.hwnd }, "bind")).sc;
-    await call("end_session", { session: S }, "end_session", { record: false });
     return {
       prepare_sampler: prepareSampler, binding_quality: binding.binding_quality ?? null, sampler, ...out,
       foreign_close_refusal: foreignCloseRefusal, closed,
@@ -783,11 +782,11 @@ async function checkHelium(run: Run) {
     };
   };
 
+  // The session ends only here, after any retry: ending it drops the driver's record that the tab
+  // is ours, and without that record the tab can no longer be closed.
   const res = await drive().finally(async () => {
-    if (openTab) {
-      await call("browser_close_tab", { session: S, ...openTab }, "close_tab_after_error", { record: false }).catch(() => {});
-      await call("end_session", { session: S }, "end_session", { record: false }).catch(() => {});
-    }
+    if (openTab) await call("browser_close_tab", { session: S, ...openTab }, "close_tab_after_error", { record: false }).catch(() => {});
+    await call("end_session", { session: S }, "end_session", { record: false }).catch(() => {});
     server.close();
     server.closeAllConnections();
   });

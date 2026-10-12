@@ -13,6 +13,35 @@ Current code:
 - The plugin: [`plugin/`](../plugin/). Its server is `plugin/server/`; round 1 and 2 front ends are archived in [`proto/v1/`](../proto/v1/bcu-mcp.ts) and [`proto/v2/`](../proto/v2/bcu-mcp.ts).
 - The driver fork: [`fork/`](../fork/NOTES.md), as patches on upstream Cua Driver.
 
+## Web pages in the user's own browser (Helium)
+
+The user's daily browser is Helium, a Chromium 155 build whose exe is named `chrome.exe`. Tested live against their open window, in tabs the test opened. `bench/helium_check.py` reruns it.
+
+**Accessibility tree only.** Text fields, a `contenteditable` box, a `<select>`, a checkbox and Submit all worked in the background, with 0 px cursor movement and 0 focus changes. Typing and key presses (Enter, Tab, shortcuts) are refused for Chromium windows, which rules out the address bar and most keyboard flows.
+
+**DevTools, through the driver's existing-profile route.** Chromium 144+ can expose its own profile to agents through a `DevToolsActivePort` file, behind an "Allow remote debugging?" prompt. The driver already had a route for this (exact window binding, semantic page snapshots, typed actions over CDP), but it couldn't use it on Helium until five fork fixes (`fork/patches/0013`-`0019`):
+
+- **Profile lookup.** The driver looked for Helium's profile in Google Chrome's folder, because the exe is named `chrome.exe`. It now reads the profile beside the install.
+- **Speed.** Each action re-proved the endpoint by starting PowerShell twice. Actions went from 2.2-2.8 s to 10-170 ms, snapshots from 0.8 s to about 0.1 s.
+- **Background tabs and keys.** New tools open and close background tabs and press keys with modifiers.
+- **Fields.** `<select>` options can be chosen, and `replace` works on `type=email`.
+
+The plugin wraps the route as `w.page()` (policy `"browsers": "attach"`). Results:
+
+| Run | Result | Time | Cursor moved | Focus changes |
+| --- | --- | --- | --- | --- |
+| Page API by hand: open a background tab, fill 5 fields, Enter, close | pass | 10-170 ms per action, 1.2 s to attach | 0 px | 2, from Helium's consent prompt, restored |
+| Headless Claude, plugin only: "In my Helium browser, open ..., fill the form, submit, close the tab" | pass | 18.6 s, $0.10, 5 calls | 0 px | 2, restored |
+| Same prompt with the user's own `helium` server (chrome-devtools-mcp) also registered | timed out | 400 s | 0 px | 1 |
+
+The last row is a routing problem, not a tool failure. Claude picks the `helium` server's `new_page` tool because its name matches the prompt. That server waits for the user to click "Allow remote debugging?", which never happens in a headless run. The plugin's driver answers that prompt itself.
+
+Limits:
+
+- Chromium doesn't paint background tabs, so `p.screenshot()` works only on the selected tab.
+- `p.select` fires script events, which a site checking for real user input can ignore. `w.select` through the accessibility tree is the fallback.
+- Helium shows its consent prompt in the window the user activated last, and the driver only answers it there. So the plugin attaches through that window.
+
 ## Round 3: the plugin on a harder suite
 
 The suite grew from 6 to 9 tasks. The three new ones span apps and draw random values each run, so a remembered answer can't pass:

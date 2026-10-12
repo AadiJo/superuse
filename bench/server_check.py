@@ -63,6 +63,8 @@ def main() -> int:
         check("un-awaited calls run in written order", t == '["a","b"]', t)
         t, err = js(c, "cua.window('zz-no-such-app-zz'); return 'kept going'")
         check("un-awaited failure is reported, call continues", err and "kept going" in t and "wasn't awaited" in t, t)
+        t, err = js(c, "try { await cua.window('zz-no-such-app-zz') } catch (e) { return 'caught' }")
+        check("a caught API error doesn't fail the call", t == "caught" and not err, t)
         t, err = js(c, "while (true) {}", timeout=30)
         check("infinite loop is interrupted", err and "interrupted" in t, t)
         t, err = js(c, "return 1 +")

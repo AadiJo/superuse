@@ -86,7 +86,9 @@ async function cleanup(): Promise<string[]> {
       const { result } = await c.call("get_window_state", { pid: w.pid, window_id: w.hwnd, include_screenshot: false, max_elements: 600 });
       const d: Structured = result.structuredContent ?? JSON.parse(textOf(result));
       const lines = (d.tree_markdown ?? "").split(/\r?\n/);
-      const hit = lines.findIndex((l) => l.includes("TabItem") && /"(BCU Helium test|SUBMITTED name=|Inspect with Chrome)/.test(l));
+      // Only the test page's own titles: before and after it submits the test's fixed values. Any
+      // other tab is the user's, even one whose title merely looks related.
+      const hit = lines.findIndex((l) => l.includes("TabItem") && /"(BCU Helium test|SUBMITTED name=Ada Lovelace\|email=ada@example\.com)/.test(l));
       if (hit < 0) break;
       // The tab's own Close button: one of the next few rows, nested under the tab.
       const close = lines.slice(hit + 1, hit + 6).find((l) => indent(l) > indent(lines[hit]) && l.includes('Button "Close"'));

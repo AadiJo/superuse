@@ -701,6 +701,9 @@ async function checkHelium(run: Run) {
   const titleBefore = w.title;
   const promptsBefore = await debuggingPrompts();
   const S = "acceptance-helium";
+  // The test tab while it's open. The shared teardown skips this check, so a step that throws
+  // would otherwise leave the tab in the user's Helium.
+  let openTab: { target_id: string; tab_id: string } | null = null;
 
   /** A second driver can see the tab but may not close it. It runs in its own process: two
    * sessions of one driver share a single pooled socket per browser, and ending either one drops
@@ -727,6 +730,7 @@ async function checkHelium(run: Run) {
 
     const [out, sampler] = await sampled(async () => {
       const tab = (await call("browser_open_tab", { session: S, target_id: target, url }, "open_tab")).sc.tab_id ?? null;
+      if (tab !== null) openTab = { target_id: target, tab_id: tab };
       const t = { session: S, target_id: target, tab_id: tab };
       await sleep(500); // let the new tab load before the first snapshot
       const snap = async (query?: string) => (await call("get_browser_state", { ...t, snapshot_format: "semantic_v2", ...(query ? { query } : {}) }, "snapshot")).sc;
@@ -756,6 +760,7 @@ async function checkHelium(run: Run) {
 
     const foreignCloseRefusal = await closeFromOtherDriver();
     const closed = out.tab_id ? !!(await call("browser_close_tab", { session: S, target_id: target, tab_id: out.tab_id }, "close_tab")).sc.closed : undefined;
+    openTab = null;
     const after = (await call("get_browser_state", { session: S, pid: w.pid, window_id: w.hwnd }, "bind")).sc;
     await call("end_session", { session: S }, "end_session", { record: false });
     return {
@@ -765,7 +770,11 @@ async function checkHelium(run: Run) {
     };
   };
 
-  const res = await drive().finally(() => {
+  const res = await drive().finally(async () => {
+    if (openTab) {
+      await call("browser_close_tab", { session: S, ...openTab }, "close_tab_after_error", { record: false }).catch(() => {});
+      await call("end_session", { session: S }, "end_session", { record: false }).catch(() => {});
+    }
     server.close();
     server.closeAllConnections();
   });

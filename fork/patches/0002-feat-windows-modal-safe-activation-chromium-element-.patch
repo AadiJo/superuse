@@ -1,7 +1,7 @@
 From 9f0545d5f70f80ca7131d5dba813bcc06ac96177 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 21:32:35 -0500
-Subject: [PATCH 02/12] feat(windows): modal-safe activation, chromium element
+Subject: [PATCH 02/13] feat(windows): modal-safe activation, chromium element
  patterns, background modifier keys
 
 ---

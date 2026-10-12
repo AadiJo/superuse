@@ -1,7 +1,7 @@
 From ebcb8b0d8eaeeddb1c03f4e6555d3f1edc75b2b6 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 23:33:00 -0500
-Subject: [PATCH 10/12] fix(windows): keep the foreground shield until a
+Subject: [PATCH 10/13] fix(windows): keep the foreground shield until a
  dispatched invoke returns
 
 The fg_bypass shield (the host window disabled so it cannot take foreground) ended when invoke_with_deadline returned Dispatched at its 1.5 s deadline, while the Invoke kept running. A Chromium or XAML provider that self-activates when it finally runs the action could then steal foreground. On a dispatched Invoke the shield now moves to the Invoke thread and is lowered when Invoke returns, or after 10 s at most; the tool call does not wait. Guards only re-enable a window they disabled, so a guard armed while a dispatched one still holds the window cannot leave it disabled.

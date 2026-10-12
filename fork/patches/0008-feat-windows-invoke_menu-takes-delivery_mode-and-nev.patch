@@ -1,7 +1,7 @@
 From 5cca420ca9597bceda4120fd97297d7274aee6d0 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 23:28:57 -0500
-Subject: [PATCH 08/12] feat(windows): invoke_menu takes delivery_mode and
+Subject: [PATCH 08/13] feat(windows): invoke_menu takes delivery_mode and
  never activates in the background
 
 invoke_menu activated the target whenever a menu could not be walked with posted messages: WPF and XAML hosts, and Win32 menu items missing or disabled in the static HMENU, which includes a mistyped path (the window was activated before the walk failed). invoke_menu now accepts delivery_mode like the input tools. Background, the default, never activates: those menus return background_unavailable with the cause (for a Win32 menu bar, which segment did not resolve and the items it has). Foreground keeps the activate, walk, restore route. The action record reports the requested delivery.

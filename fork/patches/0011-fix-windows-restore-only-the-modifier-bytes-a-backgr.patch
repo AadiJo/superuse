@@ -1,7 +1,7 @@
 From fffd3ac3a71c7c21cd44f02f076a2a8dbf931b71 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 23:34:58 -0500
-Subject: [PATCH 11/12] fix(windows): restore only the modifier bytes a
+Subject: [PATCH 11/13] fix(windows): restore only the modifier bytes a
  background shortcut held
 
 post_key_with_modifier_state saved the keyboard state after AttachThreadInput and wrote the whole array back afterwards. AttachThreadInput resets the shared key state, so the target's earlier state cannot be kept from another thread either way, but the full write also undid any key that changed during the hold (real input to a foreground target), and wrote a zeroed array if the state could not be read. Cleanup now puts back only the modifier bytes it set, on every path. The comment on the WM_NULL round trip now says what it cannot prove: a thread waiting in its own SendMessage or COM call answers sent messages while posted ones stay queued.

@@ -1,7 +1,7 @@
 From bc72309fabd0c8824b9bd1836599406af214edd4 Mon Sep 17 00:00:00 2001
 From: Advait Johari <zakethegr8@gmail.com>
 Date: Sun, 11 Oct 2026 23:22:55 -0500
-Subject: [PATCH 06/12] fix(windows): check an element token's window against
+Subject: [PATCH 06/13] fix(windows): check an element token's window against
  its pid before input
 
 Explicit (pid, window_id) pairs were already refused when the window belongs to another process. A call that names its target only by element_token took the HWND recorded in the token's snapshot without that check, so a window that closed after the snapshot (dead or reused handle) still received input. The guard now resolves the token's pid and window and applies the same ownership check.

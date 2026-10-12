@@ -8,7 +8,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { sleep, type Args, type BrowserTab, type Driver, type DriverResult, type DriverWindow, type Image } from "./driver.ts";
+import { sleep, trace, type Args, type BrowserTab, type Driver, type DriverResult, type DriverWindow, type Image } from "./driver.ts";
 import { appOf, type App, type Policy } from "./policy.ts";
 
 const SHOT_MAX = 1200; // long edge; inside Claude's no-rescale box for common window shapes
@@ -146,6 +146,15 @@ export class Desktop {
 
   /** Entry point for every sandbox call: `cua.*` and `w.*` methods with JSON arguments. */
   async dispatch(method: string, args: unknown[]): Promise<unknown> {
+    const started = performance.now();
+    try {
+      return await this.route(method, args);
+    } finally {
+      trace({ api: method, ms: Math.round(performance.now() - started) });
+    }
+  }
+
+  private async route(method: string, args: unknown[]): Promise<unknown> {
     switch (method) {
       case "cua.windows": return this.windows(args[0] == null ? undefined : windowQuery(args[0]));
       case "cua.window": return this.bind(args[0], () => this.findWindow(windowQuery(args[1])));

@@ -10,11 +10,12 @@
 // Env: BCU_CUA_DRIVER  path to cua-driver.exe (default: ../driver/cua-driver.exe)
 //      BCU_CURSOR      "fast" (default: visible agent cursor, short glide), "animated" or "off"
 //      BCU_APPS, BCU_FOREGROUND, BCU_POLICY  see policy.ts;  BCU_AUDIT  action log path or "off"
+//      BCU_TRACE       file for per-call timings (benchmarks; off by default)
 
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { Driver, type CursorMode } from "./driver.ts";
+import { Driver, trace, type CursorMode } from "./driver.ts";
 import { Desktop } from "./desktop.ts";
 import { Policy, type Ask } from "./policy.ts";
 import { Sandbox } from "./sandbox.ts";
@@ -118,7 +119,9 @@ let runTail: Promise<unknown> = Promise.resolve();
 
 async function runJs(code: string) {
   desktop.beginRun();
+  const started = performance.now();
   const r = await sandbox.run(code);
+  trace({ js: Math.round(performance.now() - started), error: !!r.error });
   const out = desktop.out;
   const parts = [...r.logs];
   if (r.hasValue && r.value !== null) parts.push(r.value);

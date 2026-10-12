@@ -3,7 +3,17 @@
 // time in the order they were issued. If the driver exits, the next call starts a fresh one.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import fs from "node:fs";
 import { createInterface } from "node:readline";
+
+const TRACE = process.env.BCU_TRACE;
+
+/** BCU_TRACE=<file>: append one JSON line per driver and API call with its timing, for the
+ *  benchmark. Off by default. Entries carry tool and method names only, never arguments. */
+export function trace(entry: Record<string, unknown>) {
+  if (!TRACE) return;
+  try { fs.appendFileSync(TRACE, JSON.stringify({ t: Date.now(), ...entry }) + "\n"); } catch { /* tracing must never break a call */ }
+}
 
 export type Image = { data: string; mimeType: string };
 export type DriverWindow = { pid: number; window_id: number; title?: string; app_name?: string; z_index?: number };
@@ -157,8 +167,10 @@ export class Driver {
     }
     const clean: Args = Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== null));
     if (this.sessionTools.has(name)) clean.session = SESSION;
+    const started = performance.now();
     const res = (await withTimeout(this.request("tools/call", { name, arguments: clean }), name,
       "the app is probably blocked by a modal dialog. Check cua.windows() for a new window.")) as ToolResult;
+    trace({ driver: name, ms: Math.round(performance.now() - started), ok: !res.isError });
     const content = res.content ?? [];
     const text = content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
     const images = content.filter((c) => c.type === "image" && c.data).map((c) => ({ data: c.data!, mimeType: c.mimeType ?? "image/png" }));

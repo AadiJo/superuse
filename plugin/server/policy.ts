@@ -107,8 +107,12 @@ export class Policy {
     this.settle(app, answer);
   }
 
-  /** Check before launching by name; the launched process's windows are then in scope. */
+  /** Check before launching by name or path; the launched process's windows are then in scope.
+   *  The name is judged by its last path segment, so it must be exactly what Windows will run:
+   *  a NUL or other control character would make ShellExecute stop early and run something else
+   *  ("cmd.exe\0C:\\testpad.exe" reads as testpad here and runs cmd.exe). */
   async requireLaunch(name: string): Promise<{ remember: boolean }> {
+    if (/[\u0000-\u001f"<>|*?]/.test(name) || !name.trim()) throw new Error(`can't open ${JSON.stringify(name)}: not a plain app name or path`);
     const guess = { key: path.basename(name.replace(/\\/g, "/")).replace(/\.exe$/i, "").toLowerCase(), label: name };
     const s = this.status(guess);
     if (s === "denied") throw new Error(`${name} is blocked by policy (${this.denyReason(guess)}).`);

@@ -41,7 +41,7 @@ All arms get the same prompt text and effort level (`medium`). Claude runs use `
 | `xapp_csv_list` | File Explorer, TestPad | Read a folder listing (extensions may be hidden), write a sorted list, save |
 | `xapp_form_from_file` | TestPad, Edge | Read a contact card, fill and submit the form |
 
-The `xapp_*` tasks draw random values each run (invoice lines, which files exist, which contact), and their checkers read the expected answer from `expected.json` in the task folder.
+The `xapp_*` tasks draw random values each run (invoice lines, which files exist, which contact), and their checkers compare against answers kept in the benchmark process's memory, where the agent can't edit them.
 
 TestPad (`apps/TestPad.cs`, compiled to its own exe) stands in for Windows Notepad, because Notepad restores the user's own session tabs, and some of those hold secrets. Task files live in `%TEMP%\bcu`. Edge runs in a throwaway profile there.
 
@@ -59,7 +59,7 @@ TestPad (`apps/TestPad.cs`, compiled to its own exe) stands in for Windows Notep
 - Desktop disturbance in `metrics.json`: how far the real cursor moved and how often the foreground window changed during the run, sampled every 100 ms.
 - `windows-closed.txt`: what teardown closed.
 
-Teardown only closes windows that appeared during the run and belong to the task apps (`win.TASK_WINDOWS`).
+Teardown only closes windows that appeared during the run and belong to the task apps (`win.TASK_WINDOWS`, plus File Explorer windows showing a folder under `%TEMP%\bcu`). It only ever kills TestPad, the benchmark's own exe; everything else gets a normal close.
 
 ## Caveats
 

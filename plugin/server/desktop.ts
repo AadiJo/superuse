@@ -113,7 +113,7 @@ export class Desktop {
     switch (method) {
       case "cua.windows": return this.windows(args[0] == null ? undefined : windowQuery(args[0]));
       case "cua.window": return this.bind(args[0], () => this.findWindow(windowQuery(args[1])));
-      case "cua.open": return this.bind(args[0], () => this.open(str(args[1], "open"), args[2]));
+      case "cua.open": return this.bind(args[0], () => this.open(str(args[1], "open")));
       case "cua.sleep": return this.cappedSleep(optNum(args[0], "sleep") ?? 0);
     }
     if (!method.startsWith("w.")) throw new Error(`unknown API method ${method}`);
@@ -128,7 +128,7 @@ export class Desktop {
       case "type": return w.type(str(a, "type"), b == null ? undefined : elem(b, "type"), inputOpts(c));
       case "key": return w.key(str(a, "key"), inputOpts(b));
       case "drag": return w.drag(point(a, "drag from"), point(b, "drag to"), inputOpts(c));
-      case "menu": return w.menu(Array.isArray(a) ? a.map((s) => str(s, "menu")) : str(a, "menu"));
+      case "menu": return w.menu(Array.isArray(a) ? a.map((s) => str(s, "menu")) : str(a, "menu"), inputOpts(b));
       case "screenshot": return w.screenshot();
       case "waitFor": return w.waitFor(str(a, "waitFor"), optNum(b, "waitFor timeout") ?? 5000);
     }
@@ -150,11 +150,15 @@ export class Desktop {
     }
   }
 
-  /** Visible top-level windows, minus the driver's cursor overlay and policy-denied apps. */
+  /** Visible top-level windows, minus policy-denied apps (which includes the driver's cursor overlay). */
   private async listWindows(): Promise<DriverWindow[]> {
+    return (await this.listAllWindows()).filter((w) => this.policy.status(appOf(w)) !== "denied");
+  }
+
+  private async listAllWindows(): Promise<DriverWindow[]> {
     const r = await this.driver.call("list_windows", { on_screen_only: true });
     if (r.isError) fail(r, "windows");
-    return (r.data.windows ?? []).filter((w) => this.policy.status(appOf(w)) !== "denied");
+    return r.data.windows ?? [];
   }
 
   private approved(w: DriverWindow) { return this.policy.windowApproved(appOf(w), w.pid); }
@@ -194,24 +198,31 @@ export class Desktop {
 
   private makeWindow(w: DriverWindow) { return new Win(this, w.pid, w.window_id, appOf(w), w.title ?? ""); }
 
-  private async open(name: string, rawOpts: unknown): Promise<Win> {
-    const args = isObj(rawOpts) && Array.isArray(rawOpts.args) ? rawOpts.args.map((a) => str(a, "open args")) : undefined;
+  /** Launch by name or path. No command-line arguments: an approved app plus arguments can run
+   *  anything (Edge's --renderer-cmd-prefix, `explorer.exe C:\\...\\cmd.exe`). Open files through
+   *  the app's own File > Open instead. */
+  private async open(name: string): Promise<Win> {
     const { remember } = await this.policy.requireLaunch(name);
     const isPath = /[\\/]/.test(name);
-    const r = await this.driver.call("launch_app", { name: isPath ? undefined : name, path: isPath ? name : undefined, additional_arguments: args });
+    const r = await this.driver.call("launch_app", { name: isPath ? undefined : name, path: isPath ? name : undefined });
     if (r.isError) fail(r, "open");
+    // launch_app's window records carry no app_name, so identify the window from the window list,
+    // which does: the policy decides by that identity, not by the name the model asked for.
+    const ids = new Set((r.data.windows ?? []).map((w) => w.window_id));
     const pid = r.data.pid;
-    let wins = r.data.windows ?? [];
-    for (let i = 0; i < 20 && wins.length === 0; i++) {
-      await sleep(250);
-      wins = (await this.listWindows()).filter((w) => w.pid === pid);
+    let win: DriverWindow | undefined;
+    for (let i = 0; i < 20 && !win; i++) {
+      if (i) await sleep(250);
+      const all = await this.listAllWindows();
+      win = all.find((w) => ids.has(w.window_id)) ?? all.find((w) => w.pid === pid);
     }
-    if (!wins.length || pid === undefined) throw new Error(`launched ${name} (pid ${pid}) but no window appeared yet; try cua.window("${name}")`);
-    const first = wins[0];
-    this.policy.launched(first.pid ?? pid, appOf(first), remember);
-    audit({ tool: "launch_app", app: appOf(first).key, window: first.window_id });
+    if (!win) throw new Error(`launched ${name} (pid ${pid}) but no window appeared yet; try cua.window("${name}")`);
+    const app = appOf(win);
+    if (this.policy.status(app) === "denied") throw new Error(`${name} opened ${app.label}, which is blocked by policy.`);
+    this.policy.launched(win.pid, app, remember);
+    audit({ tool: "launch_app", app: app.key, window: win.window_id });
     this.markAction();
-    return this.makeWindow({ ...first, pid: first.pid ?? pid });
+    return this.makeWindow(win);
   }
 
   private async cappedSleep(ms: number) {
@@ -245,6 +256,7 @@ class Win {
   private snapshot: string | null = null;
   private lastTree = "";
   private hasFrame = false; // did the latest read include a screenshot? Pixel actions map through it.
+  private frameSize: { w: number; h: number } | null = null; // pixel size of that screenshot
   private readonly d: Desktop;
   readonly pid: number;
   readonly id: number;
@@ -266,6 +278,7 @@ class Win {
     if (r.isError) fail(r, "state");
     this.snapshot = r.data.snapshot_id ?? this.snapshot;
     this.hasFrame = !!opts.screenshot;
+    if (opts.screenshot) this.noteFrame(r);
     return { r, tree: r.data.tree_markdown ?? r.data.diff_markdown ?? r.text };
   }
 
@@ -337,8 +350,22 @@ class Win {
     return r;
   }
 
-  /** The driver maps pixels through the latest read's screenshot; refresh it silently if needed. */
-  private async ensureFrame() { if (!this.hasFrame) await this.frame(false); }
+  private noteFrame(r: DriverResult) {
+    const { screenshot_width: w, screenshot_height: h } = r.data;
+    this.frameSize = w && h ? { w, h } : null;
+  }
+
+  /** The driver maps pixels through the latest read's screenshot, so refresh it silently if needed,
+   *  and keep every pixel inside it: a point outside this window would land on whatever is there. */
+  private async pixelTarget(...points: Array<[number, number]>) {
+    if (!this.hasFrame) await this.frame(false);
+    const f = this.frameSize;
+    for (const [x, y] of points) {
+      if (f && (x < 0 || y < 0 || x >= f.w || y >= f.h)) {
+        throw new Error(`[${x}, ${y}] is outside this window's screenshot (${f.w}x${f.h}); pixels are relative to the latest w.screenshot() of this window`);
+      }
+    }
+  }
 
   /** Role of row `i` in the last tree shown, e.g. "ListItem". */
   private roleOf(i: number): string | undefined {
@@ -354,7 +381,7 @@ class Win {
       const select = !opts.double && !opts.right && /^(ListItem|TreeItem|DataItem)$/.test(this.roleOf(target) ?? "");
       return void await this.act("click", { element_token: this.token(target), button, count, delivery_mode, action: select ? "select" : undefined });
     }
-    await this.ensureFrame();
+    await this.pixelTarget(target);
     await this.act("click", { pid: this.pid, window_id: this.id, x: target[0], y: target[1], button, count, delivery_mode });
   }
 
@@ -400,19 +427,23 @@ class Win {
 
   async drag(from: [number, number], to: [number, number], opts: InputOpts = {}) {
     const delivery_mode = await this.delivery(opts);
-    await this.ensureFrame();
+    await this.pixelTarget(from, to);
     await this.act("drag", { pid: this.pid, window_id: this.id, from_x: from[0], from_y: from[1], to_x: to[0], to_y: to[1], delivery_mode });
   }
 
-  async menu(menuPath: string | string[]) {
+  /** Walk a menu by labels. Classic menus run in the background; a host that needs the window
+   *  activated for its menu refuses with background_unavailable unless {foreground: true} passed
+   *  the policy gate. */
+  async menu(menuPath: string | string[], opts: InputOpts = {}) {
     const p = Array.isArray(menuPath) ? menuPath : menuPath.split(">").map((s) => s.trim());
+    const delivery_mode = await this.delivery(opts);
     try {
-      await this.act("invoke_menu", { pid: this.pid, window_id: this.id, path: p });
+      await this.act("invoke_menu", { pid: this.pid, window_id: this.id, path: p, delivery_mode });
     } catch (e) {
       // Labels like "Replace..." are often written without the ellipsis; retry once with it.
       const seg = Number(String(e).match(/segment (\d+) was not found/)?.[1]); // 0-based
       if (Number.isNaN(seg) || seg >= p.length || p[seg].endsWith("...")) throw e;
-      await this.act("invoke_menu", { pid: this.pid, window_id: this.id, path: p.map((x, k) => (k === seg ? `${x}...` : x)) });
+      await this.act("invoke_menu", { pid: this.pid, window_id: this.id, path: p.map((x, k) => (k === seg ? `${x}...` : x)), delivery_mode });
     }
   }
 
@@ -423,6 +454,7 @@ class Win {
     const r = await this.d.driver.call("get_window_state", { pid: this.pid, window_id: this.id, include_accessibility_tree: false, include_screenshot: true, max_image_dimension: SHOT_MAX });
     if (r.isError) fail(r, "screenshot");
     this.hasFrame = true;
+    this.noteFrame(r);
     if (show) this.d.out.images.push(...r.images);
   }
 

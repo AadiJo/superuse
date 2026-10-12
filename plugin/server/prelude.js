@@ -5,6 +5,7 @@
 // API calls run one at a time in the order they were written, whether or not the model awaits
 // them: `w.setValue(...); await w.menu(...)` must not race. A call's arguments may be promises
 // (an un-awaited `w.find(...)`); they resolve inside the queue, just before the call runs.
+// Calls queued by a js call that timed out are cancelled, not run later behind the next call.
 (() => {
   const host = globalThis.__bcu_host;
   delete globalThis.__bcu_host;
@@ -18,18 +19,24 @@
   };
 
   let tail = Promise.resolve();
+  let epoch = 0; // bumped when a timed-out js call's queue is abandoned
   let pending = []; // every API call and log() started during the current js call
   let errors = []; // failures of API calls, reported even when nobody awaited them
   let logs = [];
   let nextHandle = 0;
 
   function call(method, args) {
+    const queuedIn = epoch;
+    const cancelled = () => { throw new Error("cancelled: the js call that queued this timed out"); };
     const run = tail.then(async () => {
+      if (queuedIn !== epoch) cancelled();
       const resolved = await Promise.all(args.map((a) => (isThenable(a) ? a : Promise.resolve(a))));
+      if (queuedIn !== epoch) cancelled();
       return JSON.parse(await host(method, JSON.stringify(resolved)));
     });
     tail = run.then(() => {}, () => {});
-    pending.push(run.then(() => {}, (e) => { errors.push(message(e)); }));
+    // Failures of an abandoned (timed-out) run's calls belong to that run, not the next one.
+    pending.push(run.then(() => {}, (e) => { if (queuedIn === epoch) errors.push(message(e)); }));
     return run;
   }
 
@@ -94,6 +101,6 @@
     return JSON.stringify({ value: value === undefined ? null : show(value), hasValue: value !== undefined, error, errors, logs });
   });
 
-  /** After a timed-out call, let new calls run instead of queueing behind the stuck one. */
-  fixed("__bcu_reset_queue", () => { tail = Promise.resolve(); });
+  /** After a timed-out call: cancel everything it queued, and let new calls start right away. */
+  fixed("__bcu_reset_queue", () => { epoch++; tail = Promise.resolve(); });
 })();

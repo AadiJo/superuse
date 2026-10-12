@@ -29,7 +29,7 @@ const API = `Control Windows apps with JavaScript. The code runs in an async fun
 
 cua.windows(filter?)            -> approved windows as {id, pid, app, title}; other apps as {app, approved: false}
 cua.window("TestPad" | {pid,id,title,app}) -> Window  (binding an app that isn't approved asks the user)
-cua.open("Calculator" | "C:\\\\path\\\\app.exe", {args?}) -> Window  (launch in the background)
+cua.open("Calculator" | "C:\\\\path\\\\app.exe") -> Window  (launch in the background)
 
 w.state({query?, diff?, max?, screenshot?}) -> string  accessibility tree; rows tagged [N] are actionable; query "a|b" matches either
 w.find("Save", role?)                        -> N | null  best match by element name (exact first); role like "Button"
@@ -39,12 +39,12 @@ w.select(N, "Pro")                           choose an option in combo box N (ve
 w.type("text", N?)                           type at the focus, or into element N
 w.key("enter" | "ctrl+s" | "alt+f4")         keys go to this window
 w.drag([x1, y1], [x2, y2])                   pixels in the latest screenshot
-w.menu("File > Save As...")                  invoke a menu item by its labels
+w.menu("File > Save As...")                  invoke a menu item by its labels (background; some apps need {foreground: true})
 w.waitFor("text", ms?)                       wait until text shows up in the tree; returns matching rows
 w.screenshot()                               attach an image of the window
 
 Input goes to the target window in the background: the user's mouse and focus are not touched.
-If an action is refused in the background, click/type/key/drag accept {foreground: true}, which briefly takes focus and the real cursor; the user may be asked first. Use it only when setValue/select can't do the job.
+If an action is refused in the background, click/type/key/drag/menu accept {foreground: true}, which briefly takes focus and the real cursor; the user may be asked first. Use it only when setValue/select can't do the job.
 Don't sleep: state(), find() and waitFor() already wait for the UI to settle after actions.
 Element numbers come from the most recent state() of that window; call state() again after the UI changes.
 If an action opens a dialog, the result notes the new window; bind it with cua.window({pid: w.pid, title: "..."}).
@@ -54,7 +54,7 @@ Work in few calls: batch several actions and the verifying read into one call. E
   const w = await cua.window("TestPad");
   const ed = await w.find("Text editor");
   await w.setValue(ed, "alpha\\r\\nbeta"); await w.key("ctrl+s");
-  return await w.waitFor("TestPad");               // the title loses its * once saved`;
+  return (await w.state({query: "Text editor"})).split("\\n")[0];  // header shows the title; a leading * means unsaved`;
 
 const TOOLS = [
   { name: "js", description: API, inputSchema: { type: "object", properties: { code: { type: "string", description: "JavaScript to run" } }, required: ["code"] } },
@@ -70,7 +70,10 @@ const send = (msg: object) => process.stdout.write(JSON.stringify(msg) + "\n");
 const outstanding = new Map<string, (m: Message) => void>(); // our requests to the client, by id
 let nextOwnId = 1;
 let clientCanElicit = false;
-let userWaitMs = 0;
+let userWaitMs = 0; // finished prompts
+let promptOpenSince: number | null = null; // a prompt the user is looking at right now
+/** Time spent on approval prompts, including one still open: the js timeout doesn't count it. */
+const userWait = () => userWaitMs + (promptOpenSince === null ? 0 : Date.now() - promptOpenSince);
 
 function requestClient(method: string, params: object): Promise<Message> {
   const id = `bcu-${nextOwnId++}`;
@@ -82,6 +85,7 @@ function requestClient(method: string, params: object): Promise<Message> {
 const ask: Ask = async (message, rememberLabel) => {
   if (!clientCanElicit) return "unsupported";
   const started = Date.now();
+  promptOpenSince = started;
   try {
     const reply = await requestClient("elicitation/create", {
       message,
@@ -91,13 +95,14 @@ const ask: Ask = async (message, rememberLabel) => {
     if (reply.error || result.action !== "accept") return "no";
     return result.content?.remember ? "always" : "once";
   } finally {
+    promptOpenSince = null;
     userWaitMs += Date.now() - started;
   }
 };
 
 const policy = new Policy(ask);
 const desktop = new Desktop(new Driver(DRIVER, CURSOR), policy);
-const sandbox = await Sandbox.create((method, args) => desktop.dispatch(method, args), () => userWaitMs);
+const sandbox = await Sandbox.create((method, args) => desktop.dispatch(method, args), userWait);
 process.on("unhandledRejection", () => {}); // every API promise is tracked by the sandbox; nothing should land here
 
 /** One js call at a time: the sandbox's queue and logs belong to the call that's running. */

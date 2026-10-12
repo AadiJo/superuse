@@ -91,41 +91,51 @@ foreach ($l in [BcuW]::Windows(${str(titles).lower()})) {{
     return wins
 
 
-# Only these (process, window class) pairs are ever closed by teardown. Anything
-# else that appears during a run (system helper windows, the user's own apps)
-# is left alone. A class of None matches any window of that process.
+# Teardown closes only windows a run can have created, and kills only the benchmark's own exe:
+# - TestPad (benchmark-only exe): closed, then killed if it's still open.
+# - Calculator, Notepad, the Open With picker, System Properties: WM_CLOSE only, never killed, so
+#   an unsaved document of the user's gets its normal prompt instead of being destroyed.
+# - File Explorer: only folder windows showing a path under %TEMP%\bcu (bench_explorer_windows).
+# - Edge: not here. Tasks run Edge in a throwaway profile that teardown kills by command line.
+# A class of None matches any window of that process.
 TASK_WINDOWS: set[tuple[str, str | None]] = {
     ("ApplicationFrameHost", "ApplicationFrameWindow"),  # UWP frames such as Calculator
     ("CalculatorApp", None),
-    ("TestPad", None),  # the benchmark's editor and its dialogs
+    ("TestPad", None),
     ("Notepad", None),  # only if a run opened it (e.g. double-clicking a file)
-    ("OpenWith", None),  # "How do you want to open this file?" picker
-    ("explorer", "CabinetWClass"),  # File Explorer folder windows, not the shell
-    ("msedge", None),
+    ("OpenWith", None),
     ("rundll32", "#32770"),  # sysdm.cpl dialog
     ("SystemPropertiesComputerName", None),
     ("SystemPropertiesAdvanced", None),
 }
+KILLABLE = {"TestPad"}
 
 
 def is_task_window(w: Win) -> bool:
-    return any(w.proc == proc and (cls is None or w.cls == cls or (cls.endswith("*") and w.cls.startswith(cls[:-1])))
-               for proc, cls in TASK_WINDOWS)
+    return any(w.proc == proc and (cls is None or w.cls == cls) for proc, cls in TASK_WINDOWS)
+
+
+def bench_explorer_windows() -> set[int]:
+    """HWNDs of File Explorer windows currently showing a folder under %TEMP%\\bcu."""
+    out = ps(r"""$s = New-Object -ComObject Shell.Application
+foreach ($w in $s.Windows()) { try { if ($w.Document.Folder.Self.Path -like '*\Temp\bcu*') { [int64]$w.HWND } } catch {} }""")
+    return {int(l) for l in out.split() if l.strip().isdigit()}
 
 
 def close_new_windows(before: list[Win], grace_s: float = 3.0) -> list[str]:
-    """WM_CLOSE task-app windows that weren't in `before`; kill processes that
-    were new and still hold windows after the grace period. Returns what was closed."""
+    """WM_CLOSE the task windows that weren't in `before`; kill only KILLABLE processes that are new
+    and still hold windows after the grace period. Returns what was closed."""
     before_hwnds = {w.hwnd for w in before}
     before_pids = {w.pid for w in before}
-    new = [w for w in list_windows() if w.hwnd not in before_hwnds and is_task_window(w)]
+    explorer = bench_explorer_windows()
+    new = [w for w in list_windows() if w.hwnd not in before_hwnds and (is_task_window(w) or w.hwnd in explorer)]
     if not new:
         return []
     hwnds = ",".join(str(w.hwnd) for w in new)
     ps(WIN_TYPES + f'foreach ($h in @({hwnds})) {{ [void][BcuW]::PostMessage([IntPtr]$h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }}')
     time.sleep(grace_s)
     still = [w for w in list_windows() if w.hwnd in {n.hwnd for n in new}]
-    killable = sorted({w.pid for w in still if w.pid not in before_pids})
+    killable = sorted({w.pid for w in still if w.pid not in before_pids and w.proc in KILLABLE})
     if killable:
         ps("Stop-Process -Force -Id " + ",".join(map(str, killable)) + " -ErrorAction SilentlyContinue")
     return [f"{w.proc}:{w.cls}" for w in new] + [f"killed:{p}" for p in killable]
@@ -171,17 +181,19 @@ while ($true) {{
     def stop(self) -> None:
         self.proc.kill()
 
-    def summary(self) -> dict[str, object]:
-        """Desktop disturbance: how far the real cursor moved and how often the
-        foreground window changed while the agent ran."""
-        if not self.samples:
+    def summary(self, since: float = 0.0) -> dict[str, object]:
+        """Desktop disturbance: how far the real cursor moved and how often the foreground window
+        changed while the agent ran. `since` drops earlier samples (the manual baseline starts the
+        sampler before the human pastes the prompt, and their own mouse use isn't the agent's)."""
+        samples = [s for s in self.samples if s.t >= since]
+        if not samples:
             return {"samples": 0}
-        s0 = self.samples[0]
-        max_disp = max(abs(s.x - s0.x) + abs(s.y - s0.y) for s in self.samples)
-        moves = sum(1 for a, b in zip(self.samples, self.samples[1:]) if (a.x, a.y) != (b.x, b.y))
-        fg_changes = sum(1 for a, b in zip(self.samples, self.samples[1:]) if a.fg != b.fg)
-        return {"samples": len(self.samples), "cursor_max_displacement_px": max_disp, "cursor_move_samples": moves,
-                "foreground_changes": fg_changes, "foreground_restored": self.samples[-1].fg == s0.fg}
+        s0 = samples[0]
+        max_disp = max(abs(s.x - s0.x) + abs(s.y - s0.y) for s in samples)
+        moves = sum(1 for a, b in zip(samples, samples[1:]) if (a.x, a.y) != (b.x, b.y))
+        fg_changes = sum(1 for a, b in zip(samples, samples[1:]) if a.fg != b.fg)
+        return {"samples": len(samples), "cursor_max_displacement_px": max_disp, "cursor_move_samples": moves,
+                "foreground_changes": fg_changes, "foreground_restored": samples[-1].fg == s0.fg}
 
 
 def openwith_pids() -> set[int]:

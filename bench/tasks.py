@@ -233,8 +233,13 @@ def edge_form_teardown() -> None:
 
 # --- Cross-app tasks: values are random per run, so a stale answer can't pass ----------
 
+# Expected answers stay in this process's memory: the agent can save files into the task folder,
+# so an answer file there could be overwritten. setup() and check() run in the same process.
+_EXPECTED: dict[str, dict] = {}
+
+
 def expected(task_id: str) -> dict:
-    return json.loads((win.WSL_TEMP / task_id / "expected.json").read_text())
+    return _EXPECTED[task_id]
 
 
 def xapp_invoice_setup() -> None:
@@ -246,7 +251,7 @@ def xapp_invoice_setup() -> None:
 <style>body{{font:16px system-ui;margin:40px}} td,th{{border:1px solid #999;padding:6px 14px}}</style></head><body>
 <h1>Invoice 4471</h1><table><tr><th>Item</th><th>Quantity</th><th>Unit price</th></tr>{rows}</table>
 <p>Total: (to be calculated)</p></body></html>""")
-    (wsl / "expected.json").write_text(json.dumps({"total": sum(q * p for _, q, p in items)}))
+    _EXPECTED["xapp_invoice"] = {"total": sum(q * p for _, q, p in items)}
     open_edge(file_url(wpath + "\\invoice.html"))
     open_testpad()
 
@@ -268,7 +273,7 @@ def xapp_csv_list_setup() -> None:
     for name in picked + OTHER_FILES:
         (wsl / name).write_text("x")
     (wsl / "report.txt").write_text("")
-    (wsl / "expected.json").write_text(json.dumps({"csv": sorted(picked)}))
+    _EXPECTED["xapp_csv_list"] = {"csv": sorted(picked)}
     start("explorer.exe", wpath)
     open_testpad(f"{wpath}\\report.txt")
 
@@ -289,7 +294,7 @@ def xapp_form_from_file_setup() -> None:
     plan = random.choice(["Free", "Pro", "Team"])
     (wsl / "contact.txt").write_text(f"Contact card\r\nName: {name}\r\nEmail: {email}\r\nPlan: {plan}\r\n")
     (wsl / "form.html").write_text(FORM_HTML)
-    (wsl / "expected.json").write_text(json.dumps({"want": f"name={name}|email={email}|plan={plan.lower()}|agree=yes"}))
+    _EXPECTED["xapp_form_from_file"] = {"want": f"name={name}|email={email}|plan={plan.lower()}|agree=yes"}
     open_testpad(f"{wpath}\\contact.txt")
     open_edge(file_url(wpath + "\\form.html"))
 

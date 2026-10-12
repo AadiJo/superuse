@@ -67,6 +67,11 @@ def main() -> int:
         check("syntax error is reported", err and "SyntaxError" in t, t)
         t, _ = js(c, "return 'still alive'")
         check("server usable after loop and syntax error", t == "still alive", t)
+        js(c, "async function twice(x) { return 2 * x }\nclass Box { constructor(v) { this.v = v } }")
+        t, _ = js(c, "return [await twice(21), new Box(7).v]")
+        check("top-level functions and classes persist", t == "[42,7]", t)
+        t, err = js(c, 'return await cua.open("C:\\\\Windows\\\\System32\\\\cmd.exe\\u0000C:\\\\testpad.exe")')
+        check("launch name with a NUL is refused", err and "not a plain app name" in t, t)
         c.call("js_reset", {})
         t, _ = js(c, "return typeof answer")
         check("js_reset clears variables", t == "undefined", t)
@@ -82,6 +87,18 @@ def main() -> int:
         other = next((r["app"] for r in rows if r.get("approved") is False), None)
         t, err = js(c, f"return await cua.window({json.dumps(other)})") if other else ("no unapproved app on screen", True)
         check("no elicitation: refusal says how to approve", err and "allow" in t and str(policy) in t, t)
+
+    # Timeouts, with a 3 s limit: calls queued by the timed-out js call must not run afterwards,
+    # and js_reset right after a timeout (live host calls) must not crash the server.
+    with server({**base, "BCU_CALL_TIMEOUT_MS": "3000"}, elicit=None) as c:
+        t, err = js(c, "globalThis.ran = 0; for (let i = 0; i < 20; i++) cua.sleep(300).then(() => ran++); await new Promise(() => {})")
+        check("stuck js call times out", err and "timed out" in t, t)
+        t, _ = js(c, "for (let i = 0; i < 5; i++) await cua.sleep(300); return ran")
+        check("calls queued by a timed-out call are cancelled", t.isdigit() and int(t) < 15, f"ran={t} of 20")
+        js(c, "cua.sleep(300); await new Promise(() => {})")
+        c.call("js_reset", {})
+        t, _ = js(c, "return 'alive after reset'")
+        check("js_reset after a timeout keeps the server alive", t == "alive after reset", t)
 
     if other:
         with server(base, elicit="decline") as c:

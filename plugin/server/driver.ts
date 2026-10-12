@@ -19,6 +19,8 @@ export type DriverData = Partial<{
   truncated: boolean;
   summary: string;
   pid: number;
+  screenshot_width: number;
+  screenshot_height: number;
   windows: DriverWindow[];
 }>;
 
@@ -38,6 +40,12 @@ const TIMEOUT_MS = 20_000;
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export type CursorMode = "fast" | "animated" | "off";
+
+function withTimeout<T>(p: Promise<T>, what: string, hint = ""): Promise<T> {
+  return Promise.race([p, sleep(TIMEOUT_MS).then((): never => {
+    throw new Error(`${what} got no reply in ${TIMEOUT_MS / 1000}s${hint ? `; ${hint}` : ""}`);
+  })]);
+}
 
 export class Driver {
   private proc: ChildProcessWithoutNullStreams | null = null;
@@ -60,14 +68,16 @@ export class Driver {
     this.proc = proc;
     createInterface({ input: proc.stdout }).on("line", (line) => this.onLine(line));
     proc.stderr.on("data", () => {}); // driver logs; ignored
-    proc.on("exit", () => {
+    // A spawn failure (missing exe) emits "error" and may never emit "exit": handle both the same way.
+    const gone = (why: string) => {
       if (this.proc !== proc) return;
       this.proc = null;
-      for (const p of this.pending.values()) p.reject(new Error("the driver process exited; the next call restarts it"));
+      for (const p of this.pending.values()) p.reject(new Error(why));
       this.pending.clear();
-    });
-    proc.on("error", () => {}); // reported through "exit" or the request timeout
-    this.ready = this.handshake();
+    };
+    proc.on("exit", () => gone("the driver process exited; the next call restarts it"));
+    proc.on("error", (e) => gone(`couldn't run the driver at ${this.exe}: ${e.message}`));
+    this.ready = withTimeout(this.handshake(), "starting the driver");
   }
 
   private async handshake() {
@@ -115,15 +125,17 @@ export class Driver {
   /** A hung app costs one short error instead of the whole js call. */
   private async callNow(name: string, args: Args): Promise<DriverResult> {
     if (!this.proc) this.start();
-    await this.ready;
+    try {
+      await this.ready;
+    } catch (e) {
+      this.proc?.kill(); // the next call starts over instead of waiting on a broken handshake
+      this.proc = null;
+      throw e;
+    }
     const clean: Args = Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== null));
     if (this.sessionTools.has(name)) clean.session = SESSION;
-    const res = (await Promise.race([
-      this.request("tools/call", { name, arguments: clean }),
-      sleep(TIMEOUT_MS).then(() => {
-        throw new Error(`${name} got no reply in ${TIMEOUT_MS / 1000}s; the app is probably blocked by a modal dialog. Check cua.windows() for a new window.`);
-      }),
-    ])) as ToolResult;
+    const res = (await withTimeout(this.request("tools/call", { name, arguments: clean }), name,
+      "the app is probably blocked by a modal dialog. Check cua.windows() for a new window.")) as ToolResult;
     const content = res.content ?? [];
     const text = content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
     const images = content.filter((c) => c.type === "image" && c.data).map((c) => ({ data: c.data!, mimeType: c.mimeType ?? "image/png" }));

@@ -6,6 +6,8 @@
 //   node bench/helium-check.ts --claude   headless Claude run only (add --no-helium-mcp to hide the
 //                                         user's own "helium" MCP server and test the plugin alone)
 //
+// The direct run passes only if the form arrives and the foreground and cursor end where they started.
+//
 // It serves a test form from WSL on 127.0.0.1:8765; the form reports each submission back to that
 // server, so the check never reads the user's tabs. Everything happens in a tab the run opens. At
 // the end it closes any test tab still open (by its tab-strip close button) and dismisses leftover
@@ -145,7 +147,11 @@ async function directRun() {
   const { steps, wall_s, sampler } = await runSteps();
   await sleep(500);
   const submission = submissions[before] ?? null;
-  return { steps, wall_s, disturbance: sampler.summary(), submission, passed: isWanted(submission) };
+  // The page API never needs the foreground or the cursor, so both must end where the user had them,
+  // including after the browser's "Allow remote debugging?" prompt takes the foreground.
+  const disturbance = sampler.summary();
+  const background = disturbance.foreground_restored === true && disturbance.cursor_max_displacement_px === 0;
+  return { steps, wall_s, disturbance, submission, passed: isWanted(submission) && background };
 }
 
 /** The same job as a user prompt through headless Claude Code with the plugin. */

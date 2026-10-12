@@ -18,7 +18,7 @@ export type Structured = Partial<{
   snapshot_id: string;
   tree_markdown: string;
   code: string;
-  refusal: { code?: string };
+  refusal: { code?: string; message?: string };
   error: { code?: string };
   hit_pid: number;
   pid: number;

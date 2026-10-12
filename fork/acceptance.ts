@@ -686,9 +686,12 @@ async function checkHelium(run: Run) {
     const { result, ms } = await client.call(tool, args);
     const entry = { tool, ms: round1(ms), error: !!result.isError, refusal: refusalCode(result) };
     const safe = tool !== "get_browser_state" && tool !== "browser_prepare";
+    // A refusal's message is the driver's own text, so it's kept even where the rest is hidden.
+    const why = result.structuredContent?.refusal?.message;
     run.log.push({
       ...entry, args: Object.fromEntries(Object.entries(args).filter(([k, v]) => k !== "url" || v === url)),
       text: safe ? textOf(result).slice(0, 300) : "",
+      ...(why ? { refusal_message: why.slice(0, 300) } : {}),
     });
     if (record) steps.push({ step, ...entry });
     console.log(`  ${step.padEnd(24)} ${ms.toFixed(1).padStart(7)} ms ${entry.refusal ?? ""}`);

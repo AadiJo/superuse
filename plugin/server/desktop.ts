@@ -22,7 +22,7 @@ type StateOpts = { query?: string; max?: number; diff?: boolean; screenshot?: bo
 type InputOpts = { foreground?: boolean };
 type ClickOpts = InputOpts & { double?: boolean; right?: boolean };
 type WindowQuery = string | { pid?: number; id?: number; title?: string; app?: string };
-type WindowInfo = { pid: number; id: number; app: string; title: string };
+type WindowInfo = { pid: number; id: number; app: string; title: string; minimized?: true };
 type PageInfo = { title: string; url: string };
 
 /** What one `js` call shows the model besides its logs and return value. */
@@ -286,15 +286,18 @@ export class Desktop {
     }
   }
 
-  /** Visible top-level windows, minus policy-denied apps (which includes the driver's cursor overlay). */
+  /** Visible and minimized top-level windows, minus policy-denied apps (which includes the driver's cursor overlay). */
   private async listWindows(): Promise<DriverWindow[]> {
     return (await this.listAllWindows()).filter((w) => this.policy.status(appOf(w)) !== "denied");
   }
 
+  /** On-screen windows plus minimized ones: a minimized browser or editor is still the user's open
+   *  app, and its tree and pages stay reachable. Hidden and cloaked windows (other virtual desktops,
+   *  background helpers) stay out. */
   private async listAllWindows(): Promise<DriverWindow[]> {
-    const r = await this.driver.call("list_windows", { on_screen_only: true });
+    const r = await this.driver.call("list_windows", { on_screen_only: false });
     if (r.isError) fail(r, "windows");
-    return r.data.windows ?? [];
+    return (r.data.windows ?? []).filter((w) => w.is_on_screen !== false || w.minimized === true);
   }
 
   private approved(w: DriverWindow) { return this.policy.windowApproved(appOf(w), w.pid); }
@@ -308,7 +311,7 @@ export class Desktop {
     for (const w of all) {
       const app = appOf(w);
       if (this.approved(w)) {
-        if (!filter || matches(w, filter)) rows.push({ id: w.window_id, pid: w.pid, app: app.label, title: w.title ?? "" });
+        if (!filter || matches(w, filter)) rows.push({ id: w.window_id, pid: w.pid, app: app.label, title: w.title ?? "", ...(w.minimized ? { minimized: true } : {}) });
       } else if (!seen.has(app.key) && (!filter || matchesApp(w, filter))) {
         seen.add(app.key);
         rows.push({ app: app.label, approved: false });

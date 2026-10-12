@@ -28,7 +28,7 @@ const CURSOR = (process.env.BCU_CURSOR ?? "fast") as CursorMode;
 
 const API = `Control Windows apps with JavaScript. The code runs in an async function with a persistent \`cua\` object; top-level let/const persist between calls. Return a value or call log(...) to see output.
 
-cua.windows(filter?)            -> approved windows as {id, pid, app, title}; other apps as {app, approved: false}
+cua.windows(filter?)            -> approved windows as {id, pid, app, title, minimized?}; other apps as {app, approved: false}
 cua.window("TestPad" | {pid,id,title,app}) -> Window  (binding an app that isn't approved asks the user)
 cua.open("Calculator" | "C:\\\\path\\\\app.exe") -> Window  (launch in the background)
 
@@ -52,7 +52,7 @@ p.click(ref | [x, y])   p.type(ref, "text", {replace?})   p.key("Enter" | "ctrl+
 p.go(url)   p.tabs()   p.waitFor("text", ms?)   p.screenshot() (selected tab only)   p.close()  (tabs you opened)
 Refs come from the latest p.read() of that tab. Work in a tab you opened, unless the user asked about a page they have open.
 
-Input goes to the target window in the background: the user's mouse and focus are not touched.
+Input goes to the target window in the background: the user's mouse and focus are not touched. Minimized windows work too (screenshots and pixel clicks don't); leave them minimized.
 If an action is refused in the background, click/type/key/drag/menu accept {foreground: true}, which briefly takes focus and the real cursor; the user may be asked first. Use it only when setValue/select can't do the job.
 Don't sleep: state(), find() and waitFor() already wait for the UI to settle after actions.
 Element numbers come from the most recent state() of that window; call state() again after the UI changes.

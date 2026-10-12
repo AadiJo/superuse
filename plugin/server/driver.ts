@@ -16,7 +16,9 @@ export function trace(entry: Record<string, unknown>) {
 }
 
 export type Image = { data: string; mimeType: string };
-export type DriverWindow = { pid: number; window_id: number; title?: string; app_name?: string; z_index?: number };
+export type DriverWindow = {
+  pid: number; window_id: number; title?: string; app_name?: string; z_index?: number; is_on_screen?: boolean; minimized?: boolean;
+};
 
 /** Fields the driver returns in structuredContent (or as JSON text). Each tool fills a subset. */
 export type DriverData = Partial<{

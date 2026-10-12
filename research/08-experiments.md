@@ -2,11 +2,12 @@
 
 Run date: 2026-10-11, on the user's Windows 11 machine (i9-14900K, 3420x2149 display), driven from WSL. The harness, tasks and every run's artifacts are in [`bench/`](../bench/README.md).
 
-Three rounds ran on 2026-10-11 and 12:
+Four rounds ran on 2026-10-11 and 12:
 
 - **Round 1** compared the existing options and picked a base.
 - **Round 2** built on the round 1 findings and measured the result.
 - **Round 3** packaged it as a Claude Code plugin with a real sandbox and approvals, fixed the remaining driver gaps and the findings of an external code review, and measured on a harder suite.
+- **Round 4** asked whether a faster language would help, found where the time goes instead, and fixed two driver bugs that cost the model whole turns.
 
 Current code:
 
@@ -15,7 +16,7 @@ Current code:
 
 ## Web pages in the user's own browser (Helium)
 
-The user's daily browser is Helium, a Chromium 155 build whose exe is named `chrome.exe`. Tested live against their open window, in tabs the test opened. `bench/helium_check.py` reruns it.
+The user's daily browser is Helium, a Chromium 155 build whose exe is named `chrome.exe`. Tested live against their open window, in tabs the test opened. `bench/helium-check.ts` reruns it.
 
 **Accessibility tree only.** Text fields, a `contenteditable` box, a `<select>`, a checkbox and Submit all worked in the background, with 0 px cursor movement and 0 focus changes. Typing and key presses (Enter, Tab, shortcuts) are refused for Chromium windows, which rules out the address bar and most keyboard flows.
 
@@ -41,6 +42,71 @@ Limits:
 - Chromium doesn't paint background tabs, so `p.screenshot()` works only on the selected tab.
 - `p.select` fires script events, which a site checking for real user input can ignore. `w.select` through the accessibility tree is the fallback.
 - Helium shows its consent prompt in the window the user activated last, and the driver only answers it there. So the plugin attaches through that window.
+
+## Round 4: where the time goes, and two bugs that cost whole turns
+
+The question was whether the stack would be faster in another language. It wouldn't. The driver that does the Windows work is already Rust. Most of its calls take 15 to 350 ms, and launching an app about 1.3 s. In batch `v4`, the model's own time was 60% of wall time, tool calls were 26%, and startup was 14%. The work went to the turns the model wasted, not to the language.
+
+### What changed in round 4
+
+- **Tooling in TypeScript.** The benchmark, the server checks and the driver acceptance checks moved from Python to TypeScript (`bench/*.ts`, `fork/acceptance.ts`), so the repo has one scripting language. `report.ts` reproduces every earlier batch's report byte for byte. The runner takes `--seed` so the cross-app tasks can be replayed, and now rotates which arm goes first (see the method notes below).
+- **`BCU_TRACE`** in the server writes each `js` call, API call and driver call with its time. The bench sets it for every run (`server-trace.jsonl`).
+- **Fork v6** (`fork/patches/0020`, `0021`, details in [`fork/NOTES.md`](../fork/NOTES.md)):
+  - *Keys reach a UWP app after it loses the foreground.* When `launch_app` gives the user their foreground back, Calculator stops reporting a focus window, and posted keys went to its outer frame, which drops them. The tools still reported success. Keys now go to the frame's `CoreWindow`.
+  - *Tree rows show `checked`, `unchecked` and `selected`.* The walker read this state and never printed it, so Claude took screenshots to see whether a checkbox was ticked.
+- **Settle once per action** in the server. A read within 2 s of any action used to read, sleep 100 ms and read again, every time. Now only the first read after a click, key, type, menu, drag or launch waits, and `setValue` (which the driver reads back before returning) needs none. In a TestPad session replayed without a model, calls 2 to 6 took 1.34 s of tool time against 2.24 s, and three `find()` calls after `setValue` dropped from about 180 ms to 37 ms each.
+
+### How the bugs were found
+
+Reading the `v4` transcripts call by call:
+
+- **Calculator typing failed in every v4 run that tried it** (6 of 6: three `calc_mul`, three `xapp_invoice`), and worked in 11 of 12 v2 runs. Every failure had 2 or more foreground changes in the desktop samples, and every success had none. A repro through the driver (bring Calculator to the front, hand the foreground back, type) failed the same way, and a dump of the window's threads showed why (`fork/NOTES.md`). Round 3 blamed the slow invoice runs on Calculator's lack of operator precedence. That happened too, but in v4 the typed keys never registered at all, and Claude fell back to clicking each digit button.
+- **Every form run took screenshots** (6 of 6 in `v4`) to check the checkbox, because its tree row read the same either way.
+
+### Results (batch `v5`)
+
+Both arms in one batch: the round 3 code frozen as `claude-bcu3-v4` (server and driver from the round 3 commit, kept in `tools/baseline/v4`), and the round 4 code as `claude-bcu3`. The round 4 arm ran fork v4 plus patches 0020 and 0021, before they were rebased onto the browser patches (0013 to 0019); the combined driver passes the same keystroke repro. 9 tasks, 3 reps, arms interleaved per task, seed 4471 so both arms drew the same invoice lines, files and contacts. Claude Opus 5.5 at medium effort.
+
+| Arm | Pass | Median | Mean | p90 | Worst | Total wall | Calls (median) | Images seen | Cursor moved |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Round 3 (`claude-bcu3-v4`) | 27/27 | 18.9 s | 23.5 s | 51.9 s | 57.5 s | 634 s | 4 | 14 | 1/27 |
+| Round 4 (`claude-bcu3`) | 27/27 | 19.8 s | 21.3 s | 33.4 s | 36.1 s | 574 s | 4 | 6 | 0/27 |
+
+| Task (median) | Round 3 | Round 4 |
+| --- | --- | --- |
+| Invoice across Edge, Calculator, TestPad | 56.9 s, 11 calls, 16.1 s in tools | **35.3 s, 8 calls, 6.3 s in tools** |
+| Form from a TestPad file | 17.1 s, 2 screenshots each | 15.2 s, no screenshots |
+| Edge form | 12.8 s, 2 screenshots each | 15.6 s, no screenshots |
+| Explorer move | 36.9 s | 31.8 s |
+| Save As dialog | 21.0 s | 25.1 s |
+| Calculator | 7.8 s | 9.9 s |
+| Append + save | 19.1 s | 19.8 s |
+| Replace dialog | 18.4 s | 17.8 s |
+| CSV list from Explorer to TestPad | 20.2 s | 20.7 s |
+
+### What round 4 showed
+
+- **The invoice task is 21 s faster** (median, 38%), and its worst run dropped from 57.5 s to 36.1 s. The foreground changed in all 6 invoice runs, Calculator taking it at launch and having it restored. Round 3's typed keys were lost in all 3, and round 4's landed in all 3.
+- **The screenshots are gone** from both form tasks (0 of 6 runs, against 6 of 6). It saved fewer turns than expected, because round 3 usually took the screenshot inside a call that was doing other work anyway.
+- **Most tasks didn't move.** On the other seven tasks both arms spent about 2 s per task in tools and 12 to 30 s in the model. Run-to-run model variance there is several seconds, more than anything the tools can save. Today's runs were slower than last night's for both arms: the same round 3 code took 18.9 s against 12.3 s in batch `v4`.
+- **The settle change doesn't show at batch level** for the same reason. It's real in the traces: 122 `state`/`find` calls cost 218 tree reads, against at least two reads for every read within 2 s of an action before.
+- **The remaining slow runs are model habits.** In one Save As run Claude re-bound the window at the top of each call (`const w = cua.window("TestPad")`), and a fresh binding has no snapshot, so its element numbers failed twice. In one Explorer run it passed `"This folder is empty|Items View"` to `waitFor()`, which matches literally, and waited out its 3 s timeout. The v4 server behaves the same in both cases.
+- **Where tool time goes** (round 4 traces, 27 runs): tree reads 17.8 s in 218 calls (82 ms each), launches 8.1 s in 6 (1.35 s each), menus 5.9 s in 17, window lists 5.2 s in 71, everything else under 4.5 s. Driver start costs the first call about 250 ms. Starting the driver with the server would save that, at the price of an idle `cua-driver.exe` in every Claude session that never uses computer use, so it isn't done.
+
+### Method notes
+
+- **Arm order biased cost.** The runner always ran the arms in the order given, and the arms share most of the prompt, so the second arm hit a warm prompt cache. Here that was round 4: its first turn averaged 4.0 s against 4.8 s, and its cost ($0.06 against $0.09 a task) isn't comparable. The runner now rotates which arm goes first per task and rep. Batches before `v5` all had the bias.
+- **The transcript's tool time includes client gaps.** In one Explorer call, Claude Code logged the `tool_use` 2.8 s before the server received it. On every other call the gap was about 10 ms. `server-trace.jsonl` has the server's side.
+- **Another session shared the desktop.** Its driver acceptance checks killed TestPad mid-setup in the first attempt at this batch, so those runs were discarded and the batch restarted once the other session paused. `edge` also flaked once in round 4's own acceptance run while the two overlapped.
+- **One cursor move in round 3's arm** (7 px, `edit_append` r2) happened while neither arm sent real input, so it was most likely a hand on the mouse.
+- **The runner's default suite included `sysdm_name`**, which the README excludes because its elevated dialog can't be closed. Earlier batches always passed `--tasks`. Two such runs started before I noticed; the policy refused the launch in both, nothing opened, and they were deleted. The default is now the 9-task suite.
+
+### Next
+
+- `waitFor("a|b")` should match either, like `state({query})` does.
+- Binding the same window again should keep its latest snapshot, so earlier element numbers still work.
+- When an action opens a dialog, the parent window's `state()` already includes the dialog's rows. Saying so in the API description could save the turn Claude spends finding the dialog (3 of 9 dialog runs in `v4`).
+- Rerun with the rotating arm order to get a fair cost comparison.
 
 ## Round 3: the plugin on a harder suite
 
@@ -78,7 +144,7 @@ Batch `v3`, Claude Opus 5.5 at medium effort, 3 runs per task, arms interleaved 
 - Model code runs in QuickJS compiled to WebAssembly. The only capability is one host function the prelude captures and hides. In round 2's `node:vm` context, any host function led to Node: `log.constructor.constructor("return process")()` returned the real `process`. The same line now fails with `'process' is not defined`, because no host object exists inside the sandbox.
 - Per-app approvals through MCP elicitation, remembered for the session; "always" writes `~/.config/bcu/policy.json`. Unapproved apps show in `cua.windows()` by name only, with no titles. Shells, password managers, security prompts and agents are denied by default. `{foreground: true}` asks first.
 - An action log without typed text, a `computer-use` skill with recipes per app type, and a validated plugin manifest and local marketplace.
-- `bench/server_check.py` checks the sandbox and policy through the real server: 23 cases.
+- `bench/server-check.ts` (then `server_check.py`) checks the sandbox and policy through the real server: 23 cases.
 
 **Fork v3** (`fork/patches/0003`-`0005`): Explorer shortcuts land in the background (posted to the focus window of Explorer's UI thread, modifiers held until the thread handled them); `invoke_menu` walks Win32 and WinForms menus without activating the window; a click on a closed drop-down item is routed through its menu path in the driver, so the front end's workaround is gone.
 
@@ -221,7 +287,7 @@ Both of the fork arm's failures came from a bug in the prototype's `find()`. Cua
 
 An earlier batch (`matrix2`) also ran the Cua Driver v0.34.1 release, which has 59 tools and no `run_steps`. It passed 12/12 at 61 s median, with 1,120k input tokens and $0.51 per task. On simple tasks, the prototype was fastest in that batch: Calculator in 8.1 s and one tool call, append in 8.5 s.
 
-#### Primitive latency, no model involved (`bench/latency.py`)
+#### Primitive latency, no model involved (`bench/latency.ts`, then `latency.py`)
 
 | Operation, TestPad window | Cua Driver `main` | Codex runtime |
 | --- | --- | --- |

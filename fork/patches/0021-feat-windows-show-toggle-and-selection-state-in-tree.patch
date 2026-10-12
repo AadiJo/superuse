@@ -1,0 +1,33 @@
+From 60c4a7e75d338d420d2bd47bee3a286217a95315 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Mon, 12 Oct 2026 13:27:25 -0500
+Subject: [PATCH 21/21] feat(windows): show toggle and selection state in tree
+ rows
+
+The walker already caches TogglePattern and SelectionItem state but never
+rendered it, so a client had to take a screenshot to see whether a checkbox
+was ticked. Rows with a toggle action now carry checked or unchecked, and
+selected items carry selected.
+---
+ .../rust/crates/platform-windows/src/uia/mod.rs           | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+index adc4129..4273137 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+@@ -1286,6 +1286,14 @@ pub(crate) fn format_node_line(node: &UiaNode) -> String {
+             s.push_str(&format!(" \"{}\"", n));
+         }
+         let mut attrs = Vec::new();
++        // Toggle state, so a client can verify a checkbox without a screenshot.
++        // Selection state only when set: most list items are unselected.
++        let toggles = node.actions.iter().any(|a| a == "toggle");
++        match (toggles, node.selected) {
++            (true, Some(on)) => attrs.push(if on { "checked" } else { "unchecked" }.to_string()),
++            (false, Some(true)) => attrs.push("selected".to_string()),
++            _ => {}
++        }
+         if let Some(v) = &node.value {
+             attrs.push(format!("value=\"{}\"", v));
+         }

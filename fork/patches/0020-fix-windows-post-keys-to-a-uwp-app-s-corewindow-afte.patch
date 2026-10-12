@@ -1,0 +1,114 @@
+From 3d7664c55c2575a1239768d1eb83765fc641aade Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Mon, 12 Oct 2026 13:27:25 -0500
+Subject: [PATCH 20/21] fix(windows): post keys to a uwp app's corewindow after
+ it loses the foreground
+
+A packaged-app launch that steals the foreground is restored to the user's
+window. After that, no thread of the app reports a focus window, so keys
+posted by type_text, press_key and hotkey fell back to the
+ApplicationFrameWindow, which drops them, and the tools still reported
+success. Calculator showed 0 after typing 12*12= in every such run.
+
+keyboard_target() now falls back to the frame's Windows.UI.Core.CoreWindow
+child, which takes posted keys without focus.
+---
+ .../platform-windows/src/input/keyboard.rs    | 50 +++++++++++++++++--
+ 1 file changed, 45 insertions(+), 5 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
+index 6eb7706..4e78f2b 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
+@@ -18,7 +18,7 @@
+ use anyhow::{bail, Result};
+ use std::thread::sleep;
+ use std::time::{Duration, Instant};
+-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE, WPARAM};
++use windows::Win32::Foundation::{BOOL, FALSE, HWND, LPARAM, TRUE, WPARAM};
+ use windows::Win32::UI::Input::KeyboardAndMouse::{
+     MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
+@@ -204,6 +204,46 @@ fn focused_descendant(parent: HWND) -> Option<HWND> {
+     best.map(|(_, focused)| focused)
+ }
+ 
++/// The window that should receive keyboard messages posted to `parent`: its
++/// focused descendant, else a UWP app's `Windows.UI.Core.CoreWindow` child,
++/// else `parent` itself.
++///
++/// A UWP frame (`ApplicationFrameWindow`) never handles keyboard messages
++/// itself. While the app has never been active, its threads report the
++/// CoreWindow as their focus window. Once it has been activated and lost the
++/// foreground (a packaged-app launch that steals it and is restored, or the
++/// user clicking elsewhere), no thread reports a focus window, and keys posted
++/// to the frame are dropped while the post reports success. The CoreWindow
++/// takes posted keys without focus, so fall back to it.
++fn keyboard_target(parent: HWND) -> HWND {
++    focused_descendant(parent)
++        .or_else(|| uwp_core_window(parent))
++        .unwrap_or(parent)
++}
++
++/// `Windows.UI.Core.CoreWindow` child of a UWP frame, if `parent` is one.
++fn uwp_core_window(parent: HWND) -> Option<HWND> {
++    unsafe extern "system" fn find_core(child: HWND, lparam: LPARAM) -> BOOL {
++        if class_name(child).as_deref() == Some("Windows.UI.Core.CoreWindow") {
++            *(lparam.0 as *mut Option<HWND>) = Some(child);
++            return FALSE;
++        }
++        TRUE
++    }
++    if class_name(parent).as_deref() != Some("ApplicationFrameWindow") {
++        return None;
++    }
++    let mut found: Option<HWND> = None;
++    unsafe {
++        let _ = EnumChildWindows(
++            parent,
++            Some(find_core),
++            LPARAM(&mut found as *mut Option<HWND> as isize),
++        );
++    }
++    found
++}
++
+ /// Wait for an element-focused embedded renderer to expose its child HWND.
+ /// UIA SetFocus can complete before WebView2 updates GUITHREADINFO; polling the
+ /// observable focus target avoids posting the key to the native frame in that
+@@ -230,7 +270,7 @@ pub fn post_char(hwnd: u64, ch: char) -> Result<()> {
+     // Retarget to the focused child if any — top-level WindowProcs typically
+     // don't forward WM_CHAR to embedded editor children (Scintilla, RichEdit).
+     let h_parent = HWND(hwnd as *mut _);
+-    let h = focused_descendant(h_parent).unwrap_or(h_parent);
++    let h = keyboard_target(h_parent);
+     let code = ch as u32 as usize;
+     unsafe {
+         PostMessageW(h, WM_CHAR, WPARAM(code), LPARAM(1))?;
+@@ -296,7 +336,7 @@ pub fn post_type_text_with_delay(hwnd: u64, text: &str, inter_char_ms: u64) -> R
+     let h_parent = HWND(hwnd as *mut _);
+     // Resolve focused-child once at entry — re-querying per-character would
+     // race with text-insertion side effects on the focus.
+-    let h = focused_descendant(h_parent).unwrap_or(h_parent);
++    let h = keyboard_target(h_parent);
+ 
+     let mut prev_was_cr = false;
+     for ch in text.chars() {
+@@ -342,7 +382,7 @@ pub fn post_key(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
+     // Posting only to the top-level frame reports success but never reaches
+     // the renderer; mirror the WM_CHAR path and retarget to that child when
+     // the target thread exposes one.
+-    let target = focused_descendant(hwnd_win).unwrap_or(hwnd_win);
++    let target = keyboard_target(hwnd_win);
+     let vk = key_name_to_vk(key)?;
+     let has_alt = modifiers.iter().any(|m| *m == "alt" || *m == "menu");
+ 
+@@ -431,7 +471,7 @@ const XAML_ISLAND_INPUT_CLASSES: &[&str] = &[
+ /// turn that into `background_unavailable` instead of a false success.
+ pub fn post_key_background(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
+     let root = HWND(hwnd as *mut _);
+-    let target = focused_descendant(root).unwrap_or(root);
++    let target = keyboard_target(root);
+     if let Some(class) =
+         class_name(target).filter(|class| XAML_ISLAND_INPUT_CLASSES.contains(&class.as_str()))
+     {

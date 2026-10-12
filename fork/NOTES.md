@@ -6,8 +6,8 @@ Our local fork of [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-
 - `patches/`: our changes as one patch per commit, applied in order on top of that commit.
 - `build.sh`: clones upstream into `tools/src/cua` (gitignored) if needed, applies the patches on branch `bcu`, cross-builds from WSL and installs `plugin/driver/cua-driver.exe`.
 - `export-patches.sh`: writes new commits on `bcu` back to `patches/`.
-- `acceptance.py`: live checks against real apps. `python3 fork/acceptance.py [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu] [helium] ...`. Each run writes `fork/acceptance-runs/acceptance-<time>.json` with every tool call, its time, and the cursor and foreground samples. `BCU_CUA_DRIVER` picks the exe under test.
-- `apps/MenuPad.cs`: a small app with a real Win32 menu bar for the `win32menu` check. `acceptance.py` builds it into `%TEMP%\bcu`.
+- `acceptance.ts`: live checks against real apps. `node fork/acceptance.ts [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu] [helium] ...`. Each run writes `fork/acceptance-runs/acceptance-<time>.json` with every tool call, its time, and the cursor and foreground samples. `BCU_CUA_DRIVER` picks the exe under test.
+- `apps/MenuPad.cs`: a small app with a real Win32 menu bar for the `win32menu` check. `acceptance.ts` builds it into `%TEMP%\bcu`.
 
 The sections below describe fork v2, the state after round 2 of the experiments (`research/08-experiments.md`). "Fork v3" at the end covers round 3.
 
@@ -295,3 +295,30 @@ A `chrome.exe` whose image path isn't under `\Google\Chrome` (Chrome, Beta, Dev,
 - `browser_open_tab`'s other-window refusal (close the tab again and refuse) wasn't exercised live. It needs the user to activate another window between bind and open, and the only bindable window is the last-active one.
 - `browser_select` events are untrusted. `browser_press_key` sends no separate modifier key events, only the modifier bits on the key itself.
 - `cargo test -p cua-driver-core --lib`: 955 pass. Two `history::tests` cases (no browser code) failed once each under the parallel run and pass alone. The SDK and CLI crate tests need the Linux X11 libraries, which aren't installed here, so I updated their tool lists without running them.
+
+## Fork v6: lost keystrokes and hidden checkbox state
+
+Round 4 (`research/08-experiments.md`) looked for turns the model wasted because of the driver. Two causes came from here. One commit each on `bcu`, patches 0020 and 0021, on top of fork v5's browser route.
+
+### 1. Keys reach a UWP app after it loses the foreground (patch 0020)
+
+Background typing into Calculator worked in 11 of 12 fork v2 runs and failed in all 6 fork v4 runs that tried it. Every failure had `foreground_changes: 2` in the bench's samples, and every success had 0. `launch_app` restores the user's foreground when a packaged app takes it at launch, which is correct, but the restore deactivates the app. A fresh Calculator's two threads (ApplicationFrameHost's frame thread and CalculatorApp's) both report its `Windows.UI.Core.CoreWindow` as their focus window. Once it has been active and lost the foreground, both report none. `focused_descendant` then found nothing, so `type_text`, `press_key` and `hotkey` posted to the `ApplicationFrameWindow`, which drops keyboard messages, and the tools reported success. The display stayed at 0, and the model spent two more turns clicking buttons instead.
+
+`keyboard_target()` in `input/keyboard.rs` now owns the choice for all four posting paths: the focused descendant, else the frame's CoreWindow child, else the window itself. The CoreWindow takes posted `WM_CHAR` without focus. Repro (`bring_to_front` Calculator, `bring_to_front` the previous window, `type_text "12*12="`): v4 shows `Display is 0`, the fix shows `Display is 144` in 2 of 2, and still 2 of 2 without the activation.
+
+### 2. Toggle and selection state in tree rows (patch 0021)
+
+The walker cached `ToggleState` and `SelectionItem.IsSelected` for every node but `format_node_line` never printed them, so a checkbox row read the same ticked or not. In v4 the model took screenshots to check the Edge form's checkbox. Rows with a `toggle` action now carry `checked` or `unchecked`, and selected items carry `selected`:
+
+    - [22] CheckBox "I agree to the terms" [checked id=agree actions=[toggle,set_value]]
+
+### Acceptance
+
+`acceptance-20261012-135055.json` (all 12 checks) and `acceptance-20261012-135220.json` (`replace`, `edge` twice). Every check passed, with 0 px of cursor movement. In the first run `replace` and `edge` failed in the harness, not the driver. `replace` was a port bug: JavaScript's `.` doesn't match the `\r` that a multi-line value leaves on a row, so the TestPad editor row didn't parse. The row regex now has the `s` flag. `edge` found no option rows 300 ms after `expand`, then passed twice on the rerun. Another session ran its own acceptance check on the same desktop two minutes before, which may have interfered. The `edge` check's checkbox row now reads `[checked id=agree ...]`.
+
+After rebasing onto fork v5 (patches 0013 to 0019), `acceptance-20261012-151206.json` ran the same 12 checks on the combined driver: all pass, 0 px of cursor movement. The `helium` check wasn't run here, because it attaches to the user's own Helium. The Calculator repro also passes on the combined driver, 2 of 2.
+
+### Limits
+
+- The CoreWindow fallback only applies to `ApplicationFrameWindow` frames. A WinUI 3 or XAML-island app that loses focus the same way still gets its keys posted to the top-level window.
+- `selected` shows up on whichever list item, tab or radio button is selected, so trees with many selected items get a little longer.

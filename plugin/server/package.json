@@ -1,0 +1,16 @@
+{
+  "name": "bcu-server",
+  "private": true,
+  "type": "module",
+  "description": "MCP server for the bcu plugin: one sandboxed `js` tool over the Cua Driver fork.",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "quickjs-emscripten": "0.32.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}

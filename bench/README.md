@@ -10,7 +10,7 @@ python3 trace.py out/mybatch/claude-bcu/calc_mul-r1   # step-by-step trace of on
 
 ## Results
 
-The write-up is [research/08-experiments.md](../research/08-experiments.md). Round 2 numbers come from `out/v2` (Codex runtime, Cua Driver and the v2 front end, 54 runs) and `out/v2.1` through `out/v2.3` (the v2 front end after each fix, 18 runs each). Round 1 numbers come from `out/final` (48 runs), `out/final-findfix` (2 runs after the prototype's `find()` fix), `out/latency-*.json`, and `out/matrix2` for the Cua Driver release arm. `out/final-contaminated` holds six runs that executed while a stray Open With picker held the foreground; they were rerun. Earlier batches were shake-outs or were contaminated, and aren't used.
+The write-up is [research/08-experiments.md](../research/08-experiments.md). Round 3 numbers come from `out/v3` (Codex runtime, the round 2 stack and the plugin on fork v3, 81 runs over 9 tasks) and `out/v4` (the plugin on fork v4 after the review fixes, 27 runs). Round 2 numbers come from `out/v2` (Codex runtime, Cua Driver and the v2 front end, 54 runs) and `out/v2.1` through `out/v2.3` (the v2 front end after each fix, 18 runs each). Round 1 numbers come from `out/final` (48 runs), `out/final-findfix` (2 runs after the prototype's `find()` fix), `out/latency-*.json`, and `out/matrix2` for the Cua Driver release arm. `out/final-contaminated` holds six runs that executed while a stray Open With picker held the foreground; they were rerun. Earlier batches were shake-outs or were contaminated, and aren't used.
 
 ## Arms
 

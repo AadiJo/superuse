@@ -142,7 +142,7 @@ A "tools" profile for weaker coders, then native adapters for direct API agents 
 2. **Where the REPL lives.** In our own TypeScript front end. The user ruled out sending anything upstream, so extending Cua Driver's `run_script` upstream is off the table.
 3. **Platform order.** Windows and WSL first, the user's platform.
 
-Round 2 built the first five items of the build list ([08](08-experiments.md#build-list-after-round-1)). What remains is in [08, "What's still slow or disruptive"](08-experiments.md#whats-still-slow-or-disruptive): Explorer's background shortcuts, `invoke_menu`'s focus changes, moving the closed-menu fix into the driver, and a real sandbox. After that comes packaging as a Claude Code plugin.
+Rounds 2 and 3 built the plan through Phase 1: the plugin (`plugin/`, QuickJS sandbox, per-app approvals, skill, installer) over fork v4 of the driver, after an external review's findings were fixed. On a 9-task suite that includes cross-app work, Claude on it finished tasks in a median 12 s at $0.09, against 45 s and $0.26 on Codex's runtime, without moving the cursor ([08, round 3](08-experiments.md#round-3-the-plugin-on-a-harder-suite)). Next: time the real Codex app with `bench/codex_app_wizard.sh`, use the plugin day to day, and add longer tasks.
 
 ## What's still unknown
 

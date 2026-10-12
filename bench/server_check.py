@@ -52,6 +52,8 @@ def main() -> int:
     with server(base, elicit=None) as c:
         t, _ = js(c, "return [typeof process, typeof require, typeof fetch, typeof __bcu_host, (async()=>1)().constructor.constructor('return typeof process')()]")
         check("no Node capabilities in the sandbox", t == '["undefined","undefined","undefined","undefined","undefined"]', t)
+        t, _ = js(c, 'try { return typeof log.constructor.constructor("return process")() } catch (e) { return "blocked" }')
+        check("API functions don't lead to the host's Function", t == "blocked", t)
         t, _ = js(c, "cua = null; log = null; return typeof cua.window + ' ' + typeof log")
         check("cua and log can't be overwritten", t == "function function", t)
         js(c, "const answer = 41")

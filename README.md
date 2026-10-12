@@ -2,7 +2,7 @@
 
 Windows computer use for Claude Code. Claude gets one MCP tool, `js`, and writes short JavaScript programs against a `cua` API: bind a window, read its accessibility tree, click, type, set values, walk menus, and check the result, several steps per call. Input goes to the target window in the background, so your mouse and focus stay yours.
 
-On a 6-task Windows suite, Claude on this stack finished tasks in a median 12 s at $0.05 each. On Codex's own computer-use runtime the same tasks took Claude 44 s at $0.23 (`research/08-experiments.md`).
+On a 9-task Windows suite, three of them across several apps, Claude on this stack finished tasks in a median 12 s at $0.09 each, and the cursor never moved. On Codex's own computer-use runtime the same tasks took Claude 45 s at $0.26, and it moved the cursor in 24 of 27 runs (`research/08-experiments.md`).
 
 ## Install (WSL)
 
@@ -35,4 +35,4 @@ Headless runs (`claude -p`) can't show prompts. Pre-approve apps there with `BCU
 | `research/` | Research reports (`00-synthesis.md` first) and experiment results (`08-experiments.md`) |
 | `proto/` | Archived front ends measured in rounds 1 and 2 |
 
-Server checks: `python3 bench/server_check.py`. Type check: `npm run typecheck` in `plugin/server`.
+Server checks: `python3 bench/server_check.py` (sandbox and policy, read-only on the desktop). Driver checks: `python3 fork/acceptance.py`. Codex app baseline: `bench/codex_app_wizard.sh`. Type check: `npm run typecheck` in `plugin/server`.

@@ -2,15 +2,77 @@
 
 Run date: 2026-10-11, on the user's Windows 11 machine (i9-14900K, 3420x2149 display), driven from WSL. The harness, tasks and every run's artifacts are in [`bench/`](../bench/README.md).
 
-Two rounds ran the same day:
+Three rounds ran on 2026-10-11 and 12:
 
 - **Round 1** compared the existing options and picked a base.
 - **Round 2** built on the round 1 findings and measured the result.
+- **Round 3** packaged it as a Claude Code plugin with a real sandbox and approvals, fixed the remaining driver gaps and the findings of an external code review, and measured on a harder suite.
 
 Current code:
 
-- Prototype front end measured in round 2: [`proto/v2/bcu-mcp.ts`](../proto/v2/bcu-mcp.ts). Round 1's version is archived in [`proto/v1/`](../proto/v1/bcu-mcp.ts).
-- Driver fork: [`tools/cua-driver-fork/v2/`](../tools/cua-driver-fork/v2/NOTES.md).
+- The plugin: [`plugin/`](../plugin/). Its server is `plugin/server/`; round 1 and 2 front ends are archived in [`proto/v1/`](../proto/v1/bcu-mcp.ts) and [`proto/v2/`](../proto/v2/bcu-mcp.ts).
+- The driver fork: [`fork/`](../fork/NOTES.md), as patches on upstream Cua Driver.
+
+## Round 3: the plugin on a harder suite
+
+The suite grew from 6 to 9 tasks. The three new ones span apps and draw random values each run, so a remembered answer can't pass:
+
+- `xapp_invoice`: read an invoice in Edge, total it in Calculator, save the total from TestPad through Save As.
+- `xapp_csv_list`: list the `.csv` files visible in File Explorer into a TestPad file, sorted, and save it.
+- `xapp_form_from_file`: fill the Edge form from a contact card shown in TestPad.
+
+Batch `v3`, Claude Opus 5.5 at medium effort, 3 runs per task, arms interleaved by task:
+
+| Stack | Pass | Median | Mean | p90 | Worst | Tool calls | Input tokens | Cost/task | Cursor moved | Focus changed |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Codex runtime (`cua_repl`) | 27/27 | 44.6 s | 46.0 s | 75.2 s | 84.3 s | 15 | 286k | $0.26 | 24/27 | 21/27 |
+| Round 2 stack (`proto/v2` + fork v2) | 27/27 | 12.7 s | 18.0 s | 40.9 s | 46.2 s | 4 | 55k | $0.09 | 1/27 | 14/27 |
+| **Plugin + fork v3** | **27/27** | **12.2 s** | **15.9 s** | **25.3 s** | **46.2 s** | **4** | **55k** | **$0.09** | **0/27** | **12/27** |
+| Plugin + fork v4, after the review fixes (batch `v4`) | 27/27 | 12.3 s | 15.9 s | 21.2 s | 47.0 s | 5 | 65k | $0.12 | 0/27 | 9/27 |
+
+| Task (median) | Codex runtime | Round 2 stack | Plugin + fork v3 | Plugin + fork v4 |
+| --- | --- | --- | --- | --- |
+| Calculator | 24.6 s | 9.8 s | 10.2 s | 11.9 s |
+| Append + save | 32.3 s | 13.5 s | 15.5 s | 10.8 s |
+| Save As dialog | 75.4 s | 11.8 s | 10.8 s | 11.7 s |
+| Replace dialog | 65.5 s | 11.5 s | 11.8 s | 11.6 s |
+| Explorer move | 44.4 s | 42.5 s | 21.7 s | 17.7 s |
+| Edge form | 53.1 s | 10.1 s | 11.3 s | 11.2 s |
+| Invoice across Edge, Calculator, TestPad | 45.9 s | 37.0 s | 36.7 s | 37.0 s |
+| CSV list from Explorer to TestPad | 24.7 s | 12.7 s | 13.7 s | 18.1 s |
+| Form from a TestPad file | 30.0 s | 14.2 s | 12.0 s | 12.3 s |
+
+### What changed in round 3
+
+**The plugin** (`plugin/`, installed with `scripts/install.sh`):
+
+- Model code runs in QuickJS compiled to WebAssembly. The only capability is one host function the prelude captures and hides. In round 2's `node:vm` context, any host function led to Node: `log.constructor.constructor("return process")()` returned the real `process`. The same line now fails with `'process' is not defined`, because no host object exists inside the sandbox.
+- Per-app approvals through MCP elicitation, remembered for the session; "always" writes `~/.config/bcu/policy.json`. Unapproved apps show in `cua.windows()` by name only, with no titles. Shells, password managers, security prompts and agents are denied by default. `{foreground: true}` asks first.
+- An action log without typed text, a `computer-use` skill with recipes per app type, and a validated plugin manifest and local marketplace.
+- `bench/server_check.py` checks the sandbox and policy through the real server: 23 cases.
+
+**Fork v3** (`fork/patches/0003`-`0005`): Explorer shortcuts land in the background (posted to the focus window of Explorer's UI thread, modifiers held until the thread handled them); `invoke_menu` walks Win32 and WinForms menus without activating the window; a click on a closed drop-down item is routed through its menu path in the driver, so the front end's workaround is gone.
+
+**An external review.** GPT-6.1 Sol at Ultra reasoning reviewed everything after round 3's batch, with a brief to attack the sandbox and policy first. It reported 18 findings, each with a file, a line and a failure scenario. Each was checked against the code before fixing:
+
+- *Server and benchmark (10), all real and fixed.* The critical one: `cua.open("C:\\...\\cmd.exe\u0000C:\\testpad.exe")` was judged by its last segment, `testpad`, while `ShellExecute` stops at the NUL and runs `cmd.exe`. Launch names with control characters are now refused, and launch arguments are gone (an approved app plus arguments can run anything). The others: launched windows took an empty app identity, pixel targets weren't bounded to the window, menus could activate a window past the foreground gate, calls queued by a timed-out js call still ran later, QuickJS handles leaked on timeout (which could crash `js_reset`), open approval prompts counted against the js timeout, a missing driver exe wedged every later call, the cross-app answer files were writable by the agent through Save As, and teardown could force-kill a process of the user's.
+- *Driver (8), fork v4* (`fork/patches/0006`-`0012`): 6 real. Element tokens now check their window's owner; foreground clicks and drags refuse with `target_not_at_point` when another window would take the input; `invoke_menu` takes `delivery_mode` and never activates in background mode; COM is joined before UIA calls on fresh workers; the foreground shield lasts through a late Invoke; keyboard cleanup restores only the modifier bytes it set; `MNS_NOTIFYBYPOS` menus get `WM_MENUCOMMAND`. One was a non-issue, and one (proof that a posted key was consumed before modifiers are released) has no simple fix without injecting into the target, so it's documented with the 120 ms floor kept.
+
+### What round 3 showed
+
+- **The review fixes didn't slow it down.** Batch `v4`, the plugin on fork v4 after every fix, passed 27 of 27 at the same median, with a lower p90 (21.2 s against 25.3 s) and no cursor movement. Cost rose from $0.09 to $0.12 a task. Tool calls went up on some tasks and down on others, and the extra cost follows fewer prompt-cache hits rather than more work; I haven't pinned down why the cache hit less in that batch.
+- **The plugin costs nothing in speed over round 2.** Same median, same tool calls and tokens. What it adds is the sandbox and the policy, plus Explorer at half the time (42.5 s to 21.7 s).
+- **The cursor never moved** in 27 runs on the plugin. Codex's runtime moved it in 24 of 27.
+- **The remaining focus changes aren't the driver's.** The fork's foreground traces show the app's own Save As and Replace dialogs taking focus when they open and handing it back to the app when they close. Calculator's come from `launch_app` re-activating a Calculator left running by an earlier run.
+- **The invoice task is slow for a reason that isn't the tool.** Calculator's standard mode has no operator precedence, so Claude typed `8*20+9*71+...`, got a wrong total, and switched to memory-add. Its own check caught the mistake, at a cost of about 20 s.
+- **Cross-app work holds up.** All three arms passed all 27 cross-app runs. On our stack the CSV and form tasks took about as long as single-app tasks.
+
+### Still open after round 3
+
+- **The Codex app itself, with GPT-6 Astra, hasn't been timed.** Every "Codex" number here is Claude on Codex's runtime. `bench/codex_app_wizard.sh` walks a person through timing the real app on the same tasks.
+- **Chromium background typing** is still refused; `setValue` covers form fields.
+- **Posted-key consumption** (see the review's driver findings above).
+- **Sample size**: 3 runs per cell, one model, one machine.
 
 ## Round 2: Claude on our stack is 3-4x faster than on Codex's runtime
 

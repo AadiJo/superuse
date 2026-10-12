@@ -22,7 +22,7 @@ The task is done when the postcondition is observed, not when the last action re
 - **Menus and modal dialogs** (Save As, Replace, Options). `w.menu("File > Save As...")`. The result notes the new window; bind it with `cua.window({pid: w.pid, title: "Save As"})`, set its fields, click its button, then check the parent window's state.
 - **Edge and Chrome pages.** Fields, selects, checkboxes and buttons work by element number. Background typing and key presses are refused in Chromium, so fill fields with `setValue`. If the page tree is empty, take `w.screenshot()` and click pixels.
 - **UWP apps** (Calculator, Settings). Element clicks work; `w.type("1234*5678=")` into the window works for Calculator.
-- **File Explorer.** Use the command bar by element: New > Folder, Cut, Paste, Rename, then `setValue` on the name box. Check the result in the folder's item list.
+- **File Explorer.** Shortcuts work in the background while focus is in the file list: `ctrl+shift+n` then `type("archive")` and `key("enter")` makes a folder; `click(N)` on a file selects it (`{double: true}` opens it); `ctrl+x`, open the target folder, `ctrl+v` moves it. If a key is refused because focus is in the address or search box, click a file first or use the command bar buttons. Check the result in the folder's item list.
 
 ## When an action is refused
 

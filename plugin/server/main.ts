@@ -33,7 +33,7 @@ cua.open("Calculator" | "C:\\\\path\\\\app.exe", {args?}) -> Window  (launch in 
 
 w.state({query?, diff?, max?, screenshot?}) -> string  accessibility tree; rows tagged [N] are actionable; query "a|b" matches either
 w.find("Save", role?)                        -> N | null  best match by element name (exact first); role like "Button"
-w.click(N | [x, y], {double?, right?})       element N from the latest state(), or pixels in the latest screenshot
+w.click(N | [x, y], {double?, right?})       element N from the latest state(), or pixels in the latest screenshot; a list item is selected, {double: true} opens it
 w.setValue(N, "text")                        set a text box value directly (fastest way to enter text)
 w.select(N, "Pro")                           choose an option in combo box N (verified)
 w.type("text", N?)                           type at the focus, or into element N

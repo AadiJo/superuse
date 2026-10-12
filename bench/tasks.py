@@ -194,8 +194,15 @@ document.getElementById('f').addEventListener('submit', e => {
 def open_edge(url: str) -> None:
     """Edge in a throwaway profile under %TEMP%\\bcu. Chromium hides a page's accessibility tree
     while its window is covered by another one (occlusion tracking), so without these flags a task
-    depended on what the user had on top."""
+    depended on what the user had on top. Teardown kills this Edge, so the profile is marked as
+    cleanly exited first; otherwise Edge opens a "Restore pages" bubble as an extra window."""
+    prefs = win.WSL_TEMP / "edge-profile" / "Default" / "Preferences"
+    if prefs.exists():
+        data = json.loads(prefs.read_text(encoding="utf-8"))
+        data.setdefault("profile", {}).update(exit_type="Normal", exited_cleanly=True)
+        prefs.write_text(json.dumps(data), encoding="utf-8")
     start(EDGE, f"--user-data-dir={win.WIN_TEMP}\\edge-profile", "--no-first-run", "--no-default-browser-check",
+          "--hide-crash-restore-bubble",
           "--force-renderer-accessibility", "--disable-features=CalculateNativeWinOcclusion,msEdgeWelcomePage,msImplicitSignin",
           "--new-window", url)
     time.sleep(4)

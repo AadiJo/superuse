@@ -340,33 +340,20 @@ class Win {
   /** The driver maps pixels through the latest read's screenshot; refresh it silently if needed. */
   private async ensureFrame() { if (!this.hasFrame) await this.frame(false); }
 
-  /** Labels from the top-level menu down to row `i`, when `i` is a MenuItem nested under another
-   *  MenuItem (a drop-down item). Read from the indentation of the last tree shown. */
-  private menuPath(i: number): string[] | null {
-    const lines = this.lastTree.split("\n");
-    const at = lines.findIndex((l) => rowIndex(l) === i);
-    if (at < 0 || !/\]\s+MenuItem\s+"/.test(lines[at])) return null;
-    const labels = [lines[at].match(/MenuItem\s+"([^"]*)"/)![1]];
-    let indent = lines[at].search(/\S/);
-    for (let j = at - 1; j >= 0; j--) {
-      const d = lines[j].search(/\S/);
-      if (d >= indent) continue;
-      const m = lines[j].match(/MenuItem\s+"([^"]*)"/);
-      if (!m) break;
-      labels.unshift(m[1]);
-      indent = d;
-    }
-    return labels.length > 1 ? labels : null;
+  /** Role of row `i` in the last tree shown, e.g. "ListItem". */
+  private roleOf(i: number): string | undefined {
+    return this.lastTree.split("\n").find((l) => rowIndex(l) === i)?.match(/\[\d+\]\s+(\S+)/)?.[1];
   }
 
   async click(target: number | [number, number], opts: ClickOpts = {}) {
     const button = opts.right ? "right" : undefined, count = opts.double ? 2 : undefined;
     const delivery_mode = await this.delivery(opts);
-    // A closed drop-down's items sit off screen; clicking one directly makes the driver fall back
-    // to a blocking UIA Invoke (a modal dialog then freezes the app's tree). Walk the menu instead.
-    const menu = typeof target === "number" && !opts.right && !opts.double && !opts.foreground ? this.menuPath(target) : null;
-    if (menu) return this.menu(menu);
-    if (typeof target === "number") return void await this.act("click", { element_token: this.token(target), button, count, delivery_mode });
+    if (typeof target === "number") {
+      // A single click on a list or tree item selects it, as a mouse click would. Without this the
+      // driver's default action is Invoke, which opens a file in Explorer. {double: true} opens.
+      const select = !opts.double && !opts.right && /^(ListItem|TreeItem|DataItem)$/.test(this.roleOf(target) ?? "");
+      return void await this.act("click", { element_token: this.token(target), button, count, delivery_mode, action: select ? "select" : undefined });
+    }
     await this.ensureFrame();
     await this.act("click", { pid: this.pid, window_id: this.id, x: target[0], y: target[1], button, count, delivery_mode });
   }

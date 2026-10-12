@@ -213,13 +213,13 @@ for task in "${TASKS[@]}"; do
   stage "Task: $task"
   for rep in $(seq 1 "$REPS"); do
     (( REPS > 1 )) && note "run $rep of $REPS"
-    python3 "$ROOT/bench/codex_app.py" run "$task" "$rep" "$LABEL"
+    node "$ROOT/bench/codex-app.ts" run "$task" "$rep" "$LABEL"
   done
   pause "Press Enter for the next task."
 done
 
 stage "Results"
-python3 "$ROOT/bench/report.py" codex-app | sed -n '1,30p'
+node "$ROOT/bench/report.ts" codex-app | sed -n '1,30p'
 note "Saved under bench/out/codex-app/$LABEL/. The report compares every label recorded so far."
 pause "Press Enter to finish."
 

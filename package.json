@@ -1,0 +1,13 @@
+{
+  "name": "bcu-tooling",
+  "private": true,
+  "type": "module",
+  "description": "Benchmark and acceptance scripts for the bcu plugin. Node 24 runs them directly through type stripping.",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}

@@ -9,5 +9,4 @@ tools/
 plugin/driver/*.exe
 
 node_modules/
-__pycache__/
 *.log

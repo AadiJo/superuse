@@ -33,8 +33,8 @@ Headless runs (`claude -p`) can't show prompts. Pre-approve apps there with `BCU
 | --- | --- |
 | `plugin/` | The Claude Code plugin: `server/` (MCP server), `skills/computer-use/`, `driver/` (built exe, not in git) |
 | `fork/` | Our Cua Driver fork: upstream pin, patches, build script, notes, live acceptance checks |
-| `bench/` | End-to-end benchmark on the real desktop, plus `server_check.py` for the sandbox and policy |
+| `bench/` | End-to-end benchmark on the real desktop, plus `server-check.ts` for the sandbox and policy |
 | `research/` | Research reports (`00-synthesis.md` first) and experiment results (`08-experiments.md`) |
 | `proto/` | Archived front ends measured in rounds 1 and 2 |
 
-Server checks: `python3 bench/server_check.py` (sandbox and policy, read-only on the desktop). Driver checks: `python3 fork/acceptance.py`. Codex app baseline: `bench/codex_app_wizard.sh`. Type check: `npm run typecheck` in `plugin/server`.
+Server checks: `node bench/server-check.ts` (sandbox and policy, read-only on the desktop). Driver checks: `node fork/acceptance.ts`. Codex app baseline: `bench/codex_app_wizard.sh`. Type check: `npm run typecheck` in `plugin/server`, and at the repo root for the `bench/` and `fork/` scripts.

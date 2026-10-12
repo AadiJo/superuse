@@ -1,4 +1,4 @@
-// MenuPad: a window with a real Win32 menu bar (HMENU), for fork/acceptance.py.
+// MenuPad: a window with a real Win32 menu bar (HMENU), for fork/acceptance.ts.
 // WinForms' legacy MainMenu is a genuine HMENU and its items run on WM_COMMAND,
 // unlike TestPad's MenuStrip, which UIA sees as a drawn ToolStrip.
 //

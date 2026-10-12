@@ -1,0 +1,1866 @@
+From 9f0545d5f70f80ca7131d5dba813bcc06ac96177 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Sun, 11 Oct 2026 21:32:35 -0500
+Subject: [PATCH 2/2] feat(windows): modal-safe activation, chromium element
+ patterns, background modifier keys
+
+---
+ .../platform-windows/src/input/keyboard.rs    |  56 +++
+ .../crates/platform-windows/src/input/mod.rs  |   4 +-
+ .../platform-windows/src/input/mouse.rs       |  19 +
+ .../platform-windows/src/tools/impl_.rs       | 394 +++++++++++++++---
+ .../platform-windows/src/uia/activate.rs      | 350 ++++++++++++++++
+ .../crates/platform-windows/src/uia/invoke.rs | 109 +++++
+ .../crates/platform-windows/src/uia/mod.rs    |  70 +++-
+ .../platform-windows/src/uia/patterns.rs      | 322 ++++++++++++++
+ .../platform-windows/src/uia/windows_enum.rs  |  77 ++--
+ 9 files changed, 1306 insertions(+), 95 deletions(-)
+ create mode 100644 libs/cua-driver/rust/crates/platform-windows/src/uia/activate.rs
+ create mode 100644 libs/cua-driver/rust/crates/platform-windows/src/uia/invoke.rs
+ create mode 100644 libs/cua-driver/rust/crates/platform-windows/src/uia/patterns.rs
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
+index a0b1d9b..6632b15 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
+@@ -407,6 +407,62 @@ pub fn post_key(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
+     Ok(())
+ }
+ 
++/// [`post_key`] for apps that read modifiers with `GetKeyState` (WinForms
++/// shortcuts, `TranslateAccelerator`): posted `WM_KEYDOWN(VK_CONTROL)` does
++/// not change the key state those read, so the shortcut silently became a
++/// plain key. This thread attaches to the target thread's input for the
++/// call, sets the shared keyboard state to hold `modifiers` while the posted
++/// key is handled, then restores it and detaches (the technique AutoHotkey's
++/// ControlSend uses). No foreground change and no system-wide key state.
++pub fn post_key_with_modifier_state(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
++    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
++    use windows::Win32::UI::Input::KeyboardAndMouse::{
++        GetKeyboardState, SetKeyboardState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
++        VK_SHIFT,
++    };
++    use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, MSG, PM_NOREMOVE};
++
++    let their_thread = unsafe { GetWindowThreadProcessId(HWND(hwnd as *mut _), None) };
++    if their_thread == 0 {
++        bail!("post_key_with_modifier_state: window 0x{hwnd:x} has no thread");
++    }
++    let my_thread = unsafe { GetCurrentThreadId() };
++    // AttachThreadInput needs a message queue on both threads.
++    let mut msg = MSG::default();
++    unsafe {
++        let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
++    }
++    if !unsafe { AttachThreadInput(my_thread, their_thread, TRUE) }.as_bool() {
++        bail!("AttachThreadInput to the target thread failed");
++    }
++    let mut saved = [0u8; 256];
++    let result = (|| -> Result<()> {
++        unsafe { GetKeyboardState(&mut saved) }?;
++        let mut held = saved;
++        for vk in modifiers.iter().filter_map(|m| modifier_vk(m)) {
++            let left = match vk {
++                v if v == VK_SHIFT => VK_LSHIFT,
++                v if v == VK_MENU => VK_LMENU,
++                v if v == VK_LWIN => VK_LWIN,
++                _ => VK_LCONTROL,
++            };
++            held[vk.0 as usize] |= 0x80;
++            held[left.0 as usize] |= 0x80;
++        }
++        unsafe { SetKeyboardState(&held) }?;
++        let posted = post_key(hwnd, key, modifiers);
++        // The state must hold while the target pulls the key from its queue;
++        // an idle UI thread does that within a few milliseconds.
++        sleep(Duration::from_millis(120));
++        posted
++    })();
++    unsafe {
++        let _ = SetKeyboardState(&saved);
++        let _ = AttachThreadInput(my_thread, their_thread, BOOL(0));
++    }
++    result
++}
++
+ /// Press `key` (with optional `modifiers`) via `SendInput` against the system
+ /// input queue, briefly focusing `hwnd` so the keystrokes land there.
+ ///
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs
+index 4b3a2eb..ea03053 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs
+@@ -20,12 +20,14 @@ pub use inject::{
+     ForegroundLockGuard, NoActivateGuard,
+ };
+ pub use keyboard::{
+-    is_xaml_host_hwnd, post_char, post_key, post_type_text, post_type_text_with_delay,
++    is_xaml_host_hwnd, post_char, post_key, post_key_with_modifier_state, post_type_text,
++    post_type_text_with_delay,
+     send_key_synthesized, send_key_synthesized_after_focus, send_text_synthesized,
+     send_text_synthesized_after_focus, wait_for_focused_descendant,
+ };
+ pub use mouse::{
+     has_chromium_descendant, is_chromium_target_window, post_click, post_click_screen,
++    post_left_click_screen_now,
+     send_click_synthesized, send_click_synthesized_active_mods, send_click_synthesized_mods,
+     send_wheel_synthesized,
+ };
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
+index d6f4fba..c9860c6 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
+@@ -105,6 +105,25 @@ pub fn post_click_screen(root: u64, sx: i32, sy: i32, count: usize, button: &str
+     post_click_on(target, client.x, client.y, count, button)
+ }
+ 
++/// Post one left click (move, down, up) at **screen** coordinates to the
++/// deepest child of `root` there, back to back. For classic message-loop
++/// windows (see `uia::activate`): they handle the queued messages in order, so
++/// [`post_click_screen`]'s press delay and its foreground watch for WebView
++/// hosts only add latency.
++pub fn post_left_click_screen_now(root: u64, sx: i32, sy: i32) -> Result<()> {
++    let (target, client) = deepest_child(HWND(root as *mut _), POINT { x: sx, y: sy });
++    if let Some(msg) = crate::input::post_message_blocked_by_uipi(target.0 as u64) {
++        anyhow::bail!(msg);
++    }
++    let lparam = make_lparam(client.x, client.y);
++    unsafe {
++        PostMessageW(target, WM_MOUSEMOVE, WPARAM(0), lparam)?;
++        PostMessageW(target, WM_LBUTTONDOWN, WPARAM(MK_LBUTTON as usize), lparam)?;
++        PostMessageW(target, WM_LBUTTONUP, WPARAM(0), lparam)?;
++    }
++    Ok(())
++}
++
+ /// Internal: post click messages to `hwnd` using its own client coordinates.
+ fn post_click_on(hwnd: HWND, x: i32, y: i32, count: usize, button: &str) -> Result<()> {
+     // UIPI check — Medium-IL daemon → High-IL target silently drops mouse
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+index e9793e6..987ea64 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+@@ -3209,6 +3209,31 @@ fn finish_pixel_uia_attempt(
+                 })),
+             );
+         }
++        // Delivered but still running (usually a modal dialog): success, and
++        // never a fallback that could click twice.
++        PointInvokeOutcome::Dispatched => {
++            return Some(
++                ToolResult::text(crate::uia::invoke::dispatched_message(
++                    &format!("the element at ({sx},{sy})"),
++                    pid,
++                ))
++                .with_structured(json!({
++                    "path": "ax", "verified": false, "effect": "unverifiable"
++                })),
++            );
++        }
++        PointInvokeOutcome::Posted(posted) => {
++            return Some(
++                ToolResult::text(format!(
++                    "✅ Clicked the element at ({sx},{sy}) for pid {pid} ({}; classic message \
++                     loop, no UIA call left running).",
++                    posted.describe()
++                ))
++                .with_structured(json!({
++                    "path": "post_message", "verified": false, "effect": "unverifiable"
++                })),
++            );
++        }
+         PointInvokeOutcome::Busy => "busy",
+         PointInvokeOutcome::Timeout => "timeout",
+         PointInvokeOutcome::Unavailable => "unavailable",
+@@ -3232,12 +3257,36 @@ fn finish_pixel_uia_attempt(
+     ))
+ }
+ 
++/// Add what a posted activation opened or closed to a click result's text and
++/// structured content (`windows: {opened, closed}`).
++fn append_window_changes(
++    mut result: ToolResult,
++    changes: &crate::uia::activate::WindowChanges,
++    pid: u32,
++) -> ToolResult {
++    let sentence = changes.sentence(pid);
++    if let Some(cua_driver_core::protocol::Content::Text { text, .. }) = result.content.first_mut() {
++        text.push(' ');
++        text.push_str(&sentence);
++    }
++    if let Some(Value::Object(map)) = result.structured_content.as_mut() {
++        map.insert("windows".into(), changes.json());
++    }
++    result
++}
++
+ enum BackgroundElementClick {
+     Semantic {
+         message: String,
+         transport: ActionTransport,
+         failed_calls: Vec<ActionTransport>,
+     },
++    /// Activation posted as window messages on a classic message-loop
++    /// window (see `uia::activate`), with the windows it opened or closed.
++    Posted {
++        message: String,
++        changes: crate::uia::activate::WindowChanges,
++    },
+     Inject {
+         x: i32,
+         y: i32,
+@@ -3311,8 +3360,13 @@ impl Tool for ClickTool {
+                 WebGL / custom-drawn surface that doesn't appear in the UIA tree.\n\n\
+                 Two addressing modes:\n\n\
+                 - `element_token` (from the last `get_window_state` snapshot \
+-                of that window) — performs the UIA Invoke pattern on the cached element via \
+-                PostMessage. No cursor move, no focus steal. Requires a prior \
++                of that window) — performs the UIA Invoke pattern on the cached element. On \
++                classic Win32 / WinForms / dialog / MFC windows, buttons, menu items, links and \
++                tabs are clicked with posted window messages instead (BM_CLICK, or \
++                WM_LBUTTONDOWN/UP), so a control that opens a modal dialog cannot hold the call; \
++                the result names any window the click opened or closed. On Chromium windows \
++                the click goes through the matching UIA pattern (Invoke, Toggle, \
++                SelectionItem.Select, ExpandCollapse). No cursor move, no focus steal. Requires a prior \
+                 `get_window_state(pid, window_id)` in this turn; the token is stale once \
+                 the next snapshot of the same window replaces it.\n\n\
+                 - `x`, `y` (window-local screenshot pixels, top-left origin of the PNG \
+@@ -3344,7 +3398,9 @@ impl Tool for ClickTool {
+                 the mouse button (Swift exposes right-click as a separate `right_click` \
+                 tool). `action: \"expand\"` on an `element_token` opens the element \
+                 through UIA ExpandCollapsePattern (the dropdown half of an MSAA split \
+-                button); other actions use the default invoke. `debug_image_out` isn't \
++                button). On Chromium windows `action` \"invoke\" / \"toggle\" / \"select\" \
++                pins that UIA pattern; other actions use the default for the element's role. \
++                `debug_image_out` isn't \
+                 supported yet.".into(),
+             input_schema: json!({
+                 "type":"object","properties":{
+@@ -3352,7 +3408,7 @@ impl Tool for ClickTool {
+                     "pid":{"type":"integer","description":"Target process ID for window scope. Optional with element_token (the token carries the pid). Omit with scope=desktop for screen-absolute coordinates from get_desktop_state."},
+                     "window_id":{"type":"integer","description":"HWND of the target window. Omit when element_token is supplied (the token carries it)."},
+                     "element_token": cua_driver_core::tool_schema::element_token_schema(),
+-                    "action":{"type":"string","description":"Accessibility action for an element_token target. \"expand\" opens the element through UIA ExpandCollapsePattern, or clicks the dropdown half of an MSAA split button. Omit for the default invoke."},
++                    "action":{"type":"string","description":"Accessibility action for an element_token target. \"expand\" opens the element through UIA ExpandCollapsePattern, or clicks the dropdown half of an MSAA split button. On Chromium windows \"invoke\", \"toggle\" or \"select\" (SelectionItem.Select, e.g. a <select> option) pins that UIA pattern. Omit for the default action."},
+                     "capture_id":{"type":"string","minLength":1,"description":"Optional ID from get_window_state or get_desktop_state. When present, x and y are admitted against that exact capture and the ID is consumed before native dispatch."},
+                     "x":{"type":"number","description":"X in window-local screenshot pixels — same space as the PNG get_window_state returns. Must be provided together with y."},
+                     "y":{"type":"number","description":"Y in window-local screenshot pixels. Must be provided together with x."},
+@@ -3913,34 +3969,77 @@ impl Tool for ClickTool {
+                     return r;
+                 }
+             }
+-            // Chromium's UIA Invoke raises a fully occluded renderer, while a
+-            // targeted PostMessage left click reaches the renderer without
+-            // changing foreground, z-order, or the real cursor. Keep AX for
+-            // target resolution and use the posted-message transport only for
+-            // the empirically verified single-left-click shape.
++            // Chromium drops posted mouse messages (and a `<select>` popup is a
++            // separate window a posted click never reaches), so a posted click
++            // reported success while doing nothing. Act through the UIA pattern
++            // that matches the element instead (`action` "invoke" / "toggle" /
++            // "select" pins one); the shield in `fg_bypass` keeps the browser
++            // from taking foreground. Without a pattern, refuse.
+             if delivery == DeliveryMode::Background
+                 && btn == "left"
+                 && count == 1
+                 && crate::input::is_chromium_target_window(hwnd)
+             {
+-                let posted = tokio::task::spawn_blocking({
++                let action = action_req.clone();
++                let clicked = tokio::task::spawn_blocking({
+                     let admitted = admitted.clone();
+                     move || {
+-                        let _admission = &admitted;
+-                        crate::input::post_click_screen(hwnd, cx, cy, count, &btn)
++                        use windows::core::Interface;
++                        let retained = admitted
++                            .as_ref()
++                            .filter(|element| element.is_uia())
++                            .ok_or_else(|| anyhow::anyhow!("element [{idx}] is not a UIA element"))?;
++                        // The cache owns this reference; borrow it without a Release.
++                        let element = std::mem::ManuallyDrop::new(unsafe {
++                            windows::Win32::UI::Accessibility::IUIAutomationElement::from_raw(
++                                retained.as_ptr() as *mut _,
++                            )
++                        });
++                        unsafe {
++                            crate::uia::patterns::pattern_click(
++                                &element,
++                                hwnd as isize,
++                                action.as_deref(),
++                            )
++                        }
+                     }
+                 })
+                 .await;
+-                return match posted {
+-                    Ok(Ok(())) => background_element_click_result(
++                return match clicked {
++                    Ok(Ok(Some((pattern, outcome)))) => background_element_click_result(
++                        match outcome {
++                            crate::uia::invoke::InvokeOutcome::Returned => format!(
++                                "✅ Performed UIA {} on Chromium element [{idx}] \
++                                 (background, no foreground swap).",
++                                pattern.name()
++                            ),
++                            crate::uia::invoke::InvokeOutcome::Dispatched => {
++                                crate::uia::invoke::dispatched_message(
++                                    &format!("Chromium element [{idx}]"),
++                                    pid,
++                                )
++                            }
++                        },
++                        pattern.transport(),
++                        vec![],
++                    ),
++                    Ok(Ok(None)) => crate::input::delivery::background_unavailable_error_with_cause(
++                        hwnd,
++                        EventKind::MouseClick,
+                         format!(
+-                            "✅ Posted click on Chromium element [{idx}] at screen ({cx},{cy}) \
+-                         (background, no foreground swap)."
++                            "Chromium ignores posted clicks and element [{idx}] exposes no \
++                             matching UIA pattern (Invoke, Toggle, SelectionItem, ExpandCollapse{})",
++                            action_req
++                                .as_deref()
++                                .map(|a| format!("; action \"{a}\" was requested"))
++                                .unwrap_or_default()
+                         ),
+-                        ActionTransport::WindowsPostMessage,
+-                        vec![],
+                     ),
+-                    Ok(Err(error)) => ToolResult::error(error.to_string()),
++                    Ok(Err(error)) => crate::input::delivery::background_unavailable_error_with_cause(
++                        hwnd,
++                        EventKind::MouseClick,
++                        format!("UIA pattern action on Chromium element [{idx}] failed: {error}"),
++                    ),
+                     Err(error) => ToolResult::error(format!("Task error: {error}")),
+                 };
+             }
+@@ -3991,6 +4090,36 @@ impl Tool for ClickTool {
+                         let elem: IUIAutomationElement =
+                             unsafe { IUIAutomationElement::from_raw(ptr as *mut _) };
+ 
++                        // Classic message-loop windows (WinForms, dialogs, MFC,
++                        // Win32 controls) run the click handler inside Invoke,
++                        // so a button that opens a modal dialog would hold the
++                        // call and silence the app's UIA tree. Post the click
++                        // instead and report the windows it opened or closed.
++                        if delivery == DeliveryMode::Background {
++                            if let Some(target) =
++                                unsafe { crate::uia::activate::activation_target(&elem, None) }
++                            {
++                                let watch = crate::uia::activate::WindowWatch::start(pid);
++                                match target.post() {
++                                    Ok(posted) => {
++                                        std::mem::forget(elem);
++                                        let changes = watch.settle();
++                                        return Ok(BackgroundElementClick::Posted {
++                                            message: format!(
++                                                "✅ Clicked [{idx}] ({}; classic message loop, \
++                                                 no UIA call left running). {}",
++                                                posted.describe(),
++                                                changes.sentence(pid)
++                                            ),
++                                            changes,
++                                        });
++                                    }
++                                    Err(e) => tracing::debug!(target: "click",
++                                        "posted activation on [{idx}] failed before sending, using UIA: {e}"),
++                                }
++                            }
++                        }
++
+                         // Try patterns in order of click-semantics specificity:
+                         //   1. Invoke      - buttons / hyperlinks (canonical)
+                         //   2. Toggle      - checkboxes (no Invoke)
+@@ -4006,14 +4135,25 @@ impl Tool for ClickTool {
+                         let invoke_result = unsafe { elem.GetCurrentPattern(UIA_InvokePatternId) };
+                         if let Ok(pattern) = invoke_result {
+                             if let Ok(inv) = pattern.cast::<IUIAutomationInvokePattern>() {
++                                // Bounded: a button that opens a modal dialog keeps
++                                // Invoke from returning. A dispatched Invoke is
++                                // delivered and must not fall through below.
+                                 let outcome = crate::uia::fg_bypass::run_with_uwp_bypass(
+-                                    hwnd as isize, || unsafe { inv.Invoke() });
++                                    hwnd as isize, || crate::uia::invoke::invoke_with_deadline(&inv));
+                                 match outcome {
+-                                    Ok(()) => {
++                                    Ok(invoked) => {
+                                         std::mem::forget(elem);
+-                                        return Ok(BackgroundElementClick::Semantic { message: format!(
+-                                            "✅ Performed UIA Invoke on [{idx}] (screen ({cx},{cy}))."
+-                                        ), transport: ActionTransport::WindowsUiaInvoke, failed_calls });
++                                        let message = match invoked {
++                                            crate::uia::invoke::InvokeOutcome::Returned => format!(
++                                                "✅ Performed UIA Invoke on [{idx}] (screen ({cx},{cy}))."
++                                            ),
++                                            crate::uia::invoke::InvokeOutcome::Dispatched =>
++                                                crate::uia::invoke::dispatched_message(
++                                                    &format!("[{idx}] (screen ({cx},{cy}))"), pid),
++                                        };
++                                        return Ok(BackgroundElementClick::Semantic {
++                                            message, transport: ActionTransport::WindowsUiaInvoke, failed_calls,
++                                        });
+                                     }
+                                     Err(e) => tracing::debug!(target: "click",
+                                         "UIA Invoke on [{idx}]: {e}, trying Toggle"),
+@@ -4098,6 +4238,17 @@ impl Tool for ClickTool {
+                 } => {
+                     return background_element_click_result(message, transport, failed_calls);
+                 }
++                BackgroundElementClick::Posted { message, changes } => {
++                    let mut result = background_element_click_result(
++                        message,
++                        ActionTransport::WindowsPostMessage,
++                        vec![],
++                    );
++                    if let Some(Value::Object(map)) = result.structured_content.as_mut() {
++                        map.insert("windows".into(), changes.json());
++                    }
++                    return result;
++                }
+                 BackgroundElementClick::Inject { x, y, failed_calls } => (x, y, failed_calls, true),
+                 BackgroundElementClick::Post { x, y, failed_calls } => (x, y, failed_calls, false),
+             };
+@@ -4327,21 +4478,32 @@ impl Tool for ClickTool {
+             }
+             let use_uia = (btn == "left" || btn == "middle") && count == 1;
+             if use_uia {
+-                let outcome = tokio::task::spawn_blocking({
++                let (outcome, changes) = tokio::task::spawn_blocking({
+                     let admitted = admitted.clone();
+                     move || {
+                         let _admission = &admitted;
+-                        crate::uia::windows_enum::try_invoke_in_window_at_point(
++                        let watch = crate::uia::activate::WindowWatch::start(pid);
++                        let outcome = crate::uia::windows_enum::try_invoke_in_window_at_point(
+                             hwnd as isize,
+                             sx as i32,
+                             sy as i32,
++                        );
++                        // Settle outside the UIA worker so its gate is not held.
++                        let changes = matches!(
++                            outcome,
++                            crate::uia::windows_enum::PointInvokeOutcome::Posted(_)
+                         )
++                        .then(|| watch.settle());
++                        (outcome, changes)
+                     }
+                 })
+                 .await
+-                .unwrap_or(crate::uia::windows_enum::PointInvokeOutcome::Unavailable);
++                .unwrap_or((crate::uia::windows_enum::PointInvokeOutcome::Unavailable, None));
+                 if let Some(result) = finish_pixel_uia_attempt(outcome, pid, sx_i, sy_i) {
+-                    return result;
++                    return match changes {
++                        Some(changes) => append_window_changes(result, &changes, pid),
++                        None => result,
++                    };
+                 }
+             }
+ 
+@@ -5880,12 +6042,19 @@ impl Tool for HotkeyTool {
+                 }
+             })
+             .await;
++            use crate::uia::invoke::InvokeOutcome;
+             return match result {
+-                Ok(Ok((true, _))) => ToolResult::text(format!(
++                Ok(Ok((Some(InvokeOutcome::Returned), _))) => ToolResult::text(format!(
+                     "✅ Pressed {key_display_for_result} on pid {raw_pid} via UIA \
+                      InvokePattern/TogglePattern (XAML / UWP target)."
+                 )),
+-                Ok(Ok((false, scanned))) => ToolResult::error(format!(
++                Ok(Ok((Some(InvokeOutcome::Dispatched), _))) => {
++                    ToolResult::text(crate::uia::invoke::dispatched_message(
++                        &format!("the element bound to {key_display_for_result}"),
++                        pid,
++                    ))
++                }
++                Ok(Ok((None, scanned))) => ToolResult::error(format!(
+                     "hotkey on a modern XAML / UWP target (pid {raw_pid}, hwnd {hwnd}) \
+                      could not find a UIA AcceleratorKey or `(Ctrl+X)`-style name hint \
+                      matching `{key_display_for_result}` (scanned {scanned} element(s)). \
+@@ -5976,6 +6145,10 @@ impl Tool for HotkeyTool {
+                         }
+                         Ok(())
+                     })
++                } else if !m.is_empty() && crate::uia::activate::is_classic_window(hwnd) {
++                    // WinForms / TranslateAccelerator read modifiers with
++                    // GetKeyState, which posted modifier keys do not set.
++                    crate::input::post_key_with_modifier_state(hwnd, &key, &m)
+                 } else {
+                     crate::input::post_key(hwnd, &key, &m)
+                 }
+@@ -5984,6 +6157,8 @@ impl Tool for HotkeyTool {
+         .await;
+         let path = if use_send_input {
+             "SendInput"
++        } else if has_modifiers && crate::uia::activate::is_classic_window(hwnd) {
++            "PostMessage with the target thread's modifier key state"
+         } else {
+             "PostMessage"
+         };
+@@ -6024,8 +6199,10 @@ impl Tool for SetValueTool {
+                   the option whose text matches `value` and sends the app the notifications a \
+                   user's choice sends (CBN_SELENDOK, CBN_SELCHANGE), without focusing the window; \
+                   an editable combo gets the text typed into its edit field. A drop-down list \
+-                  without that option is refused with the list of options. Other combo boxes get \
+-                  a UIA value write, which the app may not treat as a selection.\n\n\
++                  without that option is refused with the list of options. Other combo boxes \
++                  (Chromium `<select>`, XAML) get a UIA value write that must read back; if it \
++                  does not, the option whose name matches `value` (case-insensitive) is \
++                  selected through ExpandCollapse + SelectionItem.\n\n\
+                 For free-form text entry that the target accepts via keystrokes only, prefer \
+                 `type_text` — UIA ValuePattern writes are ignored by some web inputs (same \
+                 caveat as Swift's `AXValue`-vs-WebKit).".into(),
+@@ -6133,6 +6310,39 @@ impl Tool for SetValueTool {
+                 }
+                 let is_combo = unsafe { elem.CurrentControlType() }
+                     .is_ok_and(|control_type| control_type == UIA_ComboBoxControlTypeId);
++                // A combo box without a native window (Chromium `<select>`,
++                // XAML, ...): a ValuePattern write can return S_OK and change
++                // nothing. Keep it only if it reads back; otherwise choose the
++                // option by name (expand, SelectionItem.Select, collapse).
++                if is_combo {
++                    use crate::uia::patterns::{select_combo_option, set_value_verified, ComboSelect};
++                    let wrote = unsafe { set_value_verified(&elem, hwnd as isize, &value) };
++                    if let Some(Ok(true)) = wrote {
++                        return Ok(SetValueRoute::Pattern("ValuePattern, read back"));
++                    }
++                    let selected = unsafe { select_combo_option(&elem, hwnd as isize, &value) };
++                    return match (selected, wrote) {
++                        (Ok(ComboSelect::Selected { option, readback }), _) => {
++                            Ok(SetValueRoute::ComboOption { option, readback })
++                        }
++                        // Written without error but not read back, and no
++                        // option by that name: maybe a free-text combo.
++                        (Ok(ComboSelect::NoSuchOption { .. }), Some(Ok(false))) => {
++                            Ok(SetValueRoute::ComboValuePattern)
++                        }
++                        (Ok(ComboSelect::NoSuchOption { options }), _) => {
++                            Ok(SetValueRoute::ComboNoOption { options })
++                        }
++                        (Err(error), Some(Ok(false))) => {
++                            tracing::debug!(target: "set_value", "option selection failed: {error}");
++                            Ok(SetValueRoute::ComboValuePattern)
++                        }
++                        (Err(error), _) => Err(anyhow::anyhow!(
++                            "set_value: combo box [{idx}] rejected the value write and selecting \
++                             option '{value}' failed: {error}"
++                        )),
++                    };
++                }
+                 // Try ValuePattern first (text inputs, editable combos, etc).
+                 // The SetValue is shielded by the EnableWindow bypass: a
+                 // Chromium/Electron (or XAML) SetValue handler self-foregrounds via
+@@ -6198,6 +6408,39 @@ impl Tool for SetValueTool {
+             Ok(Ok(SetValueRoute::Win32Combo { combo, write })) => {
+                 win32_combo_set_value_result(idx, &value, combo, write, &args)
+             }
++            Ok(Ok(SetValueRoute::ComboOption { option, readback })) => {
++                let verified = readback.as_deref().is_some_and(|v| v.trim() == option.trim());
++                let shown = readback.unwrap_or_default();
++                ToolResult::text(if verified {
++                    format!(
++                        "✅ Selected option '{option}' in combo box [{idx}] (the value write did \
++                         not take, so: ExpandCollapse.Expand, SelectionItem.Select, Collapse); \
++                         reads back '{shown}'."
++                    )
++                } else {
++                    format!(
++                        "Selected option '{option}' in combo box [{idx}] (ExpandCollapse.Expand, \
++                         SelectionItem.Select, Collapse), but it reads back '{shown}'. Check with \
++                         get_window_state."
++                    )
++                })
++                .with_structured(json!({
++                    "path": "ax",
++                    "route": "select_option",
++                    "option": option,
++                    "verified": verified,
++                    "effect": if verified { "confirmed" } else { "unverifiable" },
++                }))
++            }
++            Ok(Ok(SetValueRoute::ComboNoOption { options })) => ToolResult::error(format!(
++                "set_value: combo box [{idx}] has no option '{value}' and its value write did \
++                 not take; nothing was selected. Options: {options:?}."
++            ))
++            .with_structured(json!({
++                "code": "option_not_found",
++                "effect": "none",
++                "options": options,
++            })),
+             Ok(Err(e)) => ToolResult::error(e.to_string()),
+             Err(e) => ToolResult::error(format!("Task error: {e}")),
+         }
+@@ -6210,6 +6453,14 @@ enum SetValueRoute {
+     Pattern(&'static str),
+     /// UIA `ValuePattern` on a combo box that has no native Win32 window.
+     ComboValuePattern,
++    /// A combo box without a native window whose value write did not take:
++    /// the option was chosen through ExpandCollapse + SelectionItem.
++    ComboOption {
++        option: String,
++        readback: Option<String>,
++    },
++    /// Neither the value write nor an option by that name worked.
++    ComboNoOption { options: Vec<String> },
+     /// Win32 combo messages plus the app's change notifications.
+     Win32Combo {
+         combo: crate::win32::combo::Combo,
+@@ -6762,13 +7013,16 @@ async fn chromium_click_short_circuit(
+ /// (`WS_EX_NOACTIVATE`, via `NoActivateGuard`) for the whole burst, which is
+ /// what makes Windows refuse the self-activation — the same guard ClickTool
+ /// already relies on for single-click. Runs blocking COM, so call inside
+-/// `spawn_blocking`. Returns `Some(Ok)` on success, `Some(Err)` if Invoke
+-/// failed, `None` if the element isn't cached or has no InvokePattern.
++/// `spawn_blocking`. Returns `Some(Ok(Returned))` when every Invoke returned,
++/// `Some(Ok(Dispatched))` when one outlived its deadline (the burst stops
++/// there), `Some(Err)` if Invoke failed, `None` if the element isn't cached or
++/// has no InvokePattern.
+ fn winui3_uia_multi_invoke(
+     admitted: &Option<crate::uia::snapshot::RetainedElement>,
+     hwnd: u64,
+     count: usize,
+-) -> Option<anyhow::Result<()>> {
++) -> Option<anyhow::Result<crate::uia::invoke::InvokeOutcome>> {
++    use crate::uia::invoke::InvokeOutcome;
+     let guard = admitted.as_ref().filter(|element| element.is_uia())?;
+     let ptr = guard.as_ptr();
+     use windows::core::Interface;
+@@ -6780,24 +7034,25 @@ fn winui3_uia_multi_invoke(
+     let _noact =
+         crate::input::NoActivateGuard::arm(windows::Win32::Foundation::HWND(hwnd as *mut _));
+     let elem: IUIAutomationElement = unsafe { IUIAutomationElement::from_raw(ptr as *mut _) };
+-    let outcome: Option<anyhow::Result<()>> = (|| {
++    let outcome: Option<anyhow::Result<InvokeOutcome>> = (|| {
+         let pattern = unsafe { elem.GetCurrentPattern(UIA_InvokePatternId) }.ok()?;
+         let inv = pattern.cast::<IUIAutomationInvokePattern>().ok()?;
+         let n = count.max(2);
+-        let mut res = Ok(());
+         for i in 0..n {
+-            let r = crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || unsafe {
+-                inv.Invoke()
++            let r = crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || {
++                crate::uia::invoke::invoke_with_deadline(&inv)
+             });
+-            if let Err(e) = r {
+-                res = Err(anyhow::anyhow!("UIA Invoke #{i}: {e}"));
+-                break;
++            match r {
++                Ok(InvokeOutcome::Returned) => {}
++                // A blocked handler would only queue the next Invoke behind it.
++                Ok(InvokeOutcome::Dispatched) => return Some(Ok(InvokeOutcome::Dispatched)),
++                Err(e) => return Some(Err(anyhow::anyhow!("UIA Invoke #{i}: {e}"))),
+             }
+             if i + 1 < n {
+                 std::thread::sleep(std::time::Duration::from_millis(40));
+             }
+         }
+-        Some(res)
++        Some(Ok(InvokeOutcome::Returned))
+     })();
+     // The cache owns this element's ref (AddRef'd under the cache lock by
+     // get_element_retained); `from_raw` took ownership without AddRef, so forget
+@@ -6855,11 +7110,23 @@ async fn winui3_background_gesture(
+             .await
+             .ok()
+             .flatten();
+-            if let Some(Ok(())) = uia {
+-                return Some(ToolResult::text(format!(
+-                    "✅ Double-invoked WinUI3 element [{idx}] x{count} via UIA \
+-                     (pid {pid}, background, no foreground swap)."
+-                )));
++            match uia {
++                Some(Ok(crate::uia::invoke::InvokeOutcome::Returned)) => {
++                    return Some(ToolResult::text(format!(
++                        "✅ Double-invoked WinUI3 element [{idx}] x{count} via UIA \
++                         (pid {pid}, background, no foreground swap)."
++                    )));
++                }
++                Some(Ok(crate::uia::invoke::InvokeOutcome::Dispatched)) => {
++                    return Some(ToolResult::text(format!(
++                        "{} The remaining Invokes of the double-click were not sent.",
++                        crate::uia::invoke::dispatched_message(
++                            &format!("WinUI3 element [{idx}]"),
++                            pid
++                        )
++                    )));
++                }
++                _ => {}
+             }
+         }
+     }
+@@ -9304,25 +9571,42 @@ impl Tool for InvokeMenuTool {
+             if needs_activation && !prior.0.is_null() {
+                 let _ = unsafe { crate::input::force_foreground_attached(prior) };
+             }
+-            result.map(|()| used_activation_retry)
++            result.map(|invoked| (used_activation_retry, invoked))
+         })
+         .await;
+ 
++        use crate::uia::invoke::InvokeOutcome;
++        use crate::uia::MenuActivation;
+         match outcome {
+-            Ok(Ok(used_activation_retry)) => ToolResult::text(
+-                "Resolved the live native menu path and dispatched its final accessibility action; verify the command's semantic effect from fresh state.",
+-            )
++            Ok(Ok((used_activation_retry, invoked))) => ToolResult::text(match &invoked {
++                MenuActivation::Uia(InvokeOutcome::Returned) => "Resolved the live native menu path and dispatched its final accessibility action; verify the command's semantic effect from fresh state.".to_owned(),
++                MenuActivation::Uia(InvokeOutcome::Dispatched) => {
++                    crate::uia::invoke::dispatched_message("the menu path", input.pid)
++                }
++                MenuActivation::Posted(posted, changes) => format!(
++                    "✅ Resolved the live menu path and clicked its final item ({}; classic message loop, no UIA call left running). {}",
++                    posted.describe(),
++                    changes.sentence(input.pid)
++                ),
++            })
+             .with_action_record(
+                 ActionExecutionRecord::builder(
+                     ActionEffect::Unverifiable,
+-                    ActionTransport::WindowsUiaInvoke,
++                    match &invoked {
++                        MenuActivation::Posted(..) => ActionTransport::WindowsPostMessage,
++                        MenuActivation::Uia(_) => ActionTransport::WindowsUiaInvoke,
++                    },
+                     RequestedDelivery::Foreground,
+                 )
+                 .actual_delivery(ActualDelivery::Foreground)
+                 .evidence(ActionEvidence {
+                     kind: EvidenceKind::NativeApiResult,
+-                    detail: "Every menu hop resolved uniquely and UI Automation accepted the final action"
+-                        .into(),
++                    detail: match &invoked {
++                        MenuActivation::Uia(InvokeOutcome::Returned) => "Every menu hop resolved uniquely and UI Automation accepted the final action",
++                        MenuActivation::Uia(InvokeOutcome::Dispatched) => "Every menu hop resolved uniquely; an Invoke was still running at its deadline",
++                        MenuActivation::Posted(..) => "Every menu hop resolved uniquely; the final item was clicked with posted window messages",
++                    }
++                    .into(),
+                 })
+                 .detail(if used_activation_retry {
+                     "target activation required a bounded reserved-key foreground-lock retry"
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/activate.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/activate.rs
+new file mode 100644
+index 0000000..0c3956f
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/activate.rs
+@@ -0,0 +1,350 @@
++//! Asynchronous activation for windows that run a classic Win32 message loop.
++//!
++//! WinForms, MFC, dialog-manager and plain Win32 UIA providers run a control's
++//! click handler inside `InvokePattern.Invoke()`. When that handler opens a
++//! modal dialog, Invoke does not return until the dialog closes, and the app's
++//! provider stops answering meanwhile, so the new dialog's tree reads as empty.
++//! `uia::invoke`'s deadline only frees the driver; the app stays stuck.
++//!
++//! For those windows the driver posts the click as window messages instead.
++//! The handler then runs from the app's own message loop, like a real click,
++//! and no UIA call is left outstanding inside the app:
++//! - a real button window (Win32 `Button`, WinForms `BUTTON`): `BM_CLICK`;
++//! - anything else (ToolStrip/MenuStrip items, owner-drawn controls, tabs,
++//!   links): `WM_LBUTTONDOWN`/`WM_LBUTTONUP` at the element's centre, posted to
++//!   the window that owns that point.
++//!
++//! UWP/WinUI/XAML, WPF and Chromium hosts keep UIA Invoke (with the deadline
++//! backstop): they ignore posted mouse input or do not block inside Invoke.
++
++use std::time::{Duration, Instant};
++
++use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE, WPARAM};
++use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
++use windows::Win32::UI::Accessibility::{
++    CUIAutomation, ExpandCollapseState_LeafNode, IUIAutomation, IUIAutomationElement,
++    IUIAutomationExpandCollapsePattern, UIA_ButtonControlTypeId, UIA_ExpandCollapsePatternId,
++    UIA_HyperlinkControlTypeId, UIA_MenuItemControlTypeId, UIA_SplitButtonControlTypeId,
++    UIA_TabItemControlTypeId, UIA_CONTROLTYPE_ID,
++};
++use windows::Win32::UI::WindowsAndMessaging::{
++    EnumWindows, GetAncestor, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
++    PostMessageW, BM_CLICK, GA_ROOT,
++};
++
++use windows::core::Interface;
++
++/// How [`post_activation`] delivered a click.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum PostedActivation {
++    /// `BM_CLICK` posted to the button's own window.
++    ButtonClick { hwnd: u64 },
++    /// `WM_LBUTTONDOWN`/`UP` posted at screen (`x`, `y`) inside `hwnd`.
++    MouseClick { hwnd: u64, x: i32, y: i32 },
++}
++
++impl PostedActivation {
++    /// Short phrase for tool text, e.g. "posted BM_CLICK to button window 0x1a2b".
++    pub(crate) fn describe(&self) -> String {
++        match *self {
++            Self::ButtonClick { hwnd } => format!("posted BM_CLICK to button window 0x{hwnd:x}"),
++            Self::MouseClick { hwnd, x, y } => format!(
++                "posted WM_LBUTTONDOWN/UP at screen ({x},{y}) to window 0x{hwnd:x}"
++            ),
++        }
++    }
++}
++
++/// Window classes whose controls run on a classic Win32 message loop and
++/// handle posted clicks: WinForms, dialogs, MFC and the standard controls.
++fn is_classic_class(class: &str) -> bool {
++    const PREFIXES: &[&str] = &["WindowsForms10.", "Afx", "#32770"];
++    const CONTROLS: &[&str] = &[
++        "Button",
++        "Static",
++        "Edit",
++        "ComboBox",
++        "ListBox",
++        "SysLink",
++        "SysTabControl32",
++        "SysListView32",
++        "SysTreeView32",
++        "SysHeader32",
++        "ToolbarWindow32",
++        "ReBarWindow32",
++        "msctls_statusbar32",
++    ];
++    PREFIXES.iter().any(|prefix| class.starts_with(prefix))
++        || CONTROLS.iter().any(|name| class.eq_ignore_ascii_case(name))
++}
++
++/// Top-level hosts that must keep UIA Invoke even when a classic-looking
++/// child window owns the element.
++fn is_modern_host(root: u64) -> bool {
++    crate::input::is_xaml_host_hwnd(root)
++        || crate::input::is_chromium_target_window(root)
++        || crate::input::delivery::is_wpf_target_window(root)
++        || crate::input::delivery::is_winui3_target_window(root)
++}
++
++/// True when `hwnd` (the window that owns an element) runs a classic message
++/// loop: its own class is a classic one and its top-level window is not a
++/// UWP/WinUI/XAML, WPF or Chromium host.
++pub(crate) fn is_classic_window(hwnd: u64) -> bool {
++    if hwnd == 0 {
++        return false;
++    }
++    let root = unsafe { GetAncestor(HWND(hwnd as *mut _), GA_ROOT) };
++    let root = if root.0.is_null() { hwnd } else { root.0 as u64 };
++    is_classic_class(&crate::input::delivery::read_class_name(hwnd)) && !is_modern_host(root)
++}
++
++fn is_activation_control(control_type: UIA_CONTROLTYPE_ID) -> bool {
++    [
++        UIA_ButtonControlTypeId,
++        UIA_MenuItemControlTypeId,
++        UIA_SplitButtonControlTypeId,
++        UIA_HyperlinkControlTypeId,
++        UIA_TabItemControlTypeId,
++    ]
++    .contains(&control_type)
++}
++
++/// A menu item that opens a submenu is expanded, not activated; only leaves
++/// (and controls without ExpandCollapse) take the posted-click route.
++unsafe fn is_submenu_parent(elem: &IUIAutomationElement) -> bool {
++    elem.GetCurrentPattern(UIA_ExpandCollapsePatternId)
++        .ok()
++        .and_then(|pattern| pattern.cast::<IUIAutomationExpandCollapsePattern>().ok())
++        .and_then(|pattern| pattern.CurrentExpandCollapseState().ok())
++        .is_some_and(|state| state != ExpandCollapseState_LeafNode)
++}
++
++fn is_button_class(class: &str) -> bool {
++    class.eq_ignore_ascii_case("Button")
++        || class.to_ascii_lowercase().starts_with("windowsforms10.button.")
++}
++
++fn rect_contains(rect: &RECT, x: i32, y: i32) -> bool {
++    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
++}
++
++/// Nearest window handle on `elem` or its UIA ancestors.
++unsafe fn nearest_native_window(elem: &IUIAutomationElement) -> Option<HWND> {
++    let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
++    let walker = uia.RawViewWalker().ok()?;
++    let mut current = elem.clone();
++    for _ in 0..32 {
++        if let Ok(hwnd) = current.CurrentNativeWindowHandle() {
++            if !hwnd.0.is_null() {
++                return Some(hwnd);
++            }
++        }
++        current = walker.GetParentElement(&current).ok()?;
++    }
++    None
++}
++
++/// Topmost visible top-level window of `pid` whose rectangle contains the
++/// point. Used when the element's nearest window does not cover its own
++/// centre, e.g. a ToolStrip drop-down item whose UIA parent is the menu bar
++/// while it is drawn in a separate popup window.
++fn topmost_window_of_pid_at(pid: u32, x: i32, y: i32) -> Option<HWND> {
++    struct Search {
++        pid: u32,
++        point: (i32, i32),
++        found: Option<HWND>,
++    }
++    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
++        let search = &mut *(lparam.0 as *mut Search);
++        let mut owner = 0_u32;
++        GetWindowThreadProcessId(hwnd, Some(&mut owner));
++        if owner == search.pid && IsWindowVisible(hwnd).as_bool() {
++            let mut rect = RECT::default();
++            if GetWindowRect(hwnd, &mut rect).is_ok()
++                && rect_contains(&rect, search.point.0, search.point.1)
++            {
++                search.found = Some(hwnd);
++                return BOOL(0);
++            }
++        }
++        TRUE
++    }
++    let mut search = Search { pid, point: (x, y), found: None };
++    unsafe {
++        // EnumWindows walks top-level windows in z-order, topmost first.
++        let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize));
++    }
++    search.found
++}
++
++/// Decide whether `elem`'s activation should be posted as window messages:
++/// it is an activation-type control (button, leaf menu item, link, tab) in a
++/// window with a classic message loop. `point` overrides where a mouse click
++/// lands (a pixel click's own coordinates); otherwise it is the element's
++/// centre. Sends nothing; `None` means the caller keeps its UIA path.
++pub(crate) unsafe fn activation_target(
++    elem: &IUIAutomationElement,
++    point: Option<(i32, i32)>,
++) -> Option<PostedActivation> {
++    let control_type = elem.CurrentControlType().ok()?;
++    if !is_activation_control(control_type) || is_submenu_parent(elem) {
++        return None;
++    }
++    let owner = nearest_native_window(elem)?;
++    if !is_classic_window(owner.0 as u64) {
++        return None;
++    }
++    let own = elem.CurrentNativeWindowHandle().ok().filter(|h| !h.0.is_null());
++    if let Some(button) =
++        own.filter(|h| is_button_class(&crate::input::delivery::read_class_name(h.0 as u64)))
++    {
++        return Some(PostedActivation::ButtonClick { hwnd: button.0 as u64 });
++    }
++    let (x, y) = match point {
++        Some(point) => point,
++        None => {
++            let rect = elem.CurrentBoundingRectangle().ok()?;
++            if rect.right <= rect.left || rect.bottom <= rect.top {
++                return None;
++            }
++            ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2)
++        }
++    };
++    let mut owner_rect = RECT::default();
++    let target = if GetWindowRect(owner, &mut owner_rect).is_ok()
++        && rect_contains(&owner_rect, x, y)
++    {
++        owner
++    } else {
++        let pid = elem.CurrentProcessId().ok()? as u32;
++        let popup = topmost_window_of_pid_at(pid, x, y)?;
++        if !is_classic_window(popup.0 as u64) {
++            return None;
++        }
++        popup
++    };
++    Some(PostedActivation::MouseClick { hwnd: target.0 as u64, x, y })
++}
++
++impl PostedActivation {
++    /// Post the click. `Err` means no message went out (for example UIPI),
++    /// so the caller may still fall back to UIA.
++    pub(crate) fn post(self) -> anyhow::Result<Self> {
++        match self {
++            Self::ButtonClick { hwnd } => {
++                if let Some(message) = crate::input::post_message_blocked_by_uipi(hwnd) {
++                    anyhow::bail!(message);
++                }
++                unsafe { PostMessageW(HWND(hwnd as *mut _), BM_CLICK, WPARAM(0), LPARAM(0)) }
++                    .map_err(|error| anyhow::anyhow!("PostMessage(BM_CLICK): {error}"))?;
++            }
++            Self::MouseClick { hwnd, x, y } => {
++                crate::input::post_left_click_screen_now(hwnd, x, y)?;
++            }
++        }
++        Ok(self)
++    }
++}
++
++/// A titled top-level window, as reported after an asynchronous activation.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct TitledWindow {
++    pub window_id: u64,
++    pub title: String,
++}
++
++/// What changed in a process's titled top-level windows.
++#[derive(Clone, Debug, Default)]
++pub struct WindowChanges {
++    pub opened: Vec<TitledWindow>,
++    pub closed: Vec<TitledWindow>,
++}
++
++impl WindowChanges {
++    /// One sentence for tool text, empty when nothing changed.
++    pub(crate) fn sentence(&self, pid: u32) -> String {
++        let list = |windows: &[TitledWindow]| {
++            windows
++                .iter()
++                .map(|w| format!("window_id {} \"{}\"", w.window_id, w.title))
++                .collect::<Vec<_>>()
++                .join(", ")
++        };
++        let mut parts = Vec::new();
++        if !self.opened.is_empty() {
++            parts.push(format!("New window(s) of pid {pid}: {}.", list(&self.opened)));
++        }
++        if !self.closed.is_empty() {
++            parts.push(format!("Closed: {}.", list(&self.closed)));
++        }
++        if parts.is_empty() {
++            format!(
++                "No window of pid {pid} opened or closed within {} ms.",
++                SETTLE.as_millis()
++            )
++        } else {
++            parts.join(" ")
++        }
++    }
++
++    pub(crate) fn json(&self) -> serde_json::Value {
++        let rows = |windows: &[TitledWindow]| {
++            windows
++                .iter()
++                .map(|w| serde_json::json!({ "window_id": w.window_id, "title": w.title }))
++                .collect::<Vec<_>>()
++        };
++        serde_json::json!({ "opened": rows(&self.opened), "closed": rows(&self.closed) })
++    }
++}
++
++/// How long a posted activation waits for a window to open or close.
++pub(crate) const SETTLE: Duration = Duration::from_millis(400);
++
++fn titled_windows(pid: u32) -> Vec<TitledWindow> {
++    crate::win32::list_windows_via_win32(Some(pid))
++        .into_iter()
++        .map(|w| TitledWindow { window_id: w.hwnd, title: w.title })
++        .collect()
++}
++
++/// Snapshot of `pid`'s titled windows, taken before an activation is posted.
++/// [`WindowWatch::settle`] then reports what the activation opened or closed,
++/// so the caller can name a new dialog without another tool call.
++pub(crate) struct WindowWatch {
++    pid: u32,
++    before: Vec<TitledWindow>,
++}
++
++impl WindowWatch {
++    pub(crate) fn start(pid: u32) -> Self {
++        Self { pid, before: titled_windows(pid) }
++    }
++
++    /// Poll until a window of the pid opens or closes, at most [`SETTLE`].
++    pub(crate) fn settle(&self) -> WindowChanges {
++        let deadline = Instant::now() + SETTLE;
++        loop {
++            let now = titled_windows(self.pid);
++            let changes = WindowChanges {
++                opened: now
++                    .iter()
++                    .filter(|w| !self.before.iter().any(|b| b.window_id == w.window_id))
++                    .cloned()
++                    .collect(),
++                closed: self
++                    .before
++                    .iter()
++                    .filter(|b| !now.iter().any(|w| w.window_id == b.window_id))
++                    .cloned()
++                    .collect(),
++            };
++            if !changes.opened.is_empty() || !changes.closed.is_empty() || Instant::now() >= deadline
++            {
++                return changes;
++            }
++            std::thread::sleep(Duration::from_millis(15));
++        }
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/invoke.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/invoke.rs
+new file mode 100644
+index 0000000..e88c14b
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/invoke.rs
+@@ -0,0 +1,109 @@
++//! `InvokePattern.Invoke()` with a short wait instead of an unbounded one.
++//!
++//! Invoke is a synchronous cross-process call, and WinForms and classic Win32
++//! providers run the control's click handler inside it. When that handler
++//! opens a modal dialog, Invoke does not return until the dialog closes or UI
++//! Automation's own transaction timeout fires (about a minute, measured), so
++//! the tool call hung with it and then reported a failure for a click that
++//! had landed.
++//!
++//! [`invoke_with_deadline`] runs Invoke on its own thread and waits at most
++//! [`invoke_deadline`]. A late Invoke is [`InvokeOutcome::Dispatched`]: the
++//! provider may still be running the action, so callers report it as sent and
++//! must not try another pattern or input that could fire it twice. The thread
++//! holds no gate or lock, so later UIA calls (including ones against the new
++//! dialog) are not queued behind it. It exits once Invoke returns.
++
++use std::sync::{mpsc, OnceLock};
++use std::time::Duration;
++
++use windows::Win32::Foundation::E_FAIL;
++use windows::Win32::UI::Accessibility::IUIAutomationInvokePattern;
++
++const DEFAULT_DEADLINE: Duration = Duration::from_millis(1500);
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum InvokeOutcome {
++    /// Invoke returned success within the deadline.
++    Returned,
++    /// Invoke had not returned at the deadline and is still running on its
++    /// own thread, usually inside a modal dialog the control opened.
++    Dispatched,
++}
++
++/// How long to wait for Invoke: `CUA_DRIVER_INVOKE_DEADLINE_MS`, else 1500 ms.
++pub(crate) fn invoke_deadline() -> Duration {
++    static DEADLINE: OnceLock<Duration> = OnceLock::new();
++    *DEADLINE.get_or_init(|| {
++        std::env::var("CUA_DRIVER_INVOKE_DEADLINE_MS")
++            .ok()
++            .and_then(|ms| ms.trim().parse::<u64>().ok())
++            .filter(|&ms| ms > 0)
++            .map_or(DEFAULT_DEADLINE, Duration::from_millis)
++    })
++}
++
++/// Tool text for a [`InvokeOutcome::Dispatched`] Invoke on `target` in `pid`.
++pub(crate) fn dispatched_message(target: &str, pid: u32) -> String {
++    format!(
++        "✅ Dispatched UIA Invoke on {target}. It did not return within {} ms, which usually \
++         means the control opened a modal dialog. The effect is unverified. Call list_windows \
++         for pid {pid} to find the new dialog, then get_window_state on it.",
++        invoke_deadline().as_millis()
++    )
++}
++
++/// Call `pattern.Invoke()` on a fresh MTA thread and wait at most
++/// [`invoke_deadline`]. `Err` is a failure Invoke reported within the
++/// deadline, so callers may still try another pattern; `Dispatched` must be
++/// reported as delivered. A caller's `fg_bypass` shield ends when this
++/// returns, so it no longer covers an Invoke that is still running.
++pub(crate) fn invoke_with_deadline(
++    pattern: &IUIAutomationInvokePattern,
++) -> windows::core::Result<InvokeOutcome> {
++    // UIA client objects are already shared between this crate's MTA threads
++    // (the snapshot cache hands element pointers across blocking-pool
++    // threads). The worker joins the MTA too, so this AddRef'd pointer needs
++    // no marshaling.
++    struct MtaPattern(IUIAutomationInvokePattern);
++    unsafe impl Send for MtaPattern {}
++
++    let pattern = MtaPattern(pattern.clone());
++    let (tx, rx) = mpsc::channel();
++    std::thread::Builder::new()
++        .name("cua-uia-invoke".into())
++        .spawn(move || {
++            // Declared first so the pattern is released before CoUninitialize.
++            let _com = super::windows_enum::ComInit::new();
++            // Move the whole Send wrapper in; naming only its field would
++            // capture the non-Send interface by itself.
++            let pattern = pattern;
++            let result = unsafe { pattern.0.Invoke() };
++            if let Err(mpsc::SendError(late)) = tx.send(result) {
++                tracing::info!(
++                    target: "uia_invoke",
++                    "dispatched UIA Invoke returned after the deadline: {late:?}"
++                );
++            }
++        })
++        .map_err(|e| {
++            windows::core::Error::new(E_FAIL, format!("could not start a UIA Invoke thread: {e}"))
++        })?;
++
++    let deadline = invoke_deadline();
++    match rx.recv_timeout(deadline) {
++        Ok(result) => result.map(|()| InvokeOutcome::Returned),
++        Err(mpsc::RecvTimeoutError::Timeout) => {
++            tracing::info!(
++                target: "uia_invoke",
++                "UIA Invoke still running after {}ms; reporting it as dispatched",
++                deadline.as_millis()
++            );
++            Ok(InvokeOutcome::Dispatched)
++        }
++        Err(mpsc::RecvTimeoutError::Disconnected) => Err(windows::core::Error::new(
++            E_FAIL,
++            "the UIA Invoke thread exited without a result",
++        )),
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+index 7536aed..c3e4fa1 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+@@ -28,7 +28,10 @@ use windows::Win32::UI::Accessibility::{
+     UIA_ValueValuePropertyId,
+ };
+ 
++pub mod activate;
+ pub mod fg_bypass;
++pub mod invoke;
++pub mod patterns;
+ pub mod scroll;
+ pub mod snapshot;
+ pub mod windows_enum;
+@@ -162,7 +165,27 @@ unsafe fn release_walk_nodes(nodes: Vec<UiaNode>) {
+     }
+ }
+ 
+-unsafe fn invoke_menu_element(element_ptr: usize, final_segment: bool) -> Result<(), String> {
++/// How `invoke_menu_path` activated the final menu item.
++#[derive(Clone, Debug)]
++pub enum MenuActivation {
++    /// A UIA pattern call (Invoke, Expand or SelectionItem.Select).
++    Uia(invoke::InvokeOutcome),
++    /// A click posted as window messages on a classic message-loop window,
++    /// so a modal dialog it opens cannot hold a UIA call (see `activate`),
++    /// with the windows of the app that opened or closed right after it.
++    Posted(activate::PostedActivation, activate::WindowChanges),
++}
++
++unsafe fn pid_of(element: &IUIAutomationElement) -> u32 {
++    element.CurrentProcessId().map_or(0, |pid| pid as u32)
++}
++
++unsafe fn invoke_menu_element(
++    element_ptr: usize,
++    final_segment: bool,
++) -> Result<MenuActivation, String> {
++    use invoke::InvokeOutcome::Returned;
++    use MenuActivation::Uia;
+     let element =
+         std::mem::ManuallyDrop::new(IUIAutomationElement::from_raw(element_ptr as *mut _));
+     if !final_segment {
+@@ -170,14 +193,26 @@ unsafe fn invoke_menu_element(element_ptr: usize, final_segment: bool) -> Result
+             if let Ok(expand) = pattern.cast::<IUIAutomationExpandCollapsePattern>() {
+                 return expand
+                     .Expand()
++                    .map(|()| Uia(Returned))
+                     .map_err(|error| format!("ExpandCollapse.Expand failed: {error}"));
+             }
+         }
++    } else if let Some(target) = activate::activation_target(&element, None) {
++        let watch = activate::WindowWatch::start(pid_of(&element));
++        match target.post() {
++            // Settle here, before the caller hands foreground back and the
++            // open menu is dismissed with the click still queued.
++            Ok(posted) => return Ok(MenuActivation::Posted(posted, watch.settle())),
++            Err(error) => tracing::debug!(
++                target: "invoke_menu",
++                "posted menu activation failed before sending, using UIA: {error}"
++            ),
++        }
+     }
+     if let Ok(pattern) = element.GetCurrentPattern(UIA_InvokePatternId) {
+         if let Ok(invoke) = pattern.cast::<IUIAutomationInvokePattern>() {
+-            return invoke
+-                .Invoke()
++            return invoke::invoke_with_deadline(&invoke)
++                .map(Uia)
+                 .map_err(|error| format!("InvokePattern.Invoke failed: {error}"));
+         }
+     }
+@@ -186,6 +221,7 @@ unsafe fn invoke_menu_element(element_ptr: usize, final_segment: bool) -> Result
+             if let Ok(selection) = pattern.cast::<IUIAutomationSelectionItemPattern>() {
+                 return selection
+                     .Select()
++                    .map(|()| Uia(Returned))
+                     .map_err(|error| format!("SelectionItem.Select failed: {error}"));
+             }
+         }
+@@ -194,8 +230,11 @@ unsafe fn invoke_menu_element(element_ptr: usize, final_segment: bool) -> Result
+ }
+ 
+ /// Resolve and invoke an exact application menu path from fresh UIA state at
+-/// every hop. No cached element index survives a menu mutation.
+-pub fn invoke_menu_path(hwnd: u64, path: &[String]) -> Result<(), String> {
++/// every hop. No cached element index survives a menu mutation. Stops with
++/// `Dispatched` as soon as an Invoke outlives its deadline (usually a modal
++/// dialog), since the menu it would walk next is gone. On classic
++/// message-loop windows the final item is clicked with posted messages.
++pub fn invoke_menu_path(hwnd: u64, path: &[String]) -> Result<MenuActivation, String> {
+     for depth in 0..path.len() {
+         let result = walk_tree(hwnd, None);
+         let matches = exact_menu_path_matches(&result.nodes, &path[..=depth]);
+@@ -211,24 +250,25 @@ pub fn invoke_menu_path(hwnd: u64, path: &[String]) -> Result<(), String> {
+             }
+         };
+         let target = &result.nodes[target_index];
+-        let error = if target.enabled == Some(false) {
+-            Some(format!("menu path segment {depth} is disabled"))
++        let outcome = if target.enabled == Some(false) {
++            Err(format!("menu path segment {depth} is disabled"))
+         } else if target.msaa_role.is_some() {
+-            Some(format!(
++            Err(format!(
+                 "menu path segment {depth} is exposed only through MSAA, not UI Automation"
+             ))
+         } else {
+-            unsafe { invoke_menu_element(target.element_ptr, depth + 1 == path.len()) }.err()
++            unsafe { invoke_menu_element(target.element_ptr, depth + 1 == path.len()) }
+         };
+         unsafe { release_walk_nodes(result.nodes) };
+-        if let Some(error) = error {
+-            return Err(format!("menu path segment {depth}: {error}"));
+-        }
+-        if depth + 1 != path.len() {
+-            std::thread::sleep(std::time::Duration::from_millis(80));
++        let outcome = outcome.map_err(|error| format!("menu path segment {depth}: {error}"))?;
++        if depth + 1 == path.len()
++            || !matches!(outcome, MenuActivation::Uia(invoke::InvokeOutcome::Returned))
++        {
++            return Ok(outcome);
+         }
++        std::thread::sleep(std::time::Duration::from_millis(80));
+     }
+-    Ok(())
++    Ok(MenuActivation::Uia(invoke::InvokeOutcome::Returned))
+ }
+ 
+ /// Walk the UIA tree with caller-supplied caps. `max_elements`/`max_depth`
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/patterns.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/patterns.rs
+new file mode 100644
+index 0000000..fa9ddad
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/patterns.rs
+@@ -0,0 +1,322 @@
++//! Element actions through UIA control patterns, for hosts that drop posted
++//! mouse input.
++//!
++//! Chromium (Edge, Chrome, Electron) ignores posted `WM_LBUTTONDOWN`/`UP`, and a
++//! `<select>` popup is a separate window that a posted click never reaches.
++//! Chromium does implement the UIA patterns, so an element click goes through
++//! the one that matches the element's role, and a `<select>` value is chosen
++//! by expanding it and selecting the option.
++
++use std::time::{Duration, Instant};
++
++use windows::core::{Interface, BSTR};
++use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
++use windows::Win32::UI::Accessibility::{
++    CUIAutomation, ExpandCollapseState_Collapsed, ExpandCollapseState_Expanded, IUIAutomation,
++    IUIAutomationElement, IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
++    IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationValuePattern,
++    TreeScope_Descendants, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId,
++    UIA_ControlTypePropertyId, UIA_DataItemControlTypeId, UIA_ExpandCollapsePatternId,
++    UIA_InvokePatternId, UIA_ListItemControlTypeId, UIA_RadioButtonControlTypeId,
++    UIA_SelectionItemPatternId, UIA_TabItemControlTypeId, UIA_TogglePatternId,
++    UIA_TreeItemControlTypeId, UIA_ValuePatternId, UIA_CONTROLTYPE_ID, UIA_PATTERN_ID,
++};
++
++use super::fg_bypass::run_with_uwp_bypass;
++use super::invoke::{invoke_with_deadline, InvokeOutcome};
++
++/// A UIA pattern action used as a click.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum PatternAction {
++    Invoke,
++    Toggle,
++    Select,
++    Expand,
++}
++
++impl PatternAction {
++    pub(crate) fn name(self) -> &'static str {
++        match self {
++            Self::Invoke => "InvokePattern.Invoke",
++            Self::Toggle => "TogglePattern.Toggle",
++            Self::Select => "SelectionItemPattern.Select",
++            Self::Expand => "ExpandCollapsePattern.Expand",
++        }
++    }
++
++    pub(crate) fn transport(self) -> cua_driver_core::action_record::ActionTransport {
++        use cua_driver_core::action_record::ActionTransport;
++        match self {
++            Self::Invoke => ActionTransport::WindowsUiaInvoke,
++            Self::Toggle => ActionTransport::WindowsUiaToggle,
++            Self::Select => ActionTransport::WindowsUiaSelection,
++            Self::Expand => ActionTransport::WindowsUiaExpandCollapse,
++        }
++    }
++
++    fn pattern_id(self) -> UIA_PATTERN_ID {
++        match self {
++            Self::Invoke => UIA_InvokePatternId,
++            Self::Toggle => UIA_TogglePatternId,
++            Self::Select => UIA_SelectionItemPatternId,
++            Self::Expand => UIA_ExpandCollapsePatternId,
++        }
++    }
++}
++
++/// Patterns to try for a click, in order. An explicit `action`
++/// ("invoke" / "toggle" / "select") allows only that pattern; otherwise the
++/// element's role picks the order: options, tabs and radios select,
++/// checkboxes toggle, combo boxes expand, everything else invokes.
++fn click_order(control_type: UIA_CONTROLTYPE_ID, action: Option<&str>) -> &'static [PatternAction] {
++    use PatternAction::*;
++    match action {
++        Some("invoke") => return &[Invoke],
++        Some("toggle") => return &[Toggle],
++        Some("select") => return &[Select],
++        _ => {}
++    }
++    if [
++        UIA_ListItemControlTypeId,
++        UIA_TreeItemControlTypeId,
++        UIA_TabItemControlTypeId,
++        UIA_RadioButtonControlTypeId,
++        UIA_DataItemControlTypeId,
++    ]
++    .contains(&control_type)
++    {
++        &[Select, Invoke, Toggle, Expand]
++    } else if control_type == UIA_CheckBoxControlTypeId {
++        &[Toggle, Invoke, Select]
++    } else if control_type == UIA_ComboBoxControlTypeId {
++        &[Expand, Invoke]
++    } else {
++        &[Invoke, Toggle, Select, Expand]
++    }
++}
++
++/// Run one pattern action on `elem`, shielded against the host stealing
++/// foreground. `Ok(None)` means the element does not expose that pattern.
++unsafe fn run_action(
++    elem: &IUIAutomationElement,
++    host_hwnd: isize,
++    action: PatternAction,
++) -> windows::core::Result<Option<InvokeOutcome>> {
++    let Ok(pattern) = elem.GetCurrentPattern(action.pattern_id()) else {
++        return Ok(None);
++    };
++    let returned = |r: windows::core::Result<()>| r.map(|()| Some(InvokeOutcome::Returned));
++    match action {
++        PatternAction::Invoke => match pattern.cast::<IUIAutomationInvokePattern>() {
++            // The deadline is a backstop for a provider that blocks in Invoke.
++            Ok(p) => run_with_uwp_bypass(host_hwnd, || invoke_with_deadline(&p)).map(Some),
++            Err(_) => Ok(None),
++        },
++        PatternAction::Toggle => match pattern.cast::<IUIAutomationTogglePattern>() {
++            Ok(p) => returned(run_with_uwp_bypass(host_hwnd, || p.Toggle())),
++            Err(_) => Ok(None),
++        },
++        PatternAction::Select => match pattern.cast::<IUIAutomationSelectionItemPattern>() {
++            Ok(p) => returned(run_with_uwp_bypass(host_hwnd, || p.Select())),
++            Err(_) => Ok(None),
++        },
++        PatternAction::Expand => match pattern.cast::<IUIAutomationExpandCollapsePattern>() {
++            Ok(p) => returned(run_with_uwp_bypass(host_hwnd, || p.Expand())),
++            Err(_) => Ok(None),
++        },
++    }
++}
++
++/// Click `elem` through the first pattern in [`click_order`] it exposes.
++/// `Ok(None)`: no applicable pattern, nothing was sent. `Err`: every exposed
++/// pattern failed (the last error is returned).
++pub(crate) unsafe fn pattern_click(
++    elem: &IUIAutomationElement,
++    host_hwnd: isize,
++    action: Option<&str>,
++) -> anyhow::Result<Option<(PatternAction, InvokeOutcome)>> {
++    let control_type = elem.CurrentControlType().unwrap_or_default();
++    let mut last_error = None;
++    for &candidate in click_order(control_type, action) {
++        match run_action(elem, host_hwnd, candidate) {
++            Ok(Some(outcome)) => {
++                if candidate == PatternAction::Select && control_type == UIA_ListItemControlTypeId {
++                    collapse_owning_combo(elem, host_hwnd);
++                }
++                return Ok(Some((candidate, outcome)));
++            }
++            Ok(None) => {}
++            Err(error) => {
++                tracing::debug!(target: "click", "{} failed: {error}", candidate.name());
++                last_error = Some(anyhow::anyhow!("{}: {error}", candidate.name()));
++            }
++        }
++    }
++    match last_error {
++        Some(error) => Err(error),
++        None => Ok(None),
++    }
++}
++
++/// A user's click on an option closes its drop-down; `Select` does not, and
++/// an open Chromium `<select>` popup then refuses the next Expand. Collapse
++/// the nearest ComboBox ancestor if it is still expanded.
++unsafe fn collapse_owning_combo(option: &IUIAutomationElement, host_hwnd: isize) {
++    let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
++    else {
++        return;
++    };
++    let Ok(walker) = uia.ControlViewWalker() else {
++        return;
++    };
++    let mut current = option.clone();
++    for _ in 0..4 {
++        let Ok(parent) = walker.GetParentElement(&current) else {
++            return;
++        };
++        if parent.CurrentControlType().ok() == Some(UIA_ComboBoxControlTypeId) {
++            if let Some(expander) = parent
++                .GetCurrentPattern(UIA_ExpandCollapsePatternId)
++                .ok()
++                .and_then(|p| p.cast::<IUIAutomationExpandCollapsePattern>().ok())
++            {
++                if expander.CurrentExpandCollapseState().ok() == Some(ExpandCollapseState_Expanded) {
++                    let _ = run_with_uwp_bypass(host_hwnd, || expander.Collapse());
++                }
++            }
++            return;
++        }
++        current = parent;
++    }
++}
++
++/// Current `ValuePattern` value, if the element has one.
++pub(crate) unsafe fn current_value(elem: &IUIAutomationElement) -> Option<String> {
++    let pattern = elem.GetCurrentPattern(UIA_ValuePatternId).ok()?;
++    let value = pattern.cast::<IUIAutomationValuePattern>().ok()?;
++    value.CurrentValue().ok().map(|v| v.to_string())
++}
++
++fn same_option(a: &str, b: &str) -> bool {
++    a.trim().eq_ignore_ascii_case(b.trim())
++}
++
++/// Poll the element's value until it reads `want`, at most `within`.
++pub(crate) unsafe fn wait_for_value(
++    elem: &IUIAutomationElement,
++    want: &str,
++    within: Duration,
++) -> Option<String> {
++    let deadline = Instant::now() + within;
++    loop {
++        let value = current_value(elem);
++        if value.as_deref().is_some_and(|v| same_option(v, want)) || Instant::now() >= deadline {
++            return value;
++        }
++        std::thread::sleep(Duration::from_millis(25));
++    }
++}
++
++/// Result of [`select_combo_option`].
++pub(crate) enum ComboSelect {
++    /// `option` was selected; `readback` is the combo's value afterwards.
++    Selected { option: String, readback: Option<String> },
++    /// No option matched; these are the option names seen.
++    NoSuchOption { options: Vec<String> },
++}
++
++unsafe fn option_items(
++    uia: &IUIAutomation,
++    combo: &IUIAutomationElement,
++) -> Vec<(String, IUIAutomationElement)> {
++    let Ok(condition) = uia.CreatePropertyCondition(
++        UIA_ControlTypePropertyId,
++        &(UIA_ListItemControlTypeId.0).into(),
++    ) else {
++        return Vec::new();
++    };
++    let Ok(found) = combo.FindAll(TreeScope_Descendants, &condition) else {
++        return Vec::new();
++    };
++    (0..found.Length().unwrap_or(0))
++        .filter_map(|i| found.GetElement(i).ok())
++        .filter_map(|item| Some((item.CurrentName().ok()?.to_string(), item)))
++        .collect()
++}
++
++/// Select the option named `value` in a combo box that has no native Win32
++/// window (a Chromium `<select>`, for example): expand it, wait for its
++/// options, select the one whose name matches (case-insensitive), collapse
++/// it if it is still open, and read the value back.
++pub(crate) unsafe fn select_combo_option(
++    combo: &IUIAutomationElement,
++    host_hwnd: isize,
++    value: &str,
++) -> anyhow::Result<ComboSelect> {
++    let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
++    let expander = combo
++        .GetCurrentPattern(UIA_ExpandCollapsePatternId)
++        .ok()
++        .and_then(|p| p.cast::<IUIAutomationExpandCollapsePattern>().ok());
++    if let Some(expander) = &expander {
++        if expander.CurrentExpandCollapseState().ok() == Some(ExpandCollapseState_Collapsed) {
++            run_with_uwp_bypass(host_hwnd, || expander.Expand())?;
++        }
++    }
++    // Chromium publishes the options asynchronously after Expand.
++    let deadline = Instant::now() + Duration::from_millis(800);
++    let mut options = option_items(&uia, combo);
++    while options.is_empty() && Instant::now() < deadline {
++        std::thread::sleep(Duration::from_millis(25));
++        options = option_items(&uia, combo);
++    }
++    let collapse = || {
++        if let Some(expander) = &expander {
++            if expander.CurrentExpandCollapseState().ok() == Some(ExpandCollapseState_Expanded) {
++                let _ = run_with_uwp_bypass(host_hwnd, || expander.Collapse());
++            }
++        }
++    };
++    let Some((name, item)) = options
++        .iter()
++        .find(|(name, _)| name.trim() == value.trim())
++        .or_else(|| options.iter().find(|(name, _)| same_option(name, value)))
++    else {
++        collapse();
++        return Ok(ComboSelect::NoSuchOption {
++            options: options.into_iter().map(|(name, _)| name).collect(),
++        });
++    };
++    let selected = match run_action(item, host_hwnd, PatternAction::Select) {
++        Ok(Some(_)) => Ok(()),
++        Ok(None) => run_action(item, host_hwnd, PatternAction::Invoke).and_then(|done| {
++            done.map(|_| ())
++                .ok_or_else(|| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, "option has neither SelectionItem nor Invoke"))
++        }),
++        Err(error) => Err(error),
++    };
++    if let Err(error) = selected {
++        collapse();
++        anyhow::bail!("selecting option '{name}': {error}");
++    }
++    let readback = wait_for_value(combo, name, Duration::from_millis(600));
++    collapse();
++    Ok(ComboSelect::Selected { option: name.clone(), readback })
++}
++
++/// Write `value` through ValuePattern and check that it reads back.
++/// `None`: no ValuePattern. `Some(Err)`: SetValue failed.
++/// `Some(Ok(verified))`: SetValue returned, and whether the value stuck.
++pub(crate) unsafe fn set_value_verified(
++    elem: &IUIAutomationElement,
++    host_hwnd: isize,
++    value: &str,
++) -> Option<windows::core::Result<bool>> {
++    let pattern = elem.GetCurrentPattern(UIA_ValuePatternId).ok()?;
++    let vp = pattern.cast::<IUIAutomationValuePattern>().ok()?;
++    if let Err(error) = run_with_uwp_bypass(host_hwnd, || vp.SetValue(&BSTR::from(value))) {
++        return Some(Err(error));
++    }
++    let readback = wait_for_value(elem, value, Duration::from_millis(250));
++    Some(Ok(readback.is_some_and(|v| same_option(&v, value))))
++}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/windows_enum.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/windows_enum.rs
+index 32cc328..59dd7f0 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/windows_enum.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/windows_enum.rs
+@@ -163,12 +163,12 @@ where
+     run_uia_single_flight(uia_single_flight(), stage, timeout, fallback, f)
+ }
+ 
+-struct ComInit {
++pub(super) struct ComInit {
+     needs_uninit: bool,
+ }
+ 
+ impl ComInit {
+-    fn new() -> Self {
++    pub(super) fn new() -> Self {
+         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+         if hr.is_err() && hr.0 != RPC_E_CHANGED_MODE {
+             tracing::debug!(target: "uia_windows_enum", "CoInitializeEx returned {hr:?}");
+@@ -399,6 +399,11 @@ fn point_pattern_available<T>(
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub(crate) enum PointInvokeOutcome {
+     Invoked,
++    /// Invoke outlived its deadline (usually a modal dialog); see `uia::invoke`.
++    Dispatched,
++    /// Classic message-loop window: the click was posted as window messages
++    /// instead of a UIA Invoke; see `uia::activate`.
++    Posted(crate::uia::activate::PostedActivation),
+     Miss,
+     Busy,
+     Timeout,
+@@ -431,7 +436,7 @@ fn try_invoke_in_window_at_point_unbounded(
+     sy: i32,
+     cancelled: &AtomicBool,
+ ) -> PointInvokeOutcome {
+-    use PointInvokeOutcome::{Invoked, Miss, Timeout, Unavailable};
++    use PointInvokeOutcome::{Dispatched, Invoked, Miss, Timeout, Unavailable};
+     // Keep this first so COM interfaces drop before CoUninitialize.
+     let _com = ComInit::new();
+     if hwnd == 0 {
+@@ -557,6 +562,20 @@ fn try_invoke_in_window_at_point_unbounded(
+         if cancelled.load(Ordering::Acquire) {
+             return Timeout;
+         }
++        // Classic message-loop windows run the click handler inside Invoke,
++        // so a modal dialog would hold the call. Post the click at the
++        // caller's pixel instead; nothing is sent when posting fails.
++        if !winner_has_expand {
++            if let Some(target) = crate::uia::activate::activation_target(&winner, Some((sx, sy))) {
++                match target.post() {
++                    Ok(posted) => return PointInvokeOutcome::Posted(posted),
++                    Err(e) => tracing::debug!(
++                        target: "click",
++                        "posted activation at ({sx},{sy}) failed before sending, using UIA: {e}"
++                    ),
++                }
++            }
++        }
+         // UWP foreground-steal bypass: gate the entire activation block on
+         // `is_xaml_host_hwnd(hwnd)`. For non-XAML hosts the closure is a
+         // straight passthrough.
+@@ -591,8 +610,11 @@ fn try_invoke_in_window_at_point_unbounded(
+             if cancelled.load(Ordering::Acquire) {
+                 return Timeout;
+             }
+-            match inv.Invoke() {
+-                Ok(()) => Invoked,
++            // Bounded so a modal dialog cannot hold this worker, and with it
++            // the process-wide UIA gate, until the dialog closes.
++            match crate::uia::invoke::invoke_with_deadline(&inv) {
++                Ok(crate::uia::invoke::InvokeOutcome::Returned) => Invoked,
++                Ok(crate::uia::invoke::InvokeOutcome::Dispatched) => Dispatched,
+                 Err(e) => {
+                     tracing::debug!(target: "click", "UIA Invoke (windowed) at ({sx},{sy}) failed: {e}");
+                     Unavailable
+@@ -609,7 +631,13 @@ fn try_invoke_in_window_at_point_unbounded(
+ /// their keyboard accelerators are surfaced through UI Automation instead.
+ /// This helper keeps that routing narrow by requiring an advertised
+ /// AcceleratorKey match before invoking anything.
+-pub fn try_invoke_accelerator_in_window(hwnd: isize, combo: &str) -> anyhow::Result<(bool, usize)> {
++///
++/// Returns the activation outcome (`None` when nothing matched) and the
++/// number of elements scanned.
++pub fn try_invoke_accelerator_in_window(
++    hwnd: isize,
++    combo: &str,
++) -> anyhow::Result<(Option<crate::uia::invoke::InvokeOutcome>, usize)> {
+     let combo = combo.to_owned();
+     run_uia_with_deadline_cancelable(
+         "accelerator invoke",
+@@ -629,7 +657,7 @@ fn try_invoke_accelerator_in_window_unbounded(
+     hwnd: isize,
+     combo: &str,
+     cancelled: &AtomicBool,
+-) -> anyhow::Result<(bool, usize)> {
++) -> anyhow::Result<(Option<crate::uia::invoke::InvokeOutcome>, usize)> {
+     // Keep this first so COM interfaces drop before CoUninitialize.
+     let _com = ComInit::new();
+     if hwnd == 0 {
+@@ -697,7 +725,7 @@ fn try_invoke_accelerator_in_window_unbounded(
+                     target: "uia_windows_enum",
+                     "UIA accelerator invoke cancelled before activation"
+                 );
+-                return Ok((false, count as usize));
++                return Ok((None, count as usize));
+             }
+             // Pattern fallback chain. Different XAML controls expose
+             // different "activation" patterns: a Save button uses Invoke, a
+@@ -708,8 +736,8 @@ fn try_invoke_accelerator_in_window_unbounded(
+             // misleading "operation completed successfully (0x00000000)"
+             // error because Invoke isn't supported on the element.
+             match try_invoke_via_patterns(&elem, hwnd, cancelled) {
+-                Ok(true) => return Ok((true, count as usize)),
+-                Ok(false) => {
++                Ok(Some(outcome)) => return Ok((Some(outcome), count as usize)),
++                Ok(None) => {
+                     matched_failure = Some(format!(
+                         "matched AcceleratorKey `{accelerator}`, but the element exposes \
+                          neither InvokePattern nor TogglePattern"
+@@ -726,7 +754,7 @@ fn try_invoke_accelerator_in_window_unbounded(
+         if let Some(reason) = matched_failure {
+             bail!("{reason}");
+         }
+-        Ok((false, count as usize))
++        Ok((None, count as usize))
+     }
+ }
+ 
+@@ -815,27 +843,28 @@ fn accelerator_modifier_rank(value: &str) -> Option<usize> {
+ /// UWP foreground-steal bypass (see `crate::uia::fg_bypass`). Pass `0` if
+ /// unknown — the bypass becomes a no-op and Invoke/Toggle run unwrapped.
+ ///
+-/// Returns `Ok(true)` if a pattern was found AND its Invoke/Toggle call
+-/// succeeded. `Ok(false)` means the element exposes neither pattern (caller
+-/// should surface an actionable error). `Err` means a pattern was found but
+-/// its call failed (caller should surface the underlying error).
++/// Returns `Ok(Some(_))` if a pattern was found AND its Invoke/Toggle call
++/// succeeded, or (Invoke only) outlived its deadline as `Dispatched`.
++/// `Ok(None)` means the element exposes neither pattern (caller should
++/// surface an actionable error). `Err` means a pattern was found but its call
++/// failed (caller should surface the underlying error).
+ unsafe fn try_invoke_via_patterns(
+     elem: &IUIAutomationElement,
+     host_hwnd: isize,
+     cancelled: &AtomicBool,
+-) -> anyhow::Result<bool> {
++) -> anyhow::Result<Option<crate::uia::invoke::InvokeOutcome>> {
+     // Invoke first — that's what most accelerator-targeted controls advertise.
+     if let Ok(pattern) = elem.GetCurrentPattern(UIA_InvokePatternId) {
+         if let Ok(inv) = pattern.cast::<IUIAutomationInvokePattern>() {
+             if cancelled.load(Ordering::Acquire) {
+-                return Ok(false);
++                return Ok(None);
+             }
+             return crate::uia::fg_bypass::run_with_uwp_bypass(host_hwnd, || {
+                 if cancelled.load(Ordering::Acquire) {
+-                    return Ok(false);
++                    return Ok(None);
+                 }
+-                inv.Invoke()
+-                    .map(|()| true)
++                crate::uia::invoke::invoke_with_deadline(&inv)
++                    .map(Some)
+                     .map_err(|e| anyhow::anyhow!("InvokePattern.Invoke: {e}"))
+             });
+         }
+@@ -844,19 +873,19 @@ unsafe fn try_invoke_via_patterns(
+     if let Ok(pattern) = elem.GetCurrentPattern(UIA_TogglePatternId) {
+         if let Ok(tog) = pattern.cast::<IUIAutomationTogglePattern>() {
+             if cancelled.load(Ordering::Acquire) {
+-                return Ok(false);
++                return Ok(None);
+             }
+             return crate::uia::fg_bypass::run_with_uwp_bypass(host_hwnd, || {
+                 if cancelled.load(Ordering::Acquire) {
+-                    return Ok(false);
++                    return Ok(None);
+                 }
+                 tog.Toggle()
+-                    .map(|()| true)
++                    .map(|()| Some(crate::uia::invoke::InvokeOutcome::Returned))
+                     .map_err(|e| anyhow::anyhow!("TogglePattern.Toggle: {e}"))
+             });
+         }
+     }
+-    Ok(false)
++    Ok(None)
+ }
+ 
+ /// Extract a shortcut hint from a UIA element name like `"Bold (Ctrl+B)"`,

@@ -1,0 +1,61 @@
+From cd442f081ab912041d4c528f06455914c8db6b36 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Sun, 11 Oct 2026 21:32:35 -0500
+Subject: [PATCH 1/2] build: cross-compile the windows driver from linux with
+ zig
+
+---
+ libs/cua-driver/rust/Cargo.lock                   |  1 +
+ libs/cua-driver/rust/crates/cua-driver/Cargo.toml |  5 +++++
+ libs/cua-driver/rust/crates/cua-driver/build.rs   | 10 +++++++---
+ 3 files changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/libs/cua-driver/rust/Cargo.lock b/libs/cua-driver/rust/Cargo.lock
+index 707ed35..b4ab40e 100644
+--- a/libs/cua-driver/rust/Cargo.lock
++++ b/libs/cua-driver/rust/Cargo.lock
+@@ -1226,6 +1226,7 @@ dependencies = [
+  "cua-driver-testkit",
+  "cua-telemetry",
+  "cursor-overlay",
++ "embed-manifest",
+  "embed-resource",
+  "flate2",
+  "fs2",
+diff --git a/libs/cua-driver/rust/crates/cua-driver/Cargo.toml b/libs/cua-driver/rust/crates/cua-driver/Cargo.toml
+index 8dc0840..6f42b73 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/Cargo.toml
++++ b/libs/cua-driver/rust/crates/cua-driver/Cargo.toml
+@@ -93,6 +93,11 @@ portal-libei = ["platform-linux/portal-libei"]
+ # at 125%/150%/200% scaling).
+ embed-resource = "2"
+ 
++# LOCAL PATCH (cross-build from Linux): target-gated build-dependencies are
++# matched against the host, so embed-manifest must be unconditional.
++[build-dependencies]
++embed-manifest = "1.4"
++
+ [dev-dependencies]
+ # Shared integration-test harness (MCP/CLI transports, child reaping, paths,
+ # response accessors). Dev-only — never linked into the shipped driver.
+diff --git a/libs/cua-driver/rust/crates/cua-driver/build.rs b/libs/cua-driver/rust/crates/cua-driver/build.rs
+index e26ecf9..6573336 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/build.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/build.rs
+@@ -16,9 +16,13 @@ fn main() {
+     println!("cargo:rerun-if-env-changed=CUA_DRIVER_REVIEW_EXTENSION_PUBLIC_KEY_BASE64");
+     validate_review_trust_root_build();
+ 
+-    #[cfg(target_os = "windows")]
+-    {
+-        embed_resource::compile("cua-driver.rc", embed_resource::NONE);
++    // LOCAL PATCH (cross-build from Linux): `#[cfg(target_os)]` in a build
++    // script reflects the host, so check the target at runtime and embed the
++    // same RT_MANIFEST (type 24, id 1) with the pure-Rust embed-manifest crate.
++    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
++        embed_manifest::embed_manifest_file("cua-driver.manifest")
++            .expect("failed to embed cua-driver.manifest");
++        println!("cargo:rerun-if-changed=cua-driver.manifest");
+     }
+ 
+     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {

@@ -1,0 +1,13 @@
+# Run artifacts: transcripts and screenshots contain window titles from the real desktop.
+bench/out/
+bench/workdir/
+bench/.codex-home/
+fork/acceptance-runs/
+
+# Downloads, clones and builds (fork/build.sh recreates them).
+tools/
+plugin/driver/*.exe
+
+node_modules/
+__pycache__/
+*.log

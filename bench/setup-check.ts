@@ -305,19 +305,26 @@ if (flags.browser) {
 
 if (flags.clients) await clientRuns();
 
-/** Each real client calls the launcher from clone A and edits TestPad. They use the user's own
- *  login, so the server is passed per run (--mcp-config, -c) instead of registered anywhere. */
+/** Each real client edits TestPad through the server command its isolated registration holds,
+ *  with HOME set to that user's, so Node comes from what install recorded. The clients sign in
+ *  with the user's own login, which lives beside their real registrations, so the command is
+ *  passed per run (--mcp-config, -c) rather than loaded from the isolated config. */
 async function clientRuns() {
   const { verifyClientRun } = await import("./setup-clients.ts");
+  const plugin = claudeJson<Array<{ id: string; readFromFolder?: string; mcpServers?: Record<string, { command: string }> }>>(envA, ["plugin", "list", "--json"]).find((p) => p.id === "bcu@better-computer-use");
+  const commands = {
+    claude: plugin?.mcpServers?.computer?.command.replace("${CLAUDE_PLUGIN_ROOT}", plugin.readFromFolder ?? "") ?? "",
+    codex: codexJson<{ transport: { command: string } }>(envA, ["mcp", "get", "bcu", "--json"]).transport.command,
+  };
   for (const client of ["claude", "codex"] as const) {
-    const r = await verifyClientRun(client, path.join(cloneA, "plugin/server/run.sh"), fs.readFileSync(path.join(homeA, ".config/bcu/node-path"), "utf8").trim(), path.join(RUN, `client-${client}`));
+    const r = await verifyClientRun(client, commands[client], homeA, path.join(RUN, `client-${client}`));
     if (r.blocked) blocked(`client: ${client} edits TestPad through bcu`, r.detail);
     else check(`client: ${client} edits TestPad through bcu`, r.ok, r.detail);
   }
 }
 
 blocked("agent: Claude and Codex each configure a fresh clone from \"configure this for me\"",
-  "needs scoped credentials for an isolated client config (CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY); copying the user's own login could rotate it");
+  "needs scoped credentials for an isolated client config (CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY); copying the user's own login could rotate it. --clients covers the call path with the user's login instead");
 
 fs.writeFileSync(path.join(RUN, "versions.json"), JSON.stringify({
   node: sh(fs.readFileSync(path.join(homeA, ".config/bcu/node-path"), "utf8").trim(), ["-v"]).stdout.trim(),

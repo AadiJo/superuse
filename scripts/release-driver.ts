@@ -53,9 +53,8 @@ async function main() {
   const manifest: ReleaseManifest = { ...base, sha256: sha256File(exe)! };
 
   // The release candidate must work before anyone downloads it.
-  process.env.BCU_CUA_DRIVER = exe;
   process.env.BCU_NODE ??= process.execPath;
-  const server = await checkServer();
+  const server = await checkServer(exe);
   if (server.status !== "ok") die(`the built driver failed the server check: ${server.summary}\n${(server.evidence ?? []).join("\n")}`);
   console.log(`server check: ${server.summary}`);
 

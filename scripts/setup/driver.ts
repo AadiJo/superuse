@@ -8,8 +8,10 @@
 //   fetch       missing, or an older managed exe, and the pin matches today's sources: download
 //   adopt       an exe without a record whose hash is the pinned release: record it
 //   stale       sources changed and no release matches: needs --build or a new release
-//   unknown     an exe of unknown origin: kept, reported (use BCU_CUA_DRIVER for your own build)
-//   custom      BCU_CUA_DRIVER points at a driver bcu doesn't manage
+//   unknown     an exe of unknown origin: kept, reported
+// BCU_CUA_DRIVER in this shell doesn't change any of this: registered clients don't inherit it, so
+// setup manages and verifies the driver they actually run. To run your own build everywhere, set
+// BCU_CUA_DRIVER in each client's server environment yourself.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -20,6 +22,7 @@ export type Provenance = { source: "release" | "build"; fingerprint: string; sha
 
 export const EXE = path.join(PLUGIN, "driver", "cua-driver.exe");
 const RECORD = path.join(PLUGIN, "driver", "cua-driver.json");
+const PENDING = `${RECORD}.pending`; // the record for an exe being swapped in; see installExe
 const MANIFEST = path.join(REPO, "fork", "release.json");
 
 /** SHA-256 over everything that decides the driver binary: the upstream pin, the build script
@@ -40,27 +43,32 @@ export function readManifest(): ReleaseManifest | null {
   try { return JSON.parse(fs.readFileSync(process.env.BCU_RELEASE_MANIFEST ?? MANIFEST, "utf8")) as ReleaseManifest; } catch { return null; }
 }
 
-function readRecord(): Provenance | null {
-  try { return JSON.parse(fs.readFileSync(RECORD, "utf8")) as Provenance; } catch { return null; }
+function readJsonFile<T>(file: string): T | null {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")) as T; } catch { return null; }
+}
+
+/** The record describing the exe with this hash: the committed one, or the pending one if a swap
+ *  was interrupted after the exe moved into place. */
+function recordFor(sha: string | null): { record: Provenance | null; pending: boolean } {
+  const pending = readJsonFile<Provenance>(PENDING);
+  if (sha !== null && pending?.sha256 === sha) return { record: pending, pending: true };
+  return { record: readJsonFile<Provenance>(RECORD), pending: false };
 }
 
 type State =
-  | { kind: "custom"; exe: string }
-  | { kind: "current"; record: Provenance }
+  | { kind: "current"; record: Provenance; pending: boolean }
   | { kind: "fetch"; manifest: ReleaseManifest; why: "missing" | "outdated" }
   | { kind: "adopt"; manifest: ReleaseManifest }
   | { kind: "stale"; installed: string | null }
   | { kind: "unknown"; sha: string };
 
 export function driverState(fp = fingerprint()): State {
-  const custom = process.env.BCU_CUA_DRIVER;
-  if (custom) return { kind: "custom", exe: custom };
   const manifest = readManifest();
   const pinned = manifest?.fingerprint === fp ? manifest : null;
   const sha = sha256File(EXE);
-  const record = readRecord();
+  const { record, pending } = recordFor(sha);
   const managed = sha !== null && record?.sha256 === sha;
-  if (managed && record.fingerprint === fp) return { kind: "current", record };
+  if (managed && record.fingerprint === fp) return { kind: "current", record, pending };
   if (sha === null) return pinned ? { kind: "fetch", manifest: pinned, why: "missing" } : { kind: "stale", installed: null };
   if (pinned && sha === pinned.sha256) return { kind: "adopt", manifest: pinned };
   if (!managed) return { kind: "unknown", sha };
@@ -75,11 +83,14 @@ export function checkDriver(): Check {
   const fp = fingerprint();
   const s = driverState(fp);
   const id = "driver";
+  const shell = process.env.BCU_CUA_DRIVER ? [`BCU_CUA_DRIVER=${process.env.BCU_CUA_DRIVER} is set in this shell; registered clients don't see it, so setup checks plugin/driver`] : [];
+  const c = describe(s, fp);
+  return { ...c, evidence: [...(c.evidence ?? []), ...shell] };
+}
+
+function describe(s: State, fp: string): Check {
+  const id = "driver";
   switch (s.kind) {
-    case "custom":
-      return fs.existsSync(s.exe)
-        ? { id, status: "ok", code: "DRIVER_CUSTOM", summary: `BCU_CUA_DRIVER=${s.exe}; bcu doesn't manage this driver`, evidence: [`sha256 ${sha256File(s.exe)}`], next: "Clients only use it if their server environment sets BCU_CUA_DRIVER too." }
-        : { id, status: "fail", code: "DRIVER_CUSTOM_MISSING", summary: `BCU_CUA_DRIVER=${s.exe} doesn't exist`, next: "Fix BCU_CUA_DRIVER or unset it." };
     case "current":
       return { id, status: "ok", code: "DRIVER_CURRENT", summary: `${s.record.source === "release" ? `release ${s.record.tag}` : "clean build"} for these sources`, evidence: [`sha256 ${s.record.sha256}`, `fingerprint ${short(fp)}`] };
     case "adopt":
@@ -101,17 +112,20 @@ export function ensureDriver(build: boolean): Check {
     writeAtomic(RECORD, JSON.stringify({ source: "release", fingerprint: fp, sha256: s.manifest.sha256, tag: s.manifest.tag } satisfies Provenance, null, 2) + "\n");
     return { id: "driver", status: "ok", code: "DRIVER_ADOPTED", summary: `kept the existing exe: it is release ${s.manifest.tag}`, evidence: [`sha256 ${s.manifest.sha256}`] };
   }
+  if (s.kind === "current" && s.pending) fs.renameSync(PENDING, RECORD); // finish an interrupted swap
   if (build && (s.kind === "fetch" || s.kind === "stale")) return buildDriver(fp);
   if (s.kind === "fetch") return download(s.manifest, fp);
   return checkDriver();
 }
 
-/** Put a verified exe in place: the exe first, then its record. A crash between the two leaves an
- *  exe whose record doesn't match, which the next run re-adopts or replaces. */
+/** Put a verified exe in place: stage its record, swap the exe, then commit the record. A crash at
+ *  any point leaves either the old exe with its record or the new exe with its pending record, and
+ *  both read as managed. */
 function installExe(file: string, record: Provenance) {
   fs.chmodSync(file, 0o755);
+  writeAtomic(PENDING, JSON.stringify(record, null, 2) + "\n");
   fs.renameSync(file, EXE);
-  writeAtomic(RECORD, JSON.stringify(record, null, 2) + "\n");
+  fs.renameSync(PENDING, RECORD);
 }
 
 function download(m: ReleaseManifest, fp: string): Check {

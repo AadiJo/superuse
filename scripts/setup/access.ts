@@ -18,9 +18,13 @@ export type AccessChoices = { allowApps: string[]; foreground?: Foreground; brow
 
 type Read = { kind: "missing" } | { kind: "ok"; policy: PolicyFile } | { kind: "malformed"; error: string };
 
+/** Only a file that doesn't exist counts as missing; one that can't be read is never replaced. */
 function readPolicy(): Read {
   let text: string;
-  try { text = fs.readFileSync(POLICY, "utf8"); } catch { return { kind: "missing" }; }
+  try { text = fs.readFileSync(POLICY, "utf8"); } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    return err.code === "ENOENT" ? { kind: "missing" } : { kind: "malformed", error: `can't read it: ${err.message}` };
+  }
   try {
     const policy = JSON.parse(text) as unknown;
     if (typeof policy !== "object" || policy === null || Array.isArray(policy)) return { kind: "malformed", error: "not a JSON object" };
@@ -42,7 +46,7 @@ export function checkPolicy(): Check {
   const r = readPolicy();
   const env = ["BCU_APPS", "BCU_FOREGROUND", "BCU_BROWSERS", "BCU_POLICY"].filter((k) => process.env[k]).map((k) => `${k}=${process.env[k]} is set in this shell; clients only see it if their server environment sets it too`);
   if (r.kind === "malformed") {
-    return { id, status: "fail", code: "POLICY_MALFORMED", summary: `${POLICY} isn't valid JSON: ${r.error}`, evidence: env, next: "Fix the file by hand. bcu treats it as empty until then and won't overwrite it." };
+    return { id, status: "fail", code: "POLICY_MALFORMED", summary: `${POLICY} isn't usable: ${r.error}`, evidence: env, next: "Fix the file by hand. bcu treats it as empty until then and won't overwrite it." };
   }
   const p = r.kind === "ok" ? r.policy : {};
   const allow = p.allow?.length ? p.allow.join(", ") : "none";
@@ -58,7 +62,7 @@ export function applyChoices(c: AccessChoices): Check | null {
   if (!c.allowApps.length && !c.foreground && !c.browsers) return null;
   const id = "policy";
   const r = readPolicy();
-  if (r.kind === "malformed") return { id, status: "fail", code: "POLICY_MALFORMED", summary: `${POLICY} isn't valid JSON (${r.error}); no access choices were written`, next: "Fix the file by hand, then rerun with the same flags." };
+  if (r.kind === "malformed") return { id, status: "fail", code: "POLICY_MALFORMED", summary: `${POLICY} isn't usable (${r.error}); no access choices were written`, next: "Fix the file by hand, then rerun with the same flags." };
   const p: PolicyFile = r.kind === "ok" ? { ...r.policy } : {};
   const before = JSON.stringify(p);
   if (c.allowApps.length) p.allow = [...new Set([...(p.allow ?? []), ...c.allowApps.map((a) => a.toLowerCase())])].sort();

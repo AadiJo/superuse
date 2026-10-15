@@ -1,8 +1,8 @@
 // Checks that run the real server through its launcher, the way a client does.
 //
 // The server starts with PATH=/usr/bin:/bin, like a client launched from a GUI, so it only works if
-// the launcher finds the recorded Node. Inherited BCU_APPS/BCU_FOREGROUND/BCU_BROWSERS are removed
-// so a variable in this shell can't hide a permission problem; only the policy file applies.
+// the launcher finds the recorded Node. Inherited BCU_APPS/BCU_FOREGROUND/BCU_BROWSERS/BCU_CUA_DRIVER
+// are removed, so a variable in this shell can't hide a problem the registered clients would hit.
 //
 // checkServer: handshake, version, QuickJS and the driver's window list (read-only).
 // verifyApp: --verify only. Opens a TestPad built for this run, has the server type into it and
@@ -20,7 +20,7 @@ import { ps } from "../../bench/win.ts";
 import { LAUNCHER, REPO, VERSION, run, windowsDir, type Check } from "./lib.ts";
 
 const serverEnv = (extra: Record<string, string> = {}) =>
-  ({ PATH: "/usr/bin:/bin", BCU_AUDIT: "off", BCU_APPS: undefined, BCU_FOREGROUND: undefined, BCU_BROWSERS: undefined, ...extra });
+  ({ PATH: "/usr/bin:/bin", BCU_AUDIT: "off", BCU_APPS: undefined, BCU_FOREGROUND: undefined, BCU_BROWSERS: undefined, BCU_CUA_DRIVER: undefined, ...extra });
 
 async function js(c: McpClient, code: string, timeoutMs = 60_000) {
   const { result } = await c.call("js", { code }, timeoutMs);
@@ -29,10 +29,11 @@ async function js(c: McpClient, code: string, timeoutMs = 60_000) {
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-export async function checkServer(): Promise<Check> {
+/** `driver` tests another exe (a release candidate) instead of plugin/driver's. */
+export async function checkServer(driver?: string): Promise<Check> {
   const id = "server";
   try {
-    await using c = await McpClient.start([LAUNCHER], { env: serverEnv(), elicit: "unsupported" });
+    await using c = await McpClient.start([LAUNCHER], { env: serverEnv(driver ? { BCU_CUA_DRIVER: driver } : {}), elicit: "unsupported" });
     if (c.serverInfo.version !== VERSION) return { id, status: "fail", code: "SERVER_VERSION", summary: `the launcher ran server ${c.serverInfo.version}, expected ${VERSION}` };
     const tools = (await c.request("tools/list", {}, 30_000)) as { tools?: Array<{ name: string }> };
     if (!tools.tools?.some((t) => t.name === "js")) return { id, status: "fail", code: "SERVER_NO_TOOL", summary: "the server doesn't list the js tool" };

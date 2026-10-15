@@ -50,7 +50,7 @@ function checkPackage(dir: string): string[] {
   if (version !== VERSION) problems.push(`version ${version || "unreadable"}, expected ${VERSION}`);
   try { fs.accessSync(path.join(dir, "server", "run.sh"), fs.constants.X_OK); } catch { problems.push("server/run.sh is missing or not executable"); }
   if (!fs.existsSync(path.join(dir, "server", "node_modules", "quickjs-emscripten"))) problems.push("server dependencies are missing");
-  if (!process.env.BCU_CUA_DRIVER && sha256File(path.join(dir, "driver", "cua-driver.exe")) !== sha256File(EXE)) problems.push("its driver differs from this checkout's");
+  if (sha256File(path.join(dir, "driver", "cua-driver.exe")) !== sha256File(EXE)) problems.push("its driver differs from this checkout's");
   return problems;
 }
 
@@ -102,17 +102,39 @@ export function installClaude(): Check {
 
 // --- Codex -----------------------------------------------------------------------------------
 
-type CodexServer = { name: string; transport?: { type?: string; command?: string; args?: string[]; env?: Record<string, string> | null } };
+type CodexServer = {
+  name: string;
+  enabled?: boolean;
+  transport?: { type?: string; command?: string; args?: string[]; env?: Record<string, string> | null; env_vars?: string[]; cwd?: string | null };
+  [setting: string]: unknown;
+};
+
+const BCU_SERVER = /plugin\/server\/(run\.sh|main\.ts)$/;
 
 function codexServer(): CodexServer | null {
   return json<CodexServer>("codex", ["mcp", "get", "bcu", "--json"]);
 }
 
+/** A "bcu" entry is ours if it's a stdio server running some checkout's bcu launcher or server. */
+const ownedByBcu = (s: CodexServer) => s.transport?.type === "stdio" && [s.transport.command, ...(s.transport.args ?? [])].some((a) => BCU_SERVER.test(a ?? ""));
+
+/** Settings `codex mcp add` can't recreate. An entry with any of them is changed by hand, not replaced. */
+function unportable(s: CodexServer): string[] {
+  const t = s.transport ?? {};
+  const set = (v: unknown) => v !== null && v !== undefined && !(Array.isArray(v) && !v.length);
+  return [
+    ...(set(t.env_vars) ? ["env_vars"] : []), ...(set(t.cwd) ? ["cwd"] : []),
+    ...["enabled_tools", "disabled_tools", "startup_timeout_sec", "tool_timeout_sec"].filter((k) => set(s[k])),
+  ];
+}
+
+const isCurrent = (s: CodexServer | null) => s?.transport?.command === LAUNCHER && !(s.transport.args ?? []).length;
+
 /** Other Codex servers that run a bcu launcher or server: leftovers from older installs. */
 function codexDuplicates(): string[] {
   const all = json<CodexServer[]>("codex", ["mcp", "list", "--json"]) ?? [];
   return all
-    .filter((s) => s.name !== "bcu" && [s.transport?.command, ...(s.transport?.args ?? [])].some((a) => /plugin\/server\/(run\.sh|main\.ts)$/.test(a ?? "")))
+    .filter((s) => s.name !== "bcu" && [s.transport?.command, ...(s.transport?.args ?? [])].some((a) => BCU_SERVER.test(a ?? "")))
     .map((s) => `Codex server "${s.name}" also runs bcu (${s.transport?.command}); remove it with codex mcp remove ${s.name}`);
 }
 
@@ -134,9 +156,13 @@ export function checkCodex(changed = false): Check {
   const evidence = codexDuplicates();
   const link = skillLink();
   if (!server) return { id, status: "action", code: "CODEX_NOT_REGISTERED", summary: "bcu isn't registered in Codex", evidence, next: "Run scripts/install.sh --clients=codex." };
-  if (server.transport?.command !== LAUNCHER || (server.transport.args ?? []).length) {
-    return { id, status: "action", code: "CODEX_STALE", summary: `Codex's bcu server runs ${server.transport?.command}`, evidence, next: "Run scripts/install.sh --clients=codex." };
+  if (!ownedByBcu(server)) return { id, status: "action", code: "CODEX_NAME_TAKEN", summary: `Codex already has an MCP server named "bcu" that isn't bcu (${server.transport?.command ?? server.transport?.type}); setup left it alone`, evidence, next: "Rename or remove that entry (codex mcp remove bcu) if it's not needed, then rerun scripts/install.sh --clients=codex." };
+  if (!isCurrent(server)) {
+    const manual = unportable(server);
+    return { id, status: "action", code: "CODEX_STALE", summary: `Codex's bcu server runs ${server.transport?.command}`, evidence,
+      next: manual.length ? `Its entry has settings setup can't carry over (${manual.join(", ")}); set command = ${JSON.stringify(LAUNCHER)} and args = [] under [mcp_servers.bcu] in Codex's config.toml by hand.` : "Run scripts/install.sh --clients=codex." };
   }
+  if (server.enabled === false) return { id, status: "action", code: "CODEX_DISABLED", summary: "Codex's bcu server is disabled", evidence, next: "Set enabled = true under [mcp_servers.bcu] in Codex's config.toml, if the user wants bcu on." };
   if (link === "missing" || link === "stale") return { id, status: "action", code: "CODEX_SKILL_MISSING", summary: "the computer-use skill isn't linked for Codex", evidence, next: "Run scripts/install.sh --clients=codex." };
   if (link === "conflict") return { id, status: "action", code: "CODEX_SKILL_CONFLICT", summary: `${SKILL_LINK} holds something else, so Codex won't load bcu's skill; bcu left it alone`, evidence, next: `Move it away if it isn't needed, then rerun scripts/install.sh --clients=codex. The MCP server works without the skill.` };
   evidence.push(`runs ${LAUNCHER}`, `skill ${SKILL_LINK}`);
@@ -145,17 +171,29 @@ export function checkCodex(changed = false): Check {
     : { id, status: "ok", code: "CODEX_CURRENT", summary: "MCP server bcu registered", evidence };
 }
 
+/** `codex mcp add` arguments that recreate a stdio entry with this command, keeping its env. */
+const addArgs = (command: string, args: string[], env: Record<string, string> | null | undefined) =>
+  ["mcp", "add", "bcu", ...Object.entries(env ?? {}).flatMap(([k, v]) => ["--env", `${k}=${v}`]), "--", command, ...args];
+
 export function installCodex(): Check {
   const id = "client:codex";
   const before = codexServer();
   let changed = false;
-  if (before?.transport?.command !== LAUNCHER || (before.transport.args ?? []).length) {
+  // Replace only our own entry, and only when `codex mcp add` can recreate all of it; checkCodex
+  // explains anything else.
+  if (!isCurrent(before) && (!before || (ownedByBcu(before) && !unportable(before).length))) {
     if (before) run("codex", ["mcp", "remove", "bcu"]);
-    const r = run("codex", ["mcp", "add", "bcu", "--", LAUNCHER]);
+    const r = run("codex", addArgs(LAUNCHER, [], before?.transport?.env));
     if (r.code !== 0) {
       const t = before?.transport;
-      if (t?.command) run("codex", ["mcp", "add", "bcu", ...Object.entries(t.env ?? {}).flatMap(([k, v]) => ["--env", `${k}=${v}`]), "--", t.command, ...(t.args ?? [])]);
-      return { id, status: "fail", code: "CODEX_INSTALL_FAILED", summary: "codex mcp add failed; the previous entry was restored", evidence: [(r.stderr || r.stdout).trim()], next: "Fix the error above and rerun scripts/install.sh." };
+      if (t?.command) run("codex", addArgs(t.command, t.args ?? [], t.env));
+      const restored = !before || JSON.stringify(codexServer()?.transport) === JSON.stringify(before.transport);
+      return {
+        id, status: "fail", code: "CODEX_INSTALL_FAILED",
+        summary: `codex mcp add failed; ${!before ? "nothing was registered" : restored ? "the previous entry was restored" : "the previous entry couldn't be restored"}`,
+        evidence: [(r.stderr || r.stdout).trim(), ...(before && !restored ? [`previous entry: ${addArgs(before.transport?.command ?? "?", before.transport?.args ?? [], Object.fromEntries(Object.keys(before.transport?.env ?? {}).map((k) => [k, "<value>"]))).join(" ")}`] : [])],
+        next: "Fix the error above and rerun scripts/install.sh.",
+      };
     }
     changed = true;
   }

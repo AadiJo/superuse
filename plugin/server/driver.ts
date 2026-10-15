@@ -5,6 +5,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import { createInterface } from "node:readline";
+import { VERSION } from "./version.ts";
 
 const TRACE = process.env.BCU_TRACE;
 
@@ -113,7 +114,7 @@ export class Driver {
   }
 
   private async handshake() {
-    await this.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "bcu", version: "0.4.0" } });
+    await this.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "bcu", version: VERSION } });
     this.send({ jsonrpc: "2.0", method: "notifications/initialized" });
     const list = (await this.request("tools/list", {})) as { tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }> };
     for (const t of list.tools ?? []) {

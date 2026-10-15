@@ -1,6 +1,6 @@
 // bcu: Windows computer use for Claude, as an MCP server with one sandboxed code-mode tool.
 //
-//   node plugin/server/main.ts          (Node 24+; TypeScript runs through type stripping)
+//   plugin/server/run.sh                (picks Node 24+, then runs this file; TypeScript runs through type stripping)
 //
 // Tools: `js` runs model-written JavaScript against the `cua` API (sandbox.ts, desktop.ts);
 // `js_reset` clears its variables. Approvals for apps and foreground input are asked through MCP
@@ -19,8 +19,8 @@ import { Driver, trace, type CursorMode } from "./driver.ts";
 import { Desktop } from "./desktop.ts";
 import { Policy, type Ask } from "./policy.ts";
 import { Sandbox } from "./sandbox.ts";
+import { VERSION } from "./version.ts";
 
-const VERSION = "0.4.0";
 const TEXT_LIMIT = 20_000;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DRIVER = process.env.BCU_CUA_DRIVER ?? path.join(here, "..", "driver", "cua-driver.exe");

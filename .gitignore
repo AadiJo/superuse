@@ -6,7 +6,7 @@ fork/acceptance-runs/
 
 # Downloads, clones and builds (fork/build.sh recreates them).
 tools/
-plugin/driver/*.exe
+plugin/driver/
 
 node_modules/
 *.log

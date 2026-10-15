@@ -13,5 +13,5 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true
   },
-  "include": ["bench/**/*.ts", "fork/**/*.ts"]
+  "include": ["bench/**/*.ts", "fork/**/*.ts", "scripts/**/*.ts"]
 }

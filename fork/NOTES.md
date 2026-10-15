@@ -4,7 +4,8 @@ Our local fork of [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-
 
 - `UPSTREAM`: the upstream repo and pinned commit.
 - `patches/`: our changes as one patch per commit, applied in order on top of that commit.
-- `build.sh`: clones upstream into `tools/src/cua` (gitignored) if needed, applies the patches on branch `bcu`, cross-builds from WSL and installs `plugin/driver/cua-driver.exe`.
+- `build.sh`: clones upstream into `tools/src/cua` (gitignored) if needed, applies the patches on branch `bcu`, cross-builds from WSL and installs `plugin/driver/cua-driver.exe`. `build.sh --clean` builds from a fresh clone in `tools/clean` instead, for releases and `scripts/install.sh --build`.
+- `release.json`: the published driver build installs download (written by `scripts/release-driver.ts`).
 - `export-patches.sh`: writes new commits on `bcu` back to `patches/`.
 - `acceptance.ts`: live checks against real apps. `node fork/acceptance.ts [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu] [helium] ...`. Each run writes `fork/acceptance-runs/acceptance-<time>.json` with every tool call, its time, and the cursor and foreground samples. `BCU_CUA_DRIVER` picks the exe under test.
 - `apps/MenuPad.cs`: a small app with a real Win32 menu bar for the `win32menu` check. `acceptance.ts` builds it into `%TEMP%\bcu`.

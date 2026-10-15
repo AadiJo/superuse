@@ -5,14 +5,14 @@
 // Read-only on the desktop: it lists windows and binds them, but never sends input, so it can run
 // while something else is driving apps. Each case names the failure it guards against.
 
-import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { McpClient, textOf, type ElicitMode } from "./mcp-client.ts";
 import { timestamp } from "./win.ts";
 
 const REPO = path.dirname(import.meta.dirname);
-const SERVER = ["node", path.join(REPO, "plugin/server/main.ts")];
+const SERVER = [path.join(REPO, "plugin/server/run.sh")]; // the launcher clients run, not main.ts directly
 
 type Result = { case: string; ok: boolean; detail: string };
 const results: Result[] = [];
@@ -128,6 +128,16 @@ if (other) {
     check("prompt names the app", c.elicitations.length > 0 && JSON.stringify(c.elicitations[0]).includes(other), `prompts: ${c.elicitations.length}`);
     r = await js(c, `return (await cua.windows()).filter(r => r.app === ${app}).map(r => 'title' in r)`);
     check("approved app now listed with titles", r.text.includes("true"), r.text);
+  }
+  {
+    // A policy file that doesn't parse is the user's text: "always" approves for this session
+    // and says why it wasn't saved, instead of replacing the file with defaults.
+    const broken = '{ "allow": ["testpad",] }';
+    writeFileSync(policy, broken);
+    await using c = await server(base, "always");
+    const r = await js(c, `return (await cua.window(${app})).app`);
+    check("malformed policy file isn't overwritten", readFileSync(policy, "utf8") === broken && r.text.includes("isn't valid JSON"), r.text);
+    unlinkSync(policy);
   }
 }
 

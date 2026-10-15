@@ -35,6 +35,9 @@ const BUILTIN_DENY = new Set([
   "claude", "codex", "textinputhost",
 ]);
 
+/** A decline doesn't prove a person saw the prompt: some clients advertise prompts and decline every one. */
+const DECLINED = "the user refused, or this client declines prompts without showing them";
+
 const LABELS: Record<string, string> = {
   msedge: "Microsoft Edge", chrome: "Google Chrome", firefox: "Firefox", explorer: "File Explorer",
   systemsettings: "Settings", winword: "Word", excel: "Excel", powerpnt: "PowerPoint", outlook: "Outlook",
@@ -69,6 +72,7 @@ export class Policy {
   readonly file: string;
   private conf: PolicyFile;
   private confMtimeMs = -1; // the policy file's mtime when last read, so edits apply without a restart
+  private confError: string | null = null; // why the file didn't parse; it's then never rewritten
   private readonly preapproved: string[];
   private readonly approved = new Set<string>(); // app keys approved this session
   private readonly declined = new Set<string>(); // asked this session and refused: don't nag
@@ -83,11 +87,21 @@ export class Policy {
     this.preapproved = (process.env.BCU_APPS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
   }
 
+  /** The file's settings. A missing file is an empty policy; so is a malformed one, but its parse
+   *  error is kept so persistAllow never replaces the user's text with defaults. */
   private load(): PolicyFile {
+    this.confError = null;
+    let text: string;
     try {
       this.confMtimeMs = fs.statSync(this.file).mtimeMs;
-      return JSON.parse(fs.readFileSync(this.file, "utf8")) as PolicyFile;
+      text = fs.readFileSync(this.file, "utf8");
     } catch {
+      return {};
+    }
+    try {
+      return JSON.parse(text) as PolicyFile;
+    } catch (e) {
+      this.confError = e instanceof Error ? e.message : String(e);
       return {};
     }
   }
@@ -171,7 +185,7 @@ export class Policy {
       `Claude wants to briefly take the mouse and keyboard focus to act in ${app.label}, because background input was refused. Allow?`,
       `Allow for the rest of this session`);
     if (answer === "unsupported") throw new Error(`foreground input needs approval and this client can't show prompts. Set "foreground": "allow" in ${this.file} or BCU_FOREGROUND=allow.`);
-    if (answer === "no") throw new Error("the user declined foreground input. Use setValue/select, or ask the user to do this step.");
+    if (answer === "no") throw new Error(`the client declined foreground input (${DECLINED}). Use setValue/select, or ask the user to do this step.`);
     if (answer === "always") this.foregroundOk.add(app.key);
   }
 
@@ -181,7 +195,7 @@ export class Policy {
     }
     if (answer === "no") {
       this.declined.add(app.key);
-      throw new Error(`the user declined access to ${app.label}.`);
+      throw new Error(`the client declined access to ${app.label} (${DECLINED}). Access stays refused. If the user has already said ${app.label} is fine, they can add "${app.key}" to "allow" in ${this.file}; don't add it on their behalf otherwise.`);
     }
     this.approved.add(app.key);
     if (answer === "always") this.persistAllow(app.key);
@@ -193,6 +207,9 @@ export class Policy {
 
   private persistAllow(key: string) {
     this.conf = this.load(); // another session may have written since we started
+    if (this.confError) {
+      throw new Error(`approved for this session only: ${this.file} isn't valid JSON (${this.confError}), so "always" wasn't saved. Fix the file by hand; bcu won't overwrite it.`);
+    }
     const allow = new Set(this.conf.allow ?? []);
     allow.add(key);
     this.conf.allow = [...allow].sort();

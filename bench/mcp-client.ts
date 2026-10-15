@@ -36,10 +36,12 @@ export type Structured = Partial<{
 
 export type ToolResult = { content?: ContentBlock[]; structuredContent?: Structured; isError?: boolean };
 
-/** How to answer elicitations. "unsupported" doesn't advertise the capability and declines any that arrive. */
-export type ElicitMode = "accept" | "decline" | "unsupported";
+/** How to answer elicitations. "always" accepts and ticks the prompt's remember box. "unsupported"
+ *  doesn't advertise the capability and declines any that arrive. */
+export type ElicitMode = "accept" | "always" | "decline" | "unsupported";
 
-export type McpOptions = { env?: Record<string, string>; cwd?: string; elicit?: ElicitMode };
+/** `env` adds to this process's environment; an undefined value removes that variable. */
+export type McpOptions = { env?: Record<string, string | undefined>; cwd?: string; elicit?: ElicitMode };
 
 export type Message = {
   jsonrpc?: string;
@@ -55,6 +57,8 @@ type Pending = { method: string; resolve: (result: unknown) => void; reject: (e:
 export class McpClient {
   /** Elicitation requests the server sent, in order. */
   readonly elicitations: Message[] = [];
+  /** The server's name and version from its initialize reply. */
+  serverInfo: { name?: string; version?: string } = {};
   private readonly stderr: string[] = [];
   private readonly pending = new Map<number, Pending>();
   private readonly exited: Promise<void>;
@@ -83,11 +87,12 @@ export class McpClient {
     const proc = spawn(command, args, { env: { ...process.env, ...opts.env }, cwd: opts.cwd });
     const c = new McpClient(proc, opts.elicit ?? "accept");
     try {
-      await c.request("initialize", {
+      const init = await c.request("initialize", {
         protocolVersion: "2025-06-18",
         capabilities: c.elicit === "unsupported" ? {} : { elicitation: {} },
         clientInfo: { name: "bcu-bench", version: "0.1" },
-      });
+      }) as { serverInfo?: McpClient["serverInfo"] };
+      c.serverInfo = init.serverInfo ?? {};
     } catch (e) {
       await c.close();
       throw e;
@@ -153,8 +158,8 @@ export class McpClient {
         return;
       }
       this.elicitations.push(msg);
-      const accept = this.elicit === "accept";
-      this.send({ jsonrpc: "2.0", id: msg.id, result: { action: accept ? "accept" : "decline", content: accept ? { persist: "session" } : null } });
+      const content = this.elicit === "always" ? { remember: true } : this.elicit === "accept" ? { persist: "session" } : null;
+      this.send({ jsonrpc: "2.0", id: msg.id, result: { action: content ? "accept" : "decline", content } });
       return;
     }
     const p = typeof msg.id === "number" ? this.pending.get(msg.id) : undefined;

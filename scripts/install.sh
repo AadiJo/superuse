@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
-# Install the bcu plugin into Claude Code from this checkout (WSL or Linux shell).
+# Install or update bcu from this checkout (WSL2 on Windows 11, x64). Safe to rerun: it repairs
+# what's missing or stale and leaves the rest alone.
 #
-#   scripts/install.sh
+#   scripts/install.sh                          detect Claude Code and Codex, set up both
+#   scripts/install.sh --clients=codex          only these clients (claude, codex; "none" for neither)
+#   scripts/install.sh --build                  build the driver from source instead of downloading it
+#   scripts/install.sh --allow-apps=TestPad     record access the user approved (see --help)
+#   scripts/install.sh --json                   one JSON report on stdout
 #
-# The plugin loads in place from plugin/ (a local-path marketplace), so later edits apply after
-# /reload-plugins. This script makes sure the driver exe and the server's Node dependencies exist,
-# then registers the marketplace and installs the plugin at user scope.
+# This finds a Node 24+ (downloading one for bcu if needed), then runs scripts/setup.ts, which
+# does the rest and prints what works and what still needs a restart or the user.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-
-[[ -f "$root/plugin/driver/cua-driver.exe" ]] || "$root/fork/build.sh"
-[[ -d "$root/plugin/server/node_modules/quickjs-emscripten" ]] || (cd "$root/plugin/server" && npm ci --omit=dev --no-audit --no-fund --silent)
-
-if ! claude plugin marketplace list 2>/dev/null | grep -q "better-computer-use"; then
-  claude plugin marketplace add "$root"
-fi
-claude plugin install bcu@better-computer-use --scope user
-echo "Installed. Start a new Claude Code session (or run /reload-plugins) to load it."
+source "$root/scripts/node.sh"
+node="$(bcu_node --download)"
+exec "$node" "$root/scripts/setup.ts" install "$@"

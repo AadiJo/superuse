@@ -6,19 +6,25 @@ On a 9-task Windows suite, three of them across several apps, Claude on this sta
 
 ## Install (WSL)
 
+Point your agent at this repo and say "configure this for me". `AGENTS.md` walks it through setup. Or run it yourself from a permanent clone:
+
 ```bash
-scripts/install.sh
+scripts/install.sh                    # Claude Code and Codex, whichever are installed
+scripts/install.sh --clients=codex    # just one
+scripts/doctor.sh                     # check an install without changing it; --verify drives a test app
 ```
 
-It builds the driver if `plugin/driver/cua-driver.exe` is missing (`fork/build.sh`), installs the server's one dependency, registers this checkout as a local plugin marketplace, and installs `bcu@better-computer-use` at user scope. Start a new Claude Code session afterwards. The plugin loads in place, so edits under `plugin/` apply after `/reload-plugins`.
+The installer finds Node 24+ or downloads one for bcu, installs the server's one dependency, and downloads the driver release that `fork/release.json` pins, checking its SHA-256. The repo is private, so the download needs `gh auth login`. `--build` compiles the driver from source instead, which needs Rust. Then it registers bcu with each client through the client's own CLI, records the Node it used for GUI-launched clients, and starts the server once to prove it works. Reruns repair what's stale and leave everything else alone, including your policy file. The report ends on `server_verified`, or `restart_required` when a client needs a new session to load the change.
 
-Requirements: Windows 11 with WSL2, Node 24+ in WSL, and Rust (rustup) only if the driver needs building.
+Claude Code loads the plugin in place from `plugin/`, so edits apply after `/reload-plugins`. Other MCP clients run `plugin/server/run.sh` as a stdio server with no arguments; the report prints the full path.
+
+Requirements: Windows 11 with WSL2 (x64). Rust only for `--build`.
 
 ## Approvals and privacy
 
 - The first time Claude binds an app, Claude Code asks you to allow it. "Always allow" writes the app to `~/.config/bcu/policy.json`, which you can edit by hand (`allow`, `deny`, `foreground`); edits apply to running sessions. `"allow": ["*"]` approves every app, and `"foreground": "allow"` skips the foreground prompt.
 - `"browsers": "attach"` lets `w.page()` reach web pages in a running Chrome, Edge or Helium over the browser's own DevTools, with your logged-in profile. It needs the browser's remote debugging toggle (`chrome://inspect/#remote-debugging`) on; the driver answers the browser's "Allow remote debugging?" prompt itself, once per session. Off by default.
-- Some clients never show these prompts. T3 Code declines them automatically, so use the policy file there.
+- Some clients never show these prompts. T3 Code declines them automatically, so use the policy file there (`scripts/install.sh --allow-apps=TestPad,Calculator` adds apps to it).
 - Until you approve an app, Claude sees its name but none of its window titles.
 - Terminals, password managers, security prompts and other agents are blocked unless the policy file's `allow` names them by exact key (`"*"` doesn't lift these blocks).
 - `{foreground: true}` (real cursor and focus) asks first by default.
@@ -32,9 +38,10 @@ Headless runs (`claude -p`) can't show prompts. Pre-approve apps there with `BCU
 | Path | What |
 | --- | --- |
 | `plugin/` | The Claude Code plugin: `server/` (MCP server), `skills/computer-use/`, `driver/` (built exe, not in git) |
-| `fork/` | Our Cua Driver fork: upstream pin, patches, build script, notes, live acceptance checks |
+| `fork/` | Our Cua Driver fork: upstream pin, patches, build script, release pin, notes, live acceptance checks |
+| `scripts/` | `install.sh`, `doctor.sh` and the setup they run; `release-driver.ts` publishes a driver build |
 | `bench/` | End-to-end benchmark on the real desktop, plus `server-check.ts` for the sandbox and policy |
 | `research/` | Research reports (`00-synthesis.md` first) and experiment results (`08-experiments.md`) |
 | `proto/` | Archived front ends measured in rounds 1 and 2 |
 
-Server checks: `node bench/server-check.ts` (sandbox and policy, read-only on the desktop). Driver checks: `node fork/acceptance.ts`. Codex app baseline: `bench/codex_app_wizard.sh`. Type check: `npm run typecheck` in `plugin/server`, and at the repo root for the `bench/` and `fork/` scripts.
+Server checks: `node bench/server-check.ts` (sandbox and policy, read-only on the desktop). Setup checks: `node bench/setup-check.ts` (fresh clones in isolated client config). Driver checks: `node fork/acceptance.ts`. Codex app baseline: `bench/codex_app_wizard.sh`. Type check: `npm run typecheck` in `plugin/server`, and at the repo root for the `bench/` and `fork/` scripts.

@@ -1,0 +1,27 @@
+# bcu (better-computer-use)
+
+Windows computer use for MCP clients: one sandboxed `js` tool over a background-input UI Automation driver. It runs in WSL2 on Windows 11 (x64). `README.md` covers the design, layout and privacy model.
+
+## Setting bcu up for the user
+
+Use this when the user asks you to install, configure, update or repair bcu. Each step ends on its done-condition.
+
+1. **Permanent checkout.** Clients run bcu from this checkout, so it has to outlive your session. If this is a git worktree (`git rev-parse --git-dir` differs from `--git-common-dir`) or a temp directory, clone the commit you're on into `~/.local/share/bcu/source`: `git clone <this checkout> ~/.local/share/bcu/source`, then `git -C ~/.local/share/bcu/source remote set-url origin https://github.com/AadiJo/better-computer-use`. Cloning from the checkout keeps local commits. If that folder already holds something else, ask the user where to clone. Work from the permanent checkout from here on. Done when you're in a checkout that isn't a worktree or temp folder.
+2. **Install.** Run `scripts/install.sh --json`, with `--clients=claude`, `--clients=codex` or both when the user named their client (without it, setup picks the installed ones). It downloads what's missing, registers the clients, and tests the server. Done when the report's `outcome` is `server_verified` or `restart_required`, or the remaining checks need the user.
+3. **Fix what the report lists.** Each check with status `action` or `fail` carries a `next` step. Do the ones you can, rerun install, and repeat. Give the user the steps only they can do (`gh auth login`, the browser's remote-debugging toggle), word for word.
+4. **Access choices.** The `policy` check shows what is already allowed. Ask the user once, in one message, about what isn't settled and what their task needs:
+   - which apps bcu may control without asking. Clients that can't show approval prompts need this (`claude -p`, T3 Code);
+   - whether bcu may briefly take the real mouse and focus when background input fails;
+   - whether `w.page()` may use their running, logged-in browser.
+
+   Rerun install with exactly the approved answers: `--allow-apps=TestPad,Calculator`, `--foreground=allow|ask|deny`, `--browsers=attach|off`. Wildcards (`--allow-apps=*`) and attach come only from the user's own words. Done when every choice is either answered or left at its default by the user.
+5. **Prove it.** With `restart_required`, tell the user to start a new session of that client (or run `/reload-plugins` in Claude Code). In a session that has bcu loaded, call the `js` tool with `return (await cua.windows()).length`. If the user turned the browser on, also run `scripts/doctor.sh --verify` with the browser open. Done when the client the user named returns a number from that call, and `browser` reads `BROWSER_VERIFIED` or `BROWSER_DISABLED`.
+
+Finish by telling the user the outcome, what you verified, and anything still waiting on them. `scripts/doctor.sh` rechecks everything later without changing anything.
+
+## Working on bcu
+
+- Checks: `node bench/server-check.ts` (sandbox and policy), `node bench/setup-check.ts` (installer, in isolated client config), `npm run typecheck` at the root and in `plugin/server`.
+- Bump `version` in `plugin/.claude-plugin/plugin.json` whenever the server, skill, launcher, dependencies or driver pin change. The server and setup read it from there.
+- Editing `fork/build.sh`, `fork/UPSTREAM` or `fork/patches/` changes the driver's source fingerprint. Installs then need `--build`, until a maintainer runs `node scripts/release-driver.ts --publish` and commits the new `fork/release.json`.
+- Agent sessions export `CLAUDE_CONFIG_DIR`, which beats `HOME`. A test that only changes `HOME` edits the user's real Claude config. Set `CLAUDE_CONFIG_DIR` and `CODEX_HOME` too, as `bench/setup-check.ts` does.

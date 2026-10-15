@@ -38,6 +38,7 @@ function runClient(cmd: string, args: string[], home: string, transcript: string
 
 /** `command` is the server command the isolated registration holds; `home` is that user's HOME. */
 export async function verifyClientRun(client: "claude" | "codex", command: string, home: string, dir: string): Promise<ClientRun> {
+  if (!command) return { ok: false, blocked: false, detail: `the isolated ${client} registration has no bcu server command` };
   fs.mkdirSync(dir, { recursive: true });
   const expected = `bcu client check ${randomUUID().slice(0, 8)}`;
   const env = { BCU_APPS: "TestPad", BCU_AUDIT: "off" }; // headless runs can't show the approval prompt

@@ -81,6 +81,17 @@ const BROWSERS: Array<[name: string, dir: string]> = [
   ["Brave", "BraveSoftware/Brave-Browser/User Data"],
 ];
 
+/** Installed Chromium browsers by the name the server shows, those whose remote debugging has
+ *  been on first. Verification tries them in this order, so it doesn't start with a browser that
+ *  can't attach. */
+export function browsersByHint(): string[] {
+  const local = windowsDir("LOCALAPPDATA");
+  if (!local) return [];
+  const found = BROWSERS.filter(([, dir]) => fs.existsSync(path.join(local, dir)));
+  const hinted = (dir: string) => fs.existsSync(path.join(local, dir, "DevToolsActivePort"));
+  return [...found.filter(([, d]) => hinted(d)), ...found.filter(([, d]) => !hinted(d))].map(([name]) => name);
+}
+
 /** Browser attach, before verification. A DevToolsActivePort file means remote debugging was on
  *  at some point; only scripts/doctor.sh --verify proves a connection. */
 export function checkBrowser(): Check {

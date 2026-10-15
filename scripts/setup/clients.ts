@@ -36,6 +36,10 @@ function json<T>(client: Client, args: string[]): T | null {
 type ClaudeMarketplace = { name: string; source?: string; path?: string };
 type ClaudePlugin = { id: string; version?: string; scope?: string; enabled?: boolean; installPath?: string; readFromFolder?: string };
 
+/** Where a marketplace points, if it's a local folder. Never resolve a missing path: "" would
+ *  resolve to the current directory, which is usually this checkout. */
+const marketPath = (m: ClaudeMarketplace | undefined) => (m?.path ? path.resolve(m.path) : null);
+
 function claudeState() {
   const market = json<ClaudeMarketplace[]>("claude", ["plugin", "marketplace", "list", "--json"])?.find((m) => m.name === MARKETPLACE);
   const plugins = json<ClaudePlugin[]>("claude", ["plugin", "list", "--json"]) ?? [];
@@ -59,7 +63,7 @@ export function checkClaude(changed = false): Check {
   const { market, plugin, others } = claudeState();
   const evidence = others.map((p) => `another bcu plugin is installed: ${p.id}`);
   if (!market || !plugin) return { id, status: "action", code: "CLAUDE_NOT_REGISTERED", summary: "bcu isn't installed in Claude Code", evidence, next: "Run scripts/install.sh --clients=claude." };
-  if (path.resolve(market.path ?? "") !== REPO) return { id, status: "action", code: "CLAUDE_OTHER_CHECKOUT", summary: `Claude's marketplace points at ${market.path ?? market.source}`, evidence, next: "Run scripts/install.sh --clients=claude from this checkout to point it here." };
+  if (marketPath(market) !== REPO) return { id, status: "action", code: "CLAUDE_OTHER_CHECKOUT", summary: `Claude's marketplace points at ${market.path ?? market.source}`, evidence, next: "Run scripts/install.sh --clients=claude from this checkout to point it here." };
   if (plugin.enabled === false) return { id, status: "action", code: "CLAUDE_DISABLED", summary: "the bcu plugin is disabled", evidence, next: `Run claude plugin enable ${PLUGIN_ID}.` };
   const dir = plugin.readFromFolder ?? plugin.installPath ?? "";
   if (plugin.version !== VERSION) evidence.push(`Claude recorded version ${plugin.version}, checkout is ${VERSION}`);
@@ -79,10 +83,11 @@ export function installClaude(): Check {
   let changed = false;
   const fail = (what: string, r: { stderr: string; stdout: string }): Check => {
     // Point the marketplace back where it was, so a half-finished move doesn't strand the plugin.
-    if (before.market?.path && path.resolve(before.market.path) !== REPO) run("claude", ["plugin", "marketplace", "add", before.market.path]);
+    const previous = marketPath(before.market);
+    if (previous && previous !== REPO) run("claude", ["plugin", "marketplace", "add", previous]);
     return { id, status: "fail", code: "CLAUDE_INSTALL_FAILED", summary: `${what} failed`, evidence: [(r.stderr || r.stdout).trim()], next: "Fix the error above and rerun scripts/install.sh." };
   };
-  if (path.resolve(before.market?.path ?? "") !== REPO) {
+  if (marketPath(before.market) !== REPO) {
     const r = run("claude", ["plugin", "marketplace", "add", REPO]); // also repoints a moved checkout
     if (r.code !== 0) return fail("claude plugin marketplace add", r);
     changed = true;
@@ -122,7 +127,7 @@ const ownedByBcu = (s: CodexServer) => s.transport?.type === "stdio" && [s.trans
 function unportable(s: CodexServer): string[] {
   const t = s.transport ?? {};
   const set = (v: unknown) => v !== null && v !== undefined && !(Array.isArray(v) && !v.length);
-  return [
+  return [...(s.enabled === false ? ["enabled = false"] : []),
     ...(set(t.env_vars) ? ["env_vars"] : []), ...(set(t.cwd) ? ["cwd"] : []),
     ...["enabled_tools", "disabled_tools", "startup_timeout_sec", "tool_timeout_sec"].filter((k) => set(s[k])),
   ];
@@ -181,7 +186,7 @@ export function installCodex(): Check {
   let changed = false;
   // Replace only our own entry, and only when `codex mcp add` can recreate all of it; checkCodex
   // explains anything else.
-  if (!isCurrent(before) && (!before || (ownedByBcu(before) && !unportable(before).length))) {
+  if (!isCurrent(before) && (!before || (ownedByBcu(before) && before.enabled !== false && !unportable(before).length))) {
     if (before) run("codex", ["mcp", "remove", "bcu"]);
     const r = run("codex", addArgs(LAUNCHER, [], before?.transport?.env));
     if (r.code !== 0) {

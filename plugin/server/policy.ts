@@ -87,15 +87,17 @@ export class Policy {
     this.preapproved = (process.env.BCU_APPS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
   }
 
-  /** The file's settings. A missing file is an empty policy; so is a malformed one, but its parse
-   *  error is kept so persistAllow never replaces the user's text with defaults. */
+  /** The file's settings. A missing file is an empty policy; so is an unreadable or malformed one,
+   *  but its error is kept so persistAllow never replaces the user's file with defaults. */
   private load(): PolicyFile {
     this.confError = null;
     let text: string;
     try {
       this.confMtimeMs = fs.statSync(this.file).mtimeMs;
       text = fs.readFileSync(this.file, "utf8");
-    } catch {
+    } catch (e) {
+      // Missing is an empty policy. Anything else (permissions, a directory) is the user's file.
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") this.confError = e instanceof Error ? e.message : String(e);
       return {};
     }
     try {
@@ -208,7 +210,7 @@ export class Policy {
   private persistAllow(key: string) {
     this.conf = this.load(); // another session may have written since we started
     if (this.confError) {
-      throw new Error(`approved for this session only: ${this.file} isn't valid JSON (${this.confError}), so "always" wasn't saved. Fix the file by hand; bcu won't overwrite it.`);
+      throw new Error(`approved for this session only: ${this.file} isn't valid JSON or can't be read (${this.confError}), so "always" wasn't saved. Fix the file by hand; bcu won't overwrite it.`);
     }
     const allow = new Set(this.conf.allow ?? []);
     allow.add(key);

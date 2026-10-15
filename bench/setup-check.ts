@@ -156,7 +156,9 @@ const cloneA = clone("clone A");
   const claudeCmd = plugin?.mcpServers?.computer?.command.replace("${CLAUDE_PLUGIN_ROOT}", plugin.readFromFolder ?? "") ?? "";
   for (const [client, cmd] of [["Claude", claudeCmd], ["Codex", codex.transport.command]] as const) {
     try {
-      await using c = await McpClient.start([cmd], { env: { HOME: homeA, PATH: "/usr/bin:/bin", BCU_AUDIT: "off" }, elicit: "unsupported" });
+      // Overrides from this shell would hide a broken recorded Node or installed driver.
+      const clean = { BCU_NODE: undefined, BCU_CUA_DRIVER: undefined, BCU_APPS: undefined, BCU_POLICY: undefined };
+      await using c = await McpClient.start([cmd], { env: { ...clean, HOME: homeA, PATH: "/usr/bin:/bin", BCU_AUDIT: "off" }, elicit: "unsupported" });
       const { result } = await c.call("js", { code: "return (await cua.windows()).length" }, 30_000);
       check(`clients: ${client}'s registered command answers with PATH=/usr/bin:/bin`, /^\d+$/.test(textOf(result)), textOf(result));
     } catch (e) {

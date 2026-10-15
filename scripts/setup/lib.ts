@@ -36,9 +36,11 @@ export const commandLog: string[] = [];
 
 export type Run = { code: number; stdout: string; stderr: string };
 
-/** Run a command to completion. A missing executable is code 127, like a shell. */
+/** Run a command to completion. A missing executable is code 127, like a shell. The log keeps the
+ *  names of `--env KEY=VALUE` arguments but not their values, which can be secrets. */
 export function run(cmd: string, args: string[], opts: SpawnSyncOptions = {}): Run {
-  commandLog.push([cmd, ...args].map((a) => (/^[\w./:=,@+-]+$/.test(a) ? a : JSON.stringify(a))).join(" "));
+  const shown = args.map((a, i) => (args[i - 1] === "--env" ? `${a.split("=")[0]}=<value>` : a));
+  commandLog.push([cmd, ...shown].map((a) => (/^[\w./:=,@+<>-]+$/.test(a) ? a : JSON.stringify(a))).join(" "));
   const r = spawnSync(cmd, args, { encoding: "utf8", maxBuffer: 64 << 20, ...opts });
   if (r.error) return { code: 127, stdout: "", stderr: r.error.message };
   return { code: r.status ?? 1, stdout: String(r.stdout ?? ""), stderr: String(r.stderr ?? "") };

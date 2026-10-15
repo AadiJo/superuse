@@ -62,6 +62,9 @@ async function main() {
     console.log(`release candidate ${base.tag}:\n${JSON.stringify(manifest, null, 2)}\nRerun with --publish to create the release.`);
     return;
   }
+  // The tag must reproduce the asset: every fingerprint input has to be committed as built.
+  const dirty = run("git", ["-C", REPO, "status", "--porcelain", "--untracked-files=all", "--", "fork/UPSTREAM", "fork/build.sh", "fork/patches"]).stdout.trim();
+  if (dirty) die(`commit the driver's build inputs before publishing:\n${dirty}`);
   const head = run("git", ["-C", REPO, "rev-parse", "HEAD"]).stdout.trim();
   if (run("gh", ["api", `repos/${base.repo}/commits/${head}`, "--silent"]).code !== 0) die(`commit ${head} isn't on GitHub yet; push it first`);
   const created = run("gh", ["release", "create", base.tag, exe, "-R", base.repo, "--target", head, "--title", `cua-driver ${fp.slice(0, 12)}`,

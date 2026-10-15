@@ -23,7 +23,9 @@ function runClient(cmd: string, args: string[], home: string, transcript: string
   return new Promise((resolve) => {
     // Sign-in stays in the real config dirs, named explicitly because HOME no longer points at them.
     const login = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), CODEX_HOME: process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex") };
-    const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...login, HOME: home, MCP_TIMEOUT: "120000" } });
+    // No bcu overrides from this shell: the server must run on what the install recorded.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("BCU_")));
+    const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...env, ...login, HOME: home, MCP_TIMEOUT: "120000" } });
     let out = "";
     proc.stdout.on("data", (d: Buffer) => (out += d));
     proc.stderr.on("data", (d: Buffer) => (out += d));

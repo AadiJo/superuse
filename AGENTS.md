@@ -21,7 +21,7 @@ Finish by telling the user the outcome, what you verified, and anything still wa
 
 ## Working on bcu
 
-- Checks: `node bench/server-check.ts` (sandbox and policy), `node bench/setup-check.ts` (installer, in isolated client config), `npm run typecheck` at the root and in `plugin/server`.
+- Checks: `node bench/server-check.ts` (sandbox and policy), `node bench/ui-check.ts` (window API on fixture windows; sends input, so run it on an idle desktop), `node bench/setup-check.ts` (installer, in isolated client config), `npm run typecheck` at the root and in `plugin/server`.
 - Bump `version` in `plugin/.claude-plugin/plugin.json` whenever the server, skill, launcher, dependencies or driver pin change. The server and setup read it from there.
 - Editing `fork/build.sh`, `fork/UPSTREAM` or `fork/patches/` changes the driver's source fingerprint. Installs then need `--build`, until a maintainer runs `node scripts/release-driver.ts --publish` and commits the new `fork/release.json`.
 - Agent sessions export `CLAUDE_CONFIG_DIR`, which beats `HOME`. A test that only changes `HOME` edits the user's real Claude config. Set `CLAUDE_CONFIG_DIR` and `CODEX_HOME` too, as `bench/setup-check.ts` does.

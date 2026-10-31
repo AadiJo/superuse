@@ -136,6 +136,7 @@ const rowIndex = (line: string) => Number(line.match(/\[(\d+)\]/)?.[1] ?? NaN);
 export class Desktop {
   out: RunOutput = { images: [], notes: new Set() };
   private lastActionAt = 0;
+  private readonly readWindows = new Set<number>(); // windows whose tree this session has read
   private readonly bindings = new Map<number, Promise<Win>>();
   private readonly pages = new Map<number, Promise<Page>>();
   readonly driver: Driver;
@@ -150,6 +151,15 @@ export class Desktop {
   note(text: string) { this.out.notes.add(text); }
   markAction() { this.lastActionAt = Date.now(); }
   get recentlyActed() { return Date.now() - this.lastActionAt < SETTLE_AFTER_ACTION_MS; }
+
+  /** True the first time a window's tree is read this session. Chromium (browsers, Electron apps)
+   *  builds a page's tree only once a UIA client connects: the first read of a cold Edge window
+   *  returned its own chrome, 20 rows, and the next read 0.1 s later all 141. */
+  firstRead(windowId: number) {
+    if (this.readWindows.has(windowId)) return false;
+    this.readWindows.add(windowId);
+    return true;
+  }
 
   /** Entry point for every sandbox call: `cua.*` and `w.*` methods with JSON arguments. */
   async dispatch(method: string, args: unknown[]): Promise<unknown> {
@@ -428,15 +438,17 @@ class Win {
     return { r, tree: r.data.tree_markdown ?? r.data.diff_markdown ?? r.text };
   }
 
-  /** Accessibility tree as compact text; rows tagged [N] are actionable. Right after an action it
-   *  re-reads until two reads match (UI settled), so model code never needs to sleep. */
+  /** Accessibility tree as compact text; rows tagged [N] are actionable. Right after an action, and
+   *  on a window's first read, it re-reads until two reads match (UI settled), so model code never
+   *  needs to sleep. */
   async state(opts: StateOpts = {}): Promise<string> {
     // "a|b" means any of several substrings: read the whole tree and filter rows here.
     const multi = opts.query?.includes("|")
       ? new RegExp(opts.query.split("|").map((q) => q.trim().replace(/[.*+?^${}()[\]\\]/g, "\\$&")).join("|"), "i") : null;
     const readOpts = { ...opts, query: multi ? undefined : opts.query };
+    const first = this.d.firstRead(this.id);
     let cur = await this.read(readOpts);
-    if (this.d.recentlyActed && !opts.diff) {
+    if ((first || this.d.recentlyActed) && !opts.diff) {
       const end = Date.now() + SETTLE_CAP_MS;
       while (Date.now() < end) {
         await sleep(SETTLE_POLL_MS);

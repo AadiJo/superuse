@@ -206,8 +206,10 @@ document.getElementById('f').addEventListener('submit', e => {
 /** Edge in a throwaway profile under %TEMP%\bcu. Chromium hides a page's accessibility tree while
  * its window is covered by another one (occlusion tracking), so without these flags a task
  * depended on what the user had on top. Teardown kills this Edge, so the profile is marked as
- * cleanly exited first; otherwise Edge opens a "Restore pages" bubble as an extra window. */
-async function openEdge(url: string): Promise<void> {
+ * cleanly exited first; otherwise Edge opens a "Restore pages" bubble as an extra window.
+ * `forceAccessibility: false` leaves the page's tree unbuilt until a UIA client connects, as in a
+ * user's own browser or Electron app. */
+async function openEdge(url: string, { forceAccessibility = true } = {}): Promise<void> {
   const prefs = path.join(WSL_TEMP, "edge-profile", "Default", "Preferences");
   if (existsSync(prefs)) {
     const data: { profile?: object } = JSON.parse(readFileSync(prefs, "utf8"));
@@ -216,7 +218,8 @@ async function openEdge(url: string): Promise<void> {
   }
   await start(EDGE, `--user-data-dir=${WIN_TEMP}\\edge-profile`, "--no-first-run", "--no-default-browser-check",
     "--hide-crash-restore-bubble",
-    "--force-renderer-accessibility", "--disable-features=CalculateNativeWinOcclusion,msEdgeWelcomePage,msImplicitSignin",
+    ...(forceAccessibility ? ["--force-renderer-accessibility"] : []),
+    "--disable-features=CalculateNativeWinOcclusion,msEdgeWelcomePage,msImplicitSignin",
     "--new-window", url);
   await sleep(4000);
 }
@@ -224,10 +227,10 @@ async function openEdge(url: string): Promise<void> {
 const fileUrl = (winPath: string) => "file:///" + winPath.replaceAll("\\", "/");
 
 /** Write `html` as <task folder>/form.html and open it in the throwaway Edge. */
-export async function openFormPage(taskId: string, html: string): Promise<void> {
+export async function openFormPage(taskId: string, html: string, opts?: { forceAccessibility?: boolean }): Promise<void> {
   const dir = taskDir(taskId);
   writeFileSync(path.join(dir.wsl, "form.html"), html);
-  await openEdge(fileUrl(`${dir.win}\\form.html`));
+  await openEdge(fileUrl(`${dir.win}\\form.html`), opts);
 }
 
 /** Pass when some bench Edge window's title shows the form was submitted with `want`. */

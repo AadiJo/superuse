@@ -40,8 +40,8 @@ Headless runs (`claude -p`) can't show prompts. Pre-approve apps there with `BCU
 | `plugin/` | The Claude Code plugin: `server/` (MCP server), `skills/computer-use/`, `driver/` (built exe, not in git) |
 | `fork/` | Our Cua Driver fork: upstream pin, patches, build script, release pin, notes, live acceptance checks |
 | `scripts/` | `install.sh`, `doctor.sh` and the setup they run; `release-driver.ts` publishes a driver build |
-| `bench/` | End-to-end benchmark on the real desktop, plus `server-check.ts` for the sandbox and policy |
+| `bench/` | End-to-end benchmark on the real desktop, plus `server-check.ts` for the sandbox and policy and `ui-check.ts` for the window API |
 | `research/` | Research reports (`00-synthesis.md` first) and experiment results (`08-experiments.md`) |
 | `proto/` | Archived front ends measured in rounds 1 and 2 |
 
-Server checks: `node bench/server-check.ts` (sandbox and policy, read-only on the desktop). Setup checks: `node bench/setup-check.ts` (fresh clones in isolated client config). Driver checks: `node fork/acceptance.ts`. Codex app baseline: `bench/codex_app_wizard.sh`. Type check: `npm run typecheck` in `plugin/server`, and at the repo root for the `bench/` and `fork/` scripts.
+Server checks: `node bench/server-check.ts` (sandbox and policy, read-only on the desktop) and `node bench/ui-check.ts` (the window API on fixture windows; sends input, so keep the desktop idle). Setup checks: `node bench/setup-check.ts` (fresh clones in isolated client config). Driver checks: `node fork/acceptance.ts`. Codex app baseline: `bench/codex_app_wizard.sh`. Type check: `npm run typecheck` in `plugin/server`, and at the repo root for the `bench/` and `fork/` scripts.

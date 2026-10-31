@@ -124,6 +124,20 @@ return [before, await w.state({diff: true})];`);
     const email = before.match(/\[(\d+)\] Edit "Email"/)?.[1];
     check("a diff read adds the new row and keeps old numbers", !r.error && /^\+ .*Edit "Note"/m.test(diff) && !!email && !new RegExp(`Edit "Email"`).test(diff) && before.includes(`[${email}] Edit "Email"`), diff);
   },
+  // The driver searches up to 5,000 elements for a query, against 250 for a plain read. Reading the
+  // whole tree to number it must keep that reach: find() of a field past element 250 found nothing.
+  async deep_query() {
+    const buttons = Array.from({ length: 400 }, (_, i) => `<button type="button">Filler ${i}</button>`).join("");
+    const hwnd = await edgePage("Deep form", `<!doctype html><title>Deep form</title><form>${buttons}<label>Needle <input id="needle"></label></form>`);
+    await using c = await server();
+    const r = await js(c, `const w = await cua.window({id: ${hwnd}});
+const n = await w.find("Needle", "Edit");
+const t0 = Date.now();
+await w.setValue(n, "found");
+const rows = await w.state({query: "Needle"});
+return {n, rows, ms: Date.now() - t0};`);
+    check("find() and query reads reach past the plain read's 250 elements", !r.error && r.text.includes('value=\\"found\\"'), r.text);
+  },
   // Chromium builds a page's accessibility tree only after the first UIA client connects. In a
   // browser or Electron app launched without --force-renderer-accessibility, the first read used
   // to return the browser's own chrome (20 rows) and no page; a read 0.1 s later had all of it.

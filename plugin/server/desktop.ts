@@ -12,6 +12,7 @@ import { sleep, trace, type Args, type BrowserTab, type Driver, type DriverResul
 import { appOf, type App, type Policy } from "./policy.ts";
 
 const SHOT_MAX = 1200; // long edge; inside Claude's no-rescale box for common window shapes
+const SEARCH_MAX = 5_000; // the driver's walk budget for a query read (uia::DEFAULT_MAX_TOTAL_ELEMENTS), against 250 otherwise
 const SETTLE_AFTER_ACTION_MS = 2_000; // reads this soon after an action wait for the tree to stop changing
 const SETTLE_CAP_MS = 1_500;
 const SETTLE_POLL_MS = 100;
@@ -532,10 +533,11 @@ class Win {
 
   /** One full read of the window, with this session's element numbers. A query filters the rows
    *  afterwards (filterTree): the driver walks the whole tree either way, and only full reads tell
-   *  which elements are still there. */
-  private async read(opts: { max?: number; screenshot?: boolean }) {
+   *  which elements are still there. A read made for a query (`search`) walks as far as the
+   *  driver's own query reads do. */
+  private async read(opts: { max?: number; screenshot?: boolean; search?: boolean }) {
     const r = await this.d.driver.call("get_window_state", {
-      pid: this.pid, window_id: this.id, max_elements: opts.max ?? 250,
+      pid: this.pid, window_id: this.id, max_elements: opts.search ? Math.max(opts.max ?? 0, SEARCH_MAX) : opts.max ?? 250,
       include_screenshot: !!opts.screenshot, max_image_dimension: opts.screenshot ? SHOT_MAX : undefined,
     });
     if (r.isError) fail(r, "state");
@@ -551,7 +553,7 @@ class Win {
    *  connects: the first read of a cold Edge window returned its own chrome, 20 rows, and the next
    *  read 0.1 s later all 141. */
   async state(opts: StateOpts = {}): Promise<string> {
-    const readOpts = { max: opts.max, screenshot: opts.screenshot };
+    const readOpts = { max: opts.max, screenshot: opts.screenshot, search: !!opts.query };
     const first = this.tree.snapshot === null;
     let cur = await this.read(readOpts);
     if (first || this.d.recentlyActed) {
@@ -738,7 +740,7 @@ class Win {
   async waitFor(text: string, timeoutMs: number): Promise<string> {
     const end = Date.now() + timeoutMs;
     for (;;) {
-      const { r, tree } = await this.read({});
+      const { r, tree } = await this.read({ search: true });
       const rows = filterTree(tree, text);
       if (rows) return `window ${this.id} "${r.data.window_title ?? this.title}"\n${rows}`;
       if (Date.now() > end) throw new Error(`waitFor("${text}") timed out after ${timeoutMs} ms`);

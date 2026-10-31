@@ -32,9 +32,9 @@ cua.windows(filter?)            -> approved windows as {id, pid, app, title, min
 cua.window("TestPad" | {pid,id,title,app}) -> Window  (binding an app that isn't approved asks the user)
 cua.open("Calculator" | "C:\\\\path\\\\app.exe") -> Window  (launch in the background)
 
-w.state({query?, diff?, max?, screenshot?}) -> string  accessibility tree; rows tagged [N] are actionable; query "a|b" matches either
+w.state({query?, diff?, max?, screenshot?}) -> string  accessibility tree; rows tagged [N] are actionable; query "a|b" matches either; diff lists rows added (+), changed (~) and removed (-) since the last state()
 w.find("Save", role?)                        -> N | null  best match by element name (exact first); role like "Button"
-w.click(N | [x, y], {double?, right?})       element N from the latest state(), or pixels in the latest screenshot; a list item is selected, {double: true} opens it
+w.click(N | [x, y], {double?, right?})       element N from state() or find(), or pixels in the latest screenshot; a list item is selected, {double: true} opens it
 w.setValue(N, "text")                        set a text box value directly (fastest way to enter text)
 w.select(N, "Pro")                           choose an option in combo box N (verified)
 w.type("text", N?)                           type at the focus, or into element N
@@ -55,7 +55,7 @@ Refs come from the latest p.read() of that tab. Work in a tab you opened, unless
 Input goes to the target window in the background: the user's mouse and focus are not touched. Minimized windows work too (screenshots and pixel clicks don't); leave them minimized.
 If an action is refused in the background, click/type/key/drag/menu accept {foreground: true}, which briefly takes focus and the real cursor; the user may be asked first. Use it only when setValue/select can't do the job.
 Don't sleep: state(), find() and waitFor() already wait for the UI to settle after actions.
-Element numbers come from the most recent state() of that window; call state() again after the UI changes.
+An element keeps its number across reads of its window, in later calls too. A number whose element has left the window is refused; read state() again and use the numbers it shows.
 If an action opens a dialog, the result notes the new window; bind it with cua.window({pid: w.pid, title: "..."}).
 Terminals, password managers and security prompts are off limits. Never type secrets you see on screen into other apps.
 

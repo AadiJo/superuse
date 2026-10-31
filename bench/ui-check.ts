@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { McpClient, textOf } from "./mcp-client.ts";
-import { openFormPage } from "./tasks.ts";
-import { killBenchEdge, listWindows, timestamp } from "./win.ts";
+import { editAppendSetup, openFormPage } from "./tasks.ts";
+import { killBenchEdge, killTestPad, listWindows, timestamp } from "./win.ts";
 
 const REPO = path.dirname(import.meta.dirname);
 const SERVER = [path.join(REPO, "plugin/server/run.sh")];
@@ -26,7 +26,7 @@ function check(name: string, ok: boolean, detail: string) {
 }
 
 const policy = path.join(mkdtempSync(path.join(tmpdir(), "bcu-")), "policy.json");
-writeFileSync(policy, JSON.stringify({ allow: ["msedge"], foreground: "deny" }));
+writeFileSync(policy, JSON.stringify({ allow: ["msedge", "TestPad"], foreground: "deny" }));
 
 async function js(c: McpClient, code: string): Promise<{ text: string; error: boolean }> {
   const { result } = await c.call("js", { code }, 90_000);
@@ -45,14 +45,92 @@ async function edgePage(title: string, html: string, forceAccessibility = true):
   throw new Error(`no Edge window titled ${title}`);
 }
 
+/** A form whose buttons change the tree above and inside it. The title reports each field. */
+const SHIFTING_FORM = `<!doctype html><title>Shift form</title><form><div id="top"></div>
+<label id="name-row">Name <input id="name"></label><label id="email-row">Email <input id="email"></label>
+<button type="button" onclick="addNote()">Add note</button>
+<button type="button" onclick="document.getElementById('email-row').remove()">Remove email</button></form><script>
+function addNote() { const l = document.createElement('label'); l.innerHTML = 'Note <input id="note">'; document.getElementById('top').appendChild(l); }
+const v = id => document.getElementById(id)?.value ?? '-';
+setInterval(() => document.title = 'Shift form name=' + v('name') + '|email=' + v('email') + '|note=' + v('note'), 100);
+</script>`;
+
+/** The title of the bench Edge window showing SHIFTING_FORM, a moment after the last input. */
+async function formTitle(): Promise<string> {
+  await sleep(400);
+  return (await listWindows(true)).find((w) => w.proc === "msedge" && w.title.startsWith("Shift form"))?.title ?? "";
+}
+
+const server = () => McpClient.start(SERVER, { env: { BCU_POLICY: policy, BCU_AUDIT: "off" }, elicit: "unsupported" });
+
 const CASES: Record<string, () => Promise<void>> = {
+  // The driver numbers rows anew in each snapshot. A number read before the tree grew used to land
+  // on whatever row took its place: setValue(Email) wrote into Name once a field appeared above.
+  async shifted_tree() {
+    const hwnd = await edgePage("Shift form", SHIFTING_FORM);
+    await using c = await server();
+    const r = await js(c, `const w = await cua.window({id: ${hwnd}});
+const email = await w.find("Email", "Edit");
+await w.click(await w.find("Add note", "Button"));
+await w.state();
+await w.setValue(email, "x@example.com");
+return email;`);
+    const title = await formTitle();
+    check("a number keeps its element after the tree changes", !r.error && title.includes("email=x@example.com|"), `${r.text} | ${title}`);
+  },
+  // A number whose element left the window must be refused, not sent to whatever has that number now.
+  async removed_element() {
+    const hwnd = await edgePage("Shift form", SHIFTING_FORM);
+    await using c = await server();
+    const r = await js(c, `const w = await cua.window({id: ${hwnd}});
+const email = await w.find("Email", "Edit");
+await w.click(await w.find("Remove email", "Button"));
+await w.state();
+await w.setValue(email, "x@example.com");`);
+    const title = await formTitle();
+    check("a number whose element is gone is refused", r.error && /no longer/.test(r.text) && !title.includes("x@example.com"), `${r.text} | ${title}`);
+  },
+  // Models rebind the window in each js call. Numbers kept from an earlier call must still work.
+  async rebound_window() {
+    const hwnd = await edgePage("Shift form", SHIFTING_FORM);
+    await using c = await server();
+    await js(c, `globalThis.name = await (await cua.window({id: ${hwnd}})).find("Name", "Edit")`);
+    const r = await js(c, `await (await cua.window({id: ${hwnd}})).setValue(name, "Ada")`);
+    const title = await formTitle();
+    check("numbers survive rebinding the window", !r.error && title.includes("name=Ada|"), `${r.text} | ${title}`);
+  },
+  // TestPad's editor value spans lines ("first line\r\nsecond line..."). A row the renumbering
+  // didn't recognize kept the driver's [0] while 0 went to another row, so setValue(editor) hit File.
+  async multiline_value() {
+    await killTestPad();
+    await editAppendSetup();
+    await using c = await server();
+    const r = await js(c, `const w = await cua.window("TestPad");
+const ed = await w.find("Text editor", "Edit");
+await w.setValue(ed, "replaced");
+return await w.state({query: "Text editor"});`);
+    await killTestPad();
+    check("a row whose value spans lines keeps its number", !r.error && r.text.includes('value="replaced"'), r.text);
+  },
+  // A diff read lists what changed under the numbers the model already has.
+  async diff_read() {
+    const hwnd = await edgePage("Shift form", SHIFTING_FORM);
+    await using c = await server();
+    const r = await js(c, `const w = await cua.window({id: ${hwnd}});
+const before = await w.state();
+await w.click(await w.find("Add note", "Button"));
+return [before, await w.state({diff: true})];`);
+    const [before, diff] = r.text.startsWith("[") ? JSON.parse(r.text) as string[] : ["", ""];
+    const email = before.match(/\[(\d+)\] Edit "Email"/)?.[1];
+    check("a diff read adds the new row and keeps old numbers", !r.error && /^\+ .*Edit "Note"/m.test(diff) && !!email && !new RegExp(`Edit "Email"`).test(diff) && before.includes(`[${email}] Edit "Email"`), diff);
+  },
   // Chromium builds a page's accessibility tree only after the first UIA client connects. In a
   // browser or Electron app launched without --force-renderer-accessibility, the first read used
   // to return the browser's own chrome (20 rows) and no page; a read 0.1 s later had all of it.
   async cold_chromium() {
     const fields = Array.from({ length: 40 }, (_, i) => `<label>Field ${i} <input></label>`).join("");
     const hwnd = await edgePage("Cold page", `<!doctype html><title>Cold page</title><form>${fields}</form>`, false);
-    await using c = await McpClient.start(SERVER, { env: { BCU_POLICY: policy, BCU_AUDIT: "off" }, elicit: "unsupported" });
+    await using c = await server();
     const r = await js(c, `return await (await cua.window({id: ${hwnd}})).state({max: 1000})`);
     check("a window's first read shows a page Chromium hadn't built yet", !r.error && r.text.includes('Edit "Field 39"'), r.text);
   },

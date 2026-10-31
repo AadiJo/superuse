@@ -131,12 +131,119 @@ const PIXEL_ROUTES: Record<string, string> = {
 const KEY_ALIASES: Record<string, string> = { enter: "return", esc: "escape", del: "delete", ctl: "ctrl", control: "ctrl", win: "cmd" };
 const rowIndex = (line: string) => Number(line.match(/\[(\d+)\]/)?.[1] ?? NaN);
 
+/** Rows matching `query` (case-insensitive) with their ancestors for context, as the driver's own
+ *  query filter returns them. "a|b" matches either, and keeps only the matching rows. */
+function filterTree(tree: string, query: string): string {
+  const lines = tree.split("\n").filter(Boolean);
+  if (query.includes("|")) {
+    const any = new RegExp(query.split("|").map((q) => q.trim().replace(/[.*+?^${}()[\]\\]/g, "\\$&")).join("|"), "i");
+    return lines.filter((l) => any.test(l)).join("\n");
+  }
+  const needle = query.toLowerCase();
+  const ancestors: string[] = []; // the latest row at each depth
+  const out: string[] = [];
+  const emitted = new Set<string>();
+  for (const line of lines) {
+    const depth = Math.floor((line.length - line.trimStart().length) / 2);
+    ancestors.length = depth;
+    ancestors[depth] = line;
+    if (!line.toLowerCase().includes(needle)) continue;
+    for (const a of ancestors.slice(0, depth)) if (a && !emitted.has(a)) { emitted.add(a); out.push(a); }
+    emitted.add(line);
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+/** One window's element numbers, kept by Desktop so they outlive a binding. The driver numbers the
+ *  rows of each snapshot from scratch, so after the tree changes its [N] can name another element:
+ *  setValue(Email) wrote into Name once a field appeared above it. The model sees these numbers
+ *  instead. An element keeps its number across reads, matched by the identity the driver's own row
+ *  diff uses (depth, role, and automation id or else label), and a number is never reused. A number
+ *  whose element is missing from the latest read is refused instead of landing on another element;
+ *  it works again if the element comes back. If the count of rows sharing an identity changes,
+ *  their old numbers are retired, since order alone can't say which one is which. */
+class WindowTree {
+  snapshot: string | null = null; // the driver snapshot that `index` points into
+  private next = 0;
+  private readonly byIdentity = new Map<string, number[]>(); // in tree order
+  private index = new Map<number, number>(); // number -> the driver's row index in `snapshot`
+  private rows = new Map<number, string>(); // number -> "[N] Role ..." in `snapshot`
+  private readonly lastSeen = new Map<number, string>(); // every number handed out -> its latest row
+  private shown = new Map<number, string>(); // rows of the last state() returned, for diff reads
+
+  /** Renumber one full read (snapshot `snapshot`, the driver's Markdown) and return it. */
+  update(snapshot: string, tree: string): string {
+    const lines = tree.split("\n");
+    const groups = new Map<string, number[]>(); // identity -> line numbers
+    lines.forEach((line, k) => {
+      const m = line.match(ROW);
+      if (!m) return;
+      const identity = identityOf(m[1].length, m[3]);
+      groups.set(identity, [...(groups.get(identity) ?? []), k]);
+    });
+    const numbers = new Map<number, number>(); // line number -> element number
+    for (const [identity, at] of groups) {
+      let mine = this.byIdentity.get(identity) ?? [];
+      if (mine.length !== at.length) this.byIdentity.set(identity, (mine = at.map(() => this.next++)));
+      at.forEach((k, j) => numbers.set(k, mine[j]));
+    }
+    this.snapshot = snapshot;
+    this.index = new Map();
+    this.rows = new Map();
+    return lines.map((line, k) => {
+      const n = numbers.get(k);
+      const m = line.match(ROW);
+      if (n === undefined || !m) return line;
+      this.index.set(n, Number(m[2]));
+      this.rows.set(n, `[${n}] ${m[3]}`);
+      this.lastSeen.set(n, `[${n}] ${m[3]}`);
+      return `${m[1]}- [${n}] ${m[3]}`;
+    }).join("\n");
+  }
+
+  /** The driver's row index for element `n` in the latest snapshot. */
+  resolve(n: number): number {
+    const i = this.index.get(n);
+    if (i !== undefined) return i;
+    const was = this.lastSeen.get(n);
+    if (was) throw new Error(`element ${n} (${was.replace(/^\[\d+\] /, "").replace(/ \[.*$/, "")}) is no longer in this window's latest read; read state() again and use its numbers`);
+    throw new Error(`no element ${n} in this window; use a number from state() or find()`);
+  }
+
+  row(n: number) { return this.rows.get(n); }
+
+  /** Rows added (+), changed (~) and removed (-) since the last state() returned; null on the first. */
+  diff(): string | null {
+    if (!this.shown.size) return null;
+    const out: string[] = [];
+    for (const [n, row] of this.rows) if (this.shown.get(n) !== row) out.push(`${this.shown.has(n) ? "~" : "+"} ${row}`);
+    for (const [n, row] of this.shown) if (!this.rows.has(n)) out.push(`- ${row}`);
+    return out.join("\n");
+  }
+
+  markShown() { this.shown = new Map(this.rows); }
+}
+
+/** An actionable row of the driver's Markdown: indentation, the driver's index, the rest. `s`: a
+ *  value with Windows line breaks leaves a \r on the row's first line, which `.` won't match. */
+const ROW = /^(\s*)- \[(\d+)\] (.*)$/s;
+
+/** The driver's row identity (cua-driver-core window_state_view.rs identity_of): depth, role, and
+ *  automation id or else the quoted label right after the role. Values change, so they're left out. */
+function identityOf(indent: number, rest: string): string {
+  const role = rest.split(/\s/, 1)[0];
+  const id = rest.match(/\bid=([^\s\]]+)/)?.[1];
+  const label = rest.slice(role.length).trimStart().match(/^"([^"]*)"/)?.[1];
+  return `${indent}|${role}|${id ?? label ?? ""}`;
+}
+
 // --- Desktop: windows, binding, dispatch ---
 
 export class Desktop {
   out: RunOutput = { images: [], notes: new Set() };
   private lastActionAt = 0;
-  private readonly readWindows = new Set<number>(); // windows whose tree this session has read
+  private readonly trees = new Map<number, WindowTree>(); // by window id, so rebinding keeps them
   private readonly bindings = new Map<number, Promise<Win>>();
   private readonly pages = new Map<number, Promise<Page>>();
   readonly driver: Driver;
@@ -152,13 +259,11 @@ export class Desktop {
   markAction() { this.lastActionAt = Date.now(); }
   get recentlyActed() { return Date.now() - this.lastActionAt < SETTLE_AFTER_ACTION_MS; }
 
-  /** True the first time a window's tree is read this session. Chromium (browsers, Electron apps)
-   *  builds a page's tree only once a UIA client connects: the first read of a cold Edge window
-   *  returned its own chrome, 20 rows, and the next read 0.1 s later all 141. */
-  firstRead(windowId: number) {
-    if (this.readWindows.has(windowId)) return false;
-    this.readWindows.add(windowId);
-    return true;
+  /** What this session knows about a window's tree: its latest snapshot and element numbers. */
+  tree(windowId: number): WindowTree {
+    let t = this.trees.get(windowId);
+    if (!t) this.trees.set(windowId, (t = new WindowTree()));
+    return t;
   }
 
   /** Entry point for every sandbox call: `cua.*` and `w.*` methods with JSON arguments. */
@@ -409,8 +514,6 @@ function matchesApp(w: DriverWindow, q: WindowQuery): boolean {
 // --- One bound window ---
 
 class Win {
-  private snapshot: string | null = null;
-  private lastTree = "";
   private hasFrame = false; // did the latest read include a screenshot? Pixel actions map through it.
   private frameSize: { w: number; h: number } | null = null; // pixel size of that screenshot
   private readonly d: Desktop;
@@ -425,30 +528,33 @@ class Win {
 
   info(): WindowInfo { return { pid: this.pid, id: this.id, app: this.app.label, title: this.title }; }
 
-  private async read(opts: StateOpts) {
+  private get tree() { return this.d.tree(this.id); }
+
+  /** One full read of the window, with this session's element numbers. A query filters the rows
+   *  afterwards (filterTree): the driver walks the whole tree either way, and only full reads tell
+   *  which elements are still there. */
+  private async read(opts: { max?: number; screenshot?: boolean }) {
     const r = await this.d.driver.call("get_window_state", {
-      pid: this.pid, window_id: this.id, query: opts.query, max_elements: opts.max ?? 250,
-      since: opts.diff && this.snapshot ? this.snapshot : undefined,
+      pid: this.pid, window_id: this.id, max_elements: opts.max ?? 250,
       include_screenshot: !!opts.screenshot, max_image_dimension: opts.screenshot ? SHOT_MAX : undefined,
     });
     if (r.isError) fail(r, "state");
-    this.snapshot = r.data.snapshot_id ?? this.snapshot;
     this.hasFrame = !!opts.screenshot;
     if (opts.screenshot) this.noteFrame(r);
-    return { r, tree: r.data.tree_markdown ?? r.data.diff_markdown ?? r.text };
+    const raw = r.data.tree_markdown ?? r.text;
+    return { r, tree: r.data.snapshot_id ? this.tree.update(r.data.snapshot_id, raw) : raw };
   }
 
   /** Accessibility tree as compact text; rows tagged [N] are actionable. Right after an action, and
    *  on a window's first read, it re-reads until two reads match (UI settled), so model code never
-   *  needs to sleep. */
+   *  needs to sleep. Chromium (browsers, Electron apps) builds a page's tree only once a UIA client
+   *  connects: the first read of a cold Edge window returned its own chrome, 20 rows, and the next
+   *  read 0.1 s later all 141. */
   async state(opts: StateOpts = {}): Promise<string> {
-    // "a|b" means any of several substrings: read the whole tree and filter rows here.
-    const multi = opts.query?.includes("|")
-      ? new RegExp(opts.query.split("|").map((q) => q.trim().replace(/[.*+?^${}()[\]\\]/g, "\\$&")).join("|"), "i") : null;
-    const readOpts = { ...opts, query: multi ? undefined : opts.query };
-    const first = this.d.firstRead(this.id);
+    const readOpts = { max: opts.max, screenshot: opts.screenshot };
+    const first = this.tree.snapshot === null;
     let cur = await this.read(readOpts);
-    if ((first || this.d.recentlyActed) && !opts.diff) {
+    if (first || this.d.recentlyActed) {
       const end = Date.now() + SETTLE_CAP_MS;
       while (Date.now() < end) {
         await sleep(SETTLE_POLL_MS);
@@ -460,11 +566,14 @@ class Win {
       if (opts.screenshot) cur = await this.read(readOpts); // fresh frame bound to the final snapshot
     }
     this.d.out.images.push(...cur.r.images);
-    this.lastTree = cur.tree;
     const d = cur.r.data;
-    const head = `window ${this.id} "${d.window_title ?? this.title}" (${d.returned_element_count ?? "?"}/${d.total_element_count ?? "?"} rows${d.truncated ? ", truncated: pass max or query" : ""})`;
-    const tree = multi ? cur.tree.split("\n").filter((l) => multi.test(l)).join("\n") : cur.tree;
-    return `${head}\n${tree}`;
+    const changes = opts.diff ? this.tree.diff() : null;
+    this.tree.markShown();
+    const body = changes ?? cur.tree;
+    const tree = opts.query ? filterTree(body, opts.query) : body;
+    const rows = opts.query || changes !== null ? tree.split("\n").filter(Boolean).length : d.returned_element_count ?? "?";
+    const head = `window ${this.id} "${d.window_title ?? this.title}" (${rows}/${d.total_element_count ?? "?"} rows${d.truncated ? ", truncated: pass max or query" : ""})`;
+    return `${head}\n${tree || (changes ? "no change since the last read" : "")}`;
   }
 
   /** Element number of the best row for `text` (and `role`), from a fresh read. Ranks by the
@@ -472,7 +581,7 @@ class Win {
    *  picked `Memory add [id=MemPlus]` for "Plus". */
   async find(text: string, role?: string): Promise<number | null> {
     const want = text.toLowerCase();
-    // The driver's query output keeps ancestor rows (e.g. the window's Close button) for context.
+    // Query output keeps ancestor rows (e.g. the window's Close button) for context.
     const rows = (await this.state({ query: text })).split("\n").slice(1).filter((l) => /\[\d+\]/.test(l));
     const rank = (l: string) => {
       const m = l.match(/\[\d+\]\s+(\S+)(?:\s+"([^"]*)")?/);
@@ -485,9 +594,10 @@ class Win {
     return best ? rowIndex(best) : null;
   }
 
-  private token(i: number): string {
-    if (!this.snapshot) throw new Error("call state() on this window before using element numbers");
-    return `${this.snapshot}:${i}`;
+  private token(n: number): string {
+    const { snapshot } = this.tree;
+    if (!snapshot) throw new Error("call state() on this window before using element numbers");
+    return `${snapshot}:${this.tree.resolve(n)}`;
   }
 
   private async delivery(opts: InputOpts): Promise<"foreground" | undefined> {
@@ -525,9 +635,9 @@ class Win {
     }
   }
 
-  /** Role of row `i` in the last tree shown, e.g. "ListItem". */
-  private roleOf(i: number): string | undefined {
-    return this.lastTree.split("\n").find((l) => rowIndex(l) === i)?.match(/\[\d+\]\s+(\S+)/)?.[1];
+  /** Role of element `n` in the latest read, e.g. "ListItem". */
+  private roleOf(n: number): string | undefined {
+    return this.tree.row(n)?.match(/\[\d+\]\s+(\S+)/)?.[1];
   }
 
   async click(target: number | [number, number], opts: ClickOpts = {}) {
@@ -557,7 +667,7 @@ class Win {
 
   /** Choose `option` in combo box N and verify it took. */
   async select(i: number, option: string) {
-    const label = this.lastTree.split("\n").find((l) => rowIndex(l) === i)?.match(/"([^"]*)"/)?.[1];
+    const label = this.tree.row(i)?.match(/"([^"]*)"/)?.[1];
     await this.setValue(i, option);
     const check = async () => {
       const rows = (await this.state(label ? { query: label } : {})).split("\n");
@@ -628,11 +738,9 @@ class Win {
   async waitFor(text: string, timeoutMs: number): Promise<string> {
     const end = Date.now() + timeoutMs;
     for (;;) {
-      const { r, tree } = await this.read({ query: text });
-      if (tree.toLowerCase().includes(text.toLowerCase())) {
-        this.lastTree = tree;
-        return `window ${this.id} "${r.data.window_title ?? this.title}"\n${tree}`;
-      }
+      const { r, tree } = await this.read({});
+      const rows = filterTree(tree, text);
+      if (rows) return `window ${this.id} "${r.data.window_title ?? this.title}"\n${rows}`;
       if (Date.now() > end) throw new Error(`waitFor("${text}") timed out after ${timeoutMs} ms`);
       await sleep(150);
     }

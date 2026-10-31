@@ -27,7 +27,7 @@ The task is done when the postcondition is observed, not when the last action re
 ## When an action is refused
 
 - `background_unavailable`: switch to `setValue`/`select` if the target is a field; otherwise retry the one action with `{foreground: true}`, which briefly takes the real cursor and focus (the user may be asked).
-- Stale or missing element numbers: read `state()` again; numbers belong to the latest read of that window.
+- An element number refused as no longer in the window: its element went away (a dialog closed, a list changed). Read `state()` again and use the numbers it shows.
 - Empty tree: `w.screenshot()`, then `w.click([x, y])` in that image's pixels.
 - A policy or user refusal: tell the user what was refused and why, and stop. Approvals belong to the user.
 

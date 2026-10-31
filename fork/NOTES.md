@@ -353,3 +353,22 @@ The prompt fix exposed another bug. When an attempt fails, its prompt stays open
 - The bounds conversion was only verified with the taskbar at the bottom, where workspace and screen coordinates are the same.
 - The foreground hand-back presses `VK_NONAME` once. It has no meaning to applications, but it is global input.
 - Two attaches at the same moment both fail (see above). The plugin's sessions don't retry on their own.
+
+## Fork v8: the agent cursor stays on its window
+
+A user saw the agent cursor clicking around on top of a full-screen app while the plugin worked in a window behind it. The overlay is one full-screen layered window, pinned one z-slot above the window a cursor drives (`WinZOrderEnforcer`). That pin only moves while the overlay is rendering. It never stopped the overlay from painting over the desktop and windows around the target either. Patch 0025 clips each pinned cursor to the part of its window the user can see, independent of z-order.
+
+- `visible_rects` takes the window's DWM frame and subtracts every window above it that covers it. A window is empty when it's hidden, minimized or cloaked.
+- These don't cover: click-through windows (`WS_EX_TRANSPARENT`, which includes the overlay itself), layered no-activate overlays (the NVIDIA overlay spans the screen and isn't click-through), windows the target owns, and windows of the target's process without a taskbar button (menus, drop-downs). A second top-level window of the same process, like another browser window made full screen, still covers.
+- `composite_dirty` paints each cursor and then clears its pixels outside those rects (`clear_outside`).
+- The clip is recomputed every tick while a pinned cursor is showing, and the overlay re-renders when it changes. A resting cursor stays up for 15 s, so the render loop now holds the 80 ms hover cadence while one is visible, instead of only while animating.
+
+`fork/acceptance.ts cursorclip` counts cursor pixels in screen captures around two MenuPads, A (the target) and B (raised above part of A). The release driver (`driver-5191203803d6`) fails it: 131 cursor pixels below A's bottom edge and 7 on B's border (`acceptance-20261030-180453.json`). This build passes: 0 and 0, with the cursor still drawn on A's visible part (`acceptance-20261030-180506.json`, and the PNGs beside it). With A fully covered by B, both builds draw 0, so I haven't reproduced the full-screen report itself. Clicks on a minimized window are refused before the cursor moves, so that isn't it either.
+
+`fork/acceptance.ts cursoroverlay` tests the case as reported: bcu works in a MenuPad (A) in the background, through the plugin server, while other windows start to cover it. B slides over the resting cursor, bcu keeps clicking A under B by pixel and by element, a new window opens on the resting cursor, and B is maximized while bcu keeps clicking. Frame series count cursor pixels in each covering window's text box, only where that window is on top. The cursor must also show on A wherever nothing covers it, with its tip within 12 px of the click point. On the 3420x2150 display at 200%: this build passed 5 runs (`acceptance-20261031-112553.json` to `-114212.json`), the release passed (`-112644.json`), and the Oct 12 driver the plugin's main checkout still runs passed twice (`-113440.json`, `-113859.json`). In these cases the z-order pin already hides the cursor, so this check guards the behaviour rather than showing the fix. Three release runs failed a precondition, not on the cursor: twice another session's window opened over A on the shared desktop, and once the cursor took longer than the check then waited (it now polls for 3 s). The tip landed 6 to 7 px from the click point on every driver, so the 108 px offset seen once in Fusion didn't come back either.
+
+### Limits
+
+- Two sessions' cursors that overlap can erase each other's pixels outside their own windows. The plugin drives one session.
+- Cursors without a pinned window paint unclipped, as before.
+- Windows-only. The macOS and Linux overlays are unchanged.

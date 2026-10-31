@@ -1,0 +1,326 @@
+From 00cd311a636546c534febd2a194a8f3137215b34 Mon Sep 17 00:00:00 2001
+From: Advait Johari <zakethegr8@gmail.com>
+Date: Fri, 30 Oct 2026 18:04:18 -0500
+Subject: [PATCH] fix(windows): show the agent cursor only on the visible part
+ of its window
+
+---
+ .../crates/platform-windows/src/overlay.rs    | 240 +++++++++++++++++-
+ .../platform-windows/src/uia/windows_enum.rs  |   2 +-
+ 2 files changed, 230 insertions(+), 12 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/overlay.rs b/libs/cua-driver/rust/crates/platform-windows/src/overlay.rs
+index b00c19e..91a243d 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/overlay.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/overlay.rs
+@@ -7,6 +7,7 @@
+ //! - Render loop: dedicated STA thread, ~125 Hz (8ms timer via `SetTimer`).
+ //! - Pixel pipeline: `tiny-skia` → BGRA DIB → `UpdateLayeredWindow` per-pixel alpha.
+ //! - Z-ordering: every 80ms call `SetWindowPos` to stay just above the pinned target.
++//! - Clipping: a pinned cursor only shows on the visible part of its window.
+ //! - Idle-hide: fade out over 180ms once `idle_hide_ms` has elapsed with no activity.
+ //!
+ //! ## Per-session cursors (2026-06 port from platform-macos #1779)
+@@ -750,6 +751,25 @@ impl DirtyRect {
+         };
+         (r.x1 > r.x0 && r.y1 > r.y0).then_some(r)
+     }
++
++    /// The parts of `self` that `cover` doesn't overlap: up to four rects.
++    fn minus(self, cover: DirtyRect) -> Vec<DirtyRect> {
++        let (x0, y0) = (self.x0.max(cover.x0), self.y0.max(cover.y0));
++        let (x1, y1) = (self.x1.min(cover.x1), self.y1.min(cover.y1));
++        if x0 >= x1 || y0 >= y1 {
++            return vec![self];
++        }
++        let bands = [
++            DirtyRect { y1: y0, ..self },             // above the overlap
++            DirtyRect { y0: y1, ..self },             // below it
++            DirtyRect { y0, y1, x1: x0, ..self },     // left of it
++            DirtyRect { y0, y1, x0: x1, ..self },     // right of it
++        ];
++        bands
++            .into_iter()
++            .filter(|r| r.x1 > r.x0 && r.y1 > r.y0)
++            .collect()
++    }
+ }
+ 
+ /// Conservative half-extent for the checked-in theme plus the session badge.
+@@ -906,6 +926,37 @@ impl WinSurface {
+         }
+     }
+ 
++    /// Zero the pixmap pixels inside `r` that no rect in `keep` covers (all clamped).
++    fn clear_outside(&mut self, r: DirtyRect, keep: &[DirtyRect]) {
++        let w = self.w as usize;
++        let data = self.pixmap.data_mut();
++        let mut clear = |y: i32, x0: i32, x1: i32| {
++            let row = y as usize * w;
++            data[(row + x0 as usize) * 4..(row + x1 as usize) * 4].fill(0);
++        };
++        let mut spans: Vec<(i32, i32)> = Vec::new();
++        for y in r.y0..r.y1 {
++            spans.clear();
++            spans.extend(
++                keep.iter()
++                    .filter(|k| k.y0 <= y && y < k.y1)
++                    .map(|k| (k.x0.max(r.x0), k.x1.min(r.x1)))
++                    .filter(|(x0, x1)| x0 < x1),
++            );
++            spans.sort_unstable();
++            let mut x = r.x0;
++            for &(x0, x1) in &spans {
++                if x0 > x {
++                    clear(y, x, x0);
++                }
++                x = x.max(x1);
++            }
++            if x < r.x1 {
++                clear(y, x, r.x1);
++            }
++        }
++    }
++
+     /// Copy the pixels inside `r` from the pixmap (premultiplied RGBA) into
+     /// the DIB bits (premultiplied BGRA). Only the dirty region is touched —
+     /// this replaces the old full-surface per-frame swizzle.
+@@ -960,13 +1011,157 @@ thread_local! {
+     /// must push the full surface to establish the layered-window backing
+     /// store. Surface recreation and idle teardown reset this flag.
+     static FIRST_PRESENT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
++    /// The cursor clips of the last tick, to re-render when one changes.
++    static LAST_CLIPS: std::cell::RefCell<Clips> = std::cell::RefCell::new(HashMap::new());
++}
++
++// ── Clip each cursor to its window ────────────────────────────────────────
++//
++// The overlay is one full-screen layer pinned a z-slot above the window a
++// cursor drives. On its own it paints over the desktop around that window,
++// and over any window above it that the 80 ms z-order pin hasn't caught up
++// with, such as a full-screen app the user switches to while the agent works.
++// So each pinned cursor only keeps the pixels that land on the part of its
++// window the user can see. Windows-only: this fork ships the Windows driver.
++
++/// Overlay-local rects where each pinned window is visible, by window id.
++#[cfg(target_os = "windows")]
++type Clips = HashMap<u64, Vec<DirtyRect>>;
++
++/// Visible rects for every revealed cursor's pinned window. Cursors without a
++/// pinned window paint unclipped, as before.
++#[cfg(target_os = "windows")]
++fn cursor_clips(map: &RenderMap) -> Clips {
++    let screen = &map.platform;
++    map.cursors
++        .values()
++        .filter(|rs| rs.core.is_revealed())
++        .filter_map(|rs| rs.core.pinned_wid)
++        .map(|wid| (wid, unsafe { visible_rects(wid, screen.virt_x, screen.virt_y) }))
++        .collect()
++}
++
++/// Window `wid`'s frame minus every window above it that covers it, in
++/// overlay-local pixels. Empty when it's closed, hidden, minimized or cloaked
++/// (another virtual desktop).
++#[cfg(target_os = "windows")]
++unsafe fn visible_rects(wid: u64, virt_x: i32, virt_y: i32) -> Vec<DirtyRect> {
++    use windows::Win32::Foundation::HWND;
++    use windows::Win32::UI::WindowsAndMessaging::{
++        GetWindow, GetWindowThreadProcessId, IsWindow, GW_HWNDPREV,
++    };
++    let target = HWND(wid as *mut _);
++    if !IsWindow(target).as_bool() || !window_shows(target) {
++        return Vec::new();
++    }
++    let Some(frame) = frame_rect(target) else {
++        return Vec::new();
++    };
++    let mut pid = 0u32;
++    GetWindowThreadProcessId(target, Some(&mut pid));
++    let mut visible = vec![frame];
++    let mut above = GetWindow(target, GW_HWNDPREV).unwrap_or(HWND(std::ptr::null_mut()));
++    while !above.0.is_null() && !visible.is_empty() {
++        if covers(above, target, pid) {
++            if let Some(cover) = frame_rect(above) {
++                visible = visible.into_iter().flat_map(|r| r.minus(cover)).collect();
++            }
++        }
++        above = GetWindow(above, GW_HWNDPREV).unwrap_or(HWND(std::ptr::null_mut()));
++    }
++    visible
++        .into_iter()
++        .map(|r| DirtyRect {
++            x0: r.x0 - virt_x,
++            y0: r.y0 - virt_y,
++            x1: r.x1 - virt_x,
++            y1: r.y1 - virt_y,
++        })
++        .collect()
++}
++
++/// Shown on screen: visible, not minimized, not cloaked.
++#[cfg(target_os = "windows")]
++unsafe fn window_shows(h: windows::Win32::Foundation::HWND) -> bool {
++    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
++    IsWindowVisible(h).as_bool()
++        && !IsIconic(h).as_bool()
++        && !crate::uia::windows_enum::window_is_cloaked(h)
++}
++
++/// Whether `h`, stacked above `target`, hides what's under it. These don't:
++/// - click-through windows (`WS_EX_TRANSPARENT`), including this overlay;
++/// - layered no-activate overlays, like the NVIDIA overlay, which spans the
++///   screen but is transparent where it shows nothing;
++/// - windows that belong to the target: ones it owns (dialogs), and windows
++///   of its process that have no taskbar button (menus, drop-downs, tooltips).
++///   Another top-level window of the same process, such as a second browser
++///   window the user made full screen, still covers.
++#[cfg(target_os = "windows")]
++unsafe fn covers(
++    h: windows::Win32::Foundation::HWND,
++    target: windows::Win32::Foundation::HWND,
++    target_pid: u32,
++) -> bool {
++    use windows::Win32::UI::WindowsAndMessaging::{
++        GetWindow, GetWindowLongPtrW, GetWindowThreadProcessId, GWL_EXSTYLE, GW_OWNER,
++        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
++    };
++    if !window_shows(h) {
++        return false;
++    }
++    let ex = GetWindowLongPtrW(h, GWL_EXSTYLE) as u32;
++    if ex & WS_EX_TRANSPARENT.0 != 0 || ex & (WS_EX_LAYERED.0 | WS_EX_NOACTIVATE.0) == (WS_EX_LAYERED.0 | WS_EX_NOACTIVATE.0) {
++        return false;
++    }
++    let owner = GetWindow(h, GW_OWNER).ok().filter(|o| !o.0.is_null());
++    let mut o = owner;
++    while let Some(w) = o {
++        if w == target {
++            return false;
++        }
++        o = GetWindow(w, GW_OWNER).ok().filter(|n| !n.0.is_null());
++    }
++    let mut pid = 0u32;
++    GetWindowThreadProcessId(h, Some(&mut pid));
++    let taskbar_button =
++        owner.is_none() && (ex & WS_EX_APPWINDOW.0 != 0 || ex & WS_EX_TOOLWINDOW.0 == 0);
++    pid != target_pid || taskbar_button
++}
++
++/// The window's visible frame in screen pixels, without the invisible resize
++/// border (DWM extended frame bounds, else the window rect).
++#[cfg(target_os = "windows")]
++unsafe fn frame_rect(h: windows::Win32::Foundation::HWND) -> Option<DirtyRect> {
++    use windows::Win32::Foundation::RECT;
++    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
++    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
++    let mut r = RECT::default();
++    let dwm = DwmGetWindowAttribute(
++        h,
++        DWMWA_EXTENDED_FRAME_BOUNDS,
++        &mut r as *mut RECT as *mut _,
++        std::mem::size_of::<RECT>() as u32,
++    );
++    if dwm.is_err() || r.right <= r.left || r.bottom <= r.top {
++        GetWindowRect(h, &mut r).ok()?;
++    }
++    (r.right > r.left && r.bottom > r.top).then_some(DirtyRect {
++        x0: r.left,
++        y0: r.top,
++        x1: r.right,
++        y1: r.bottom,
++    })
+ }
+ 
+ /// Paint this frame's cursors into the persistent surface and return the
+ /// window-local region that must be pushed to the screen (`None` = nothing
+-/// painted and nothing stale to erase — skip the present entirely).
++/// painted and nothing stale to erase — skip the present entirely). Each
++/// pinned cursor is clipped to `clips` for its window. Two sessions' cursors
++/// that overlap can erase each other's pixels outside their own windows;
++/// bcu drives one session.
+ #[cfg(target_os = "windows")]
+-fn composite_dirty(map: &RenderMap) -> Option<DirtyRect> {
++fn composite_dirty(map: &RenderMap, clips: &Clips) -> Option<DirtyRect> {
+     let screen = &map.platform;
+     let (w, h) = (screen.virt_w.max(1), screen.virt_h.max(1));
+     SURFACE.with(|cell| {
+@@ -1002,6 +1197,10 @@ fn composite_dirty(map: &RenderMap) -> Option<DirtyRect> {
+                 None, // focus-rect is macOS-only
+                 1.0,
+             );
++            let painted = cursor_dirty_rect(&rs.core, screen.virt_x, screen.virt_y, w, h);
++            if let (Some(wid), Some(r)) = (rs.core.pinned_wid, painted) {
++                surf.clear_outside(r, clips.get(&wid).map_or(&[], Vec::as_slice));
++            }
+         }
+         PREV_DIRTY.with(|p| p.set(current));
+ 
+@@ -1267,18 +1466,37 @@ unsafe extern "system" fn wnd_proc(
+ 
+                     // After ticking: does any cursor still need frame ticks?
+                     let needs_tick = map.needs_frame_tick();
+-                    let needs_hover_poll = map
+-                        .cursors
+-                        .values()
+-                        .any(|rs| rs.core.session_badge_needs_hover_poll());
++                    // A resting cursor stays up for its idle-hide time, so the
++                    // visible part of its window is polled at the hover cadence
++                    // too: a window raised over it must hide it without waiting
++                    // for the next action.
++                    let clips = cursor_clips(map);
++                    let clips_changed = LAST_CLIPS.with(|last| {
++                        let mut last = last.borrow_mut();
++                        let changed = *last != clips;
++                        if changed {
++                            last.clone_from(&clips);
++                        }
++                        changed
++                    });
++                    let needs_hover_poll = !clips.is_empty()
++                        || map
++                            .cursors
++                            .values()
++                            .any(|rs| rs.core.session_badge_needs_hover_poll());
+ 
+                     // Render only when something can have changed pixels this
+-                    // frame: a fresh command, a still-running animation, or the
++                    // frame: a fresh command, a still-running animation, the
+                     // final settle frame as the previous animation winds down
+-                    // (`was_active && !needs_tick`). A fully-quiescent idle tick
++                    // (`was_active && !needs_tick`), or a change in what's
++                    // visible of a pinned window. A fully-quiescent idle tick
+                     // returns `None` here and does no compositing at all.
+-                    let should_render =
+-                        had_msg || refit || hover_changed || needs_tick || was_active;
++                    let should_render = had_msg
++                        || refit
++                        || hover_changed
++                        || needs_tick
++                        || was_active
++                        || clips_changed;
+ 
+                     if !should_render {
+                         (None, arrived, None, needs_tick, needs_hover_poll)
+@@ -1324,7 +1542,7 @@ unsafe extern "system" fn wnd_proc(
+                         // awareness into the paint so cursors render crisp on
+                         // HiDPI Windows displays (backing_scale stays 1.0 —
+                         // preserves pre-retina-fix behaviour on Windows).
+-                        let upload = composite_dirty(map);
++                        let upload = composite_dirty(map, &clips);
+ 
+                         (upload, arrived, pinned, needs_tick, needs_hover_poll)
+                     }
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/windows_enum.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/windows_enum.rs
+index 59dd7f0..187551f 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/windows_enum.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/windows_enum.rs
+@@ -1030,7 +1030,7 @@ fn rect_is_valid(rect: RECT) -> bool {
+     rect.right > rect.left && rect.bottom > rect.top
+ }
+ 
+-fn window_is_cloaked(hwnd: HWND) -> bool {
++pub(crate) fn window_is_cloaked(hwnd: HWND) -> bool {
+     let mut cloaked = 0u32;
+     unsafe {
+         DwmGetWindowAttribute(

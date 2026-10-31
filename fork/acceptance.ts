@@ -1,7 +1,7 @@
 // Live acceptance checks for the forked Cua Driver on the Windows desktop.
 //
 //   node fork/acceptance.ts [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer]
-//       [win32menu] [win32menu_bypos] [menubg] [ownership] [fgpoint] [helium]
+//       [win32menu] [win32menu_bypos] [menubg] [ownership] [fgpoint] [cursorclip] [cursoroverlay] [helium]
 //
 // Drives the driver (BCU_CUA_DRIVER, default plugin/driver/cua-driver.exe) over MCP stdio against
 // windows this script opens itself (TestPad, MenuPad from fork/apps, an Explorer window on
@@ -11,13 +11,17 @@
 // Explorer windows share the shell's pid, so the explorer check matches titles in memory to find
 // its own window and logs none of them.
 //
+// `cursoroverlay` drives the plugin server (plugin/server/run.sh, over the driver under test) as
+// clients do, and maximizes one of its own windows for a few seconds.
+//
 // `helium` is the exception: it attaches to the user's running Helium with `--grant
 // existing-profile`, but only acts in a background tab it opens itself and closes again. Bind
 // results list the user's tabs, so that check logs no result text from them and reads tab URLs only
 // to find its own test page.
 
 import { once } from "node:events";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -29,6 +33,7 @@ const HERE = import.meta.dirname;
 // The driver under test: BCU_CUA_DRIVER, else the one the plugin ships.
 const EXE = process.env.BCU_CUA_DRIVER ?? path.join(HERE, "..", "plugin/driver/cua-driver.exe");
 const OUT = path.join(HERE, "acceptance-runs");
+const STAMP = timestamp(); // names this run's JSON and the images checks save beside it
 const ENV = { DO_NOT_TRACK: "1", WSLENV: "DO_NOT_TRACK" };
 const ROW = /^\s*- \[(\d+)\] (\w+)(?: "([^"]*)")?(.*)$/s; // s: a multi-line value leaves a \r on the row, which . must match
 
@@ -579,6 +584,320 @@ async function checkFgpoint(run: Run) {
   }
 }
 
+// --- 9. The agent cursor only shows on its target window -----------------------------------
+
+// Counts agent-cursor pixels in screen rects, from one capture of `x,y,w,h` that it also saves as a
+// PNG. The cursor's colour varies by session, so a cursor pixel is one that is strongly coloured
+// and differs from the same pixel in the capture at `basePath`; window chrome is grey or keeps its
+// colour. Per-monitor DPI aware, like the driver, so all coordinates are physical pixels.
+const CURSOR_PS = String.raw`
+Add-Type -ReferencedAssemblies System.Drawing @"
+using System; using System.Drawing; using System.Drawing.Imaging; using System.Runtime.InteropServices;
+public class BcuCursor {
+  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int ht, uint f);
+  public static string Count(int x, int y, int w, int h, string path, string basePath, int[] rects) {
+    SetThreadDpiAwarenessContext(new IntPtr(-4));
+    using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb)) {
+      using (var g = Graphics.FromImage(bmp)) g.CopyFromScreen(x, y, 0, 0, bmp.Size);
+      bmp.Save(path, ImageFormat.Png);
+      if (basePath == "") return "";
+      var bas = new Bitmap(basePath);
+      var counts = new int[rects.Length / 4];
+      for (int i = 0; i < counts.Length; i++) {
+        int rx = rects[4 * i] - x, ry = rects[4 * i + 1] - y;
+        for (int py = Math.Max(0, ry); py < Math.Min(h, ry + rects[4 * i + 3]); py++)
+          for (int px = Math.Max(0, rx); px < Math.Min(w, rx + rects[4 * i + 2]); px++) {
+            Color c = bmp.GetPixel(px, py), o = bas.GetPixel(px, py);
+            int hi = Math.Max(c.R, Math.Max(c.G, c.B)), lo = Math.Min(c.R, Math.Min(c.G, c.B));
+            int moved = Math.Max(Math.Abs(c.R - o.R), Math.Max(Math.Abs(c.G - o.G), Math.Abs(c.B - o.B)));
+            if (hi - lo >= 60 && moved >= 40) counts[i]++;
+          }
+      }
+      bas.Dispose();
+      return string.Join(",", counts);
+    }
+  }
+}
+"@
+`;
+
+type Rect = readonly [x: number, y: number, w: number, h: number];
+
+/** Cursor pixels in each of `rects`, from a capture of `area` saved as <OUT>/<stamp>-<name>.png and
+ * compared with the earlier capture named `before`. Without `before` it only captures, and returns []. */
+async function cursorPixels(area: Rect, name: string, rects: Rect[], before?: string): Promise<number[]> {
+  const file = `cursorclip-${name}.png`;
+  const base = before ? `${WIN_TEMP}\\cursorclip-${before}.png` : "";
+  const out = await ps(`${CURSOR_PS}[BcuCursor]::Count(${area.join(",")}, '${WIN_TEMP}\\${file}', '${base}', [int[]]@(${rects.flat().join(",")}))`);
+  mkdirSync(OUT, { recursive: true });
+  copyFileSync(path.join(WSL_TEMP, file), path.join(OUT, `${STAMP}-${file}`));
+  return base ? (out.trim().split(/\s+/).at(-1) ?? "").split(",").map(Number) : [];
+}
+
+/** Move and size a window this script opened and put it at the front of the ordinary windows,
+ * without activating it. Topmost and back is the lock-free way to raise another app's window. */
+async function placeOnTop(hwnd: number, [x, y, w, h]: Rect): Promise<void> {
+  const pos = (after: number, flags: number) => `[void][BcuCursor]::SetWindowPos([IntPtr]${hwnd}, [IntPtr](${after}), ${x}, ${y}, ${w}, ${h}, ${flags});`;
+  await ps(`${CURSOR_PS}[void][BcuCursor]::SetThreadDpiAwarenessContext([IntPtr](-4)); ${pos(-1, 0x10)} ${pos(-2, 0x13)}`); // HWND_TOPMOST, then HWND_NOTOPMOST; SWP_NOACTIVATE (| NOSIZE | NOMOVE)
+}
+
+/** A: target. B: an ordinary window raised above A. With a session label the driver draws its
+ * cursor at each click; it must show on A's visible part and nowhere else:
+ * - beside: a click in A just left of B. The arrow reaches into B.
+ * - edge: a click just above A's bottom edge, clear of B. The arrow reaches below A.
+ * - covered: B moved over all of A (a full-screen app over the target), then an element click.
+ * Each count is the cursor pixels in that region after the click, against a capture just before it. */
+async function checkCursorclip(run: Run) {
+  const session = "bcu"; // as the plugin's calls carry
+  const a = await openMenupad(["--at", "100", "100"], "MenuPad-A");
+  try {
+    const b = await openMenupad(["--at", "700", "100"], "MenuPad-B");
+    const [ax, ay, aw, ah] = await boundsOf(run, a.pid, a.hwnd);
+    await placeOnTop(b.hwnd, [ax + Math.floor(aw / 2), ay - 40, aw, Math.floor(ah / 2) + 40]);
+    const [bx, by, bw, bh] = await boundsOf(run, b.pid, b.hwnd);
+    const area: Rect = [ax - 60, ay - 60, aw + 120 + aw, ah + 120];
+    const beside = [bx - 12, ay + Math.floor(ah / 4)] as const;
+    const onTopBeside = { a: await topWindowAt(beside), b: await topWindowAt([bx + 20, beside[1]]) };
+    const edge = [ax + Math.floor(aw / 4), ay + ah - 8] as const;
+    const regions = {
+      beside_in_a: [beside[0] - 2, beside[1] - 2, 14, 40],
+      beside_over_b: [bx, beside[1] - 2, 40, 40],
+      edge_in_a: [edge[0] - 2, edge[1] - 2, 40, 10],
+      edge_below_a: [edge[0] - 2, ay + ah, 40, 40],
+      a_whole: [ax, ay, aw, ah],
+    } satisfies Record<string, Rect>;
+    const names = Object.keys(regions) as Array<keyof typeof regions>;
+    /** Run `act` between two captures named `<shot>-0` and `<shot>`, and count what it drew. */
+    const counted = async <T,>(shot: string, act: () => Promise<T>): Promise<[T, Record<keyof typeof regions, number>]> => {
+      await cursorPixels(area, `${shot}-0`, []);
+      const res = await act();
+      await sleep(900);
+      const n = await cursorPixels(area, shot, names.map((k) => regions[k]), `${shot}-0`);
+      return [res, Object.fromEntries(names.map((k, i) => [k, n[i]])) as Record<keyof typeof regions, number>];
+    };
+    // Screenshot pixels map to screen as frame origin + 1 (bitmap_to_screen); MenuPad is small
+    // enough that the screenshot isn't downscaled.
+    const local = ([sx, sy]: readonly [number, number]) => ({ x: sx - ax - 1, y: sy - ay - 1 });
+    await run.call("get_window_state", { pid: a.pid, window_id: a.hwnd, include_screenshot: true, session });
+
+    // A pixel click right after a state read can come back "UIA pixel click busy" with nothing
+    // sent; the driver says to retry.
+    const pixelClick = async (at: readonly [number, number]) => {
+      const args = { pid: a.pid, window_id: a.hwnd, ...local(at), session };
+      let called = await run.call("click", args);
+      for (let i = 0; i < 4 && called.result.isError && called.text.includes("busy"); i++) {
+        await sleep(700);
+        called = await run.call("click", args);
+      }
+      return outcome(called);
+    };
+    const [clickBeside, besideCounts] = await counted("beside", () => pixelClick(beside));
+    const [clickEdge, edgeCounts] = await counted("edge", () => pixelClick(edge));
+
+    await placeOnTop(b.hwnd, [ax - 20, ay - 20, aw + 40, ah + 40]);
+    const { rows } = await run.state(a.pid, a.hwnd);
+    const [clickCovered, coveredCounts] = await counted("covered",
+      async () => outcome(await run.call("click", { element_token: find(rows, "Edit", "Text editor").token, session })));
+    const onTopCovered = await topWindowAt(edge);
+
+    return {
+      a_bounds: [ax, ay, aw, ah], b_bounds: [bx, by, bw, bh], beside_point: beside, edge_point: edge, regions,
+      click_beside: clickBeside, beside: besideCounts, click_edge: clickEdge, edge: edgeCounts,
+      click_covered: clickCovered, covered: coveredCounts, a_hwnd: a.hwnd, b_hwnd: b.hwnd,
+      on_top_beside: onTopBeside, on_top_covered: onTopCovered,
+      passed: onTopBeside.a === a.hwnd && onTopBeside.b === b.hwnd && onTopCovered === b.hwnd
+        && !clickBeside.error && !clickEdge.error && !clickCovered.error
+        && besideCounts.beside_in_a > 0 && besideCounts.beside_over_b === 0
+        && edgeCounts.edge_in_a > 0 && edgeCounts.edge_below_a === 0
+        && coveredCounts.a_whole === 0,
+    };
+  } finally {
+    await stopMenupads();
+  }
+}
+
+// --- 10. The bcu cursor hides when windows move over its background window --------------------
+
+const SHOTS_SRC = path.join(HERE, "apps", "CursorShots.cs");
+const SHOTS_DLL = `${WIN_TEMP}\\CursorShots.dll`;
+
+/** Run `script` with fork/apps/CursorShots.cs loaded, compiling it when the source is newer. */
+async function shots(script: string, timeoutMs = 60_000): Promise<string> {
+  const dll = path.join(WSL_TEMP, "CursorShots.dll");
+  if (!existsSync(dll) || statSync(dll).mtimeMs < statSync(SHOTS_SRC).mtimeMs) {
+    mkdirSync(WSL_TEMP, { recursive: true });
+    copyFileSync(SHOTS_SRC, path.join(WSL_TEMP, "CursorShots.cs"));
+    await ps(`Remove-Item '${SHOTS_DLL}' -ErrorAction SilentlyContinue
+Add-Type -TypeDefinition (Get-Content -Raw '${WIN_TEMP}\\CursorShots.cs') -OutputAssembly '${SHOTS_DLL}' -OutputType Library -ReferencedAssemblies System.Drawing`, 120_000);
+  }
+  return ps(`Add-Type -Path '${SHOTS_DLL}'\n${script}`, timeoutMs);
+}
+
+type Frame = { t: number; counts: number[] };
+/** `rects[i]` is counted only where window `owners[i]` is on top. */
+type SeriesSpec = { name: string; area: Rect; rects: Rect[]; owners: number[]; frames: number; everyMs: number; place?: { hwnd: number; rect: Rect } };
+
+/** Start a CursorShots.Series that counts cursor-coloured pixels in `spec.rects` that belong to
+ * `spec.owners` (another app opening on top meanwhile doesn't count), moving
+ * `spec.place` over them first. Resolves once the first frame is taken, so the caller can act while
+ * it runs; `done` gives every frame. Saved frames go to <OUT>/<stamp>-cursoroverlay-<name>-<n>.png. */
+async function startSeries(spec: SeriesSpec, rgb: number[]): Promise<{ done: Promise<Frame[]> }> {
+  const tag = `cursoroverlay-${spec.name}`;
+  const started = path.join(WSL_TEMP, `${tag}.started`);
+  for (const f of readdirSync(WSL_TEMP).filter((f) => f.startsWith(`${tag}-`))) rmSync(path.join(WSL_TEMP, f)); // an earlier run's frames
+  writeFileSync(started, ""); // filled in by the first frame
+  const list = (xs: readonly number[]) => `[int[]]@(${xs.join(",")})`;
+  const done = shots(`[CursorShots]::Series(${spec.place?.hwnd ?? 0}, ${list(spec.place?.rect ?? [])}, $false, ${list(spec.area)}, `
+    + `${spec.frames}, ${spec.everyMs}, ${list(rgb)}, 20, ${list(spec.rects.flat())}, [long[]]@(${spec.owners.join(",")}), '${WIN_TEMP}\\${tag}', '${WIN_TEMP}\\${tag}.started')`, 120_000)
+    .then((out) => {
+      mkdirSync(OUT, { recursive: true });
+      for (const f of readdirSync(WSL_TEMP).filter((f) => f.startsWith(`${tag}-`) && f.endsWith(".png"))) {
+        copyFileSync(path.join(WSL_TEMP, f), path.join(OUT, `${STAMP}-${f}`));
+      }
+      return out.trim().split("\n").filter((l) => /^\d+ /.test(l)).map((l) => {
+        const [t, c] = l.split(" ");
+        return { t: Number(t), counts: c.split(",").map(Number) };
+      });
+    });
+  if (!(await waitFor(() => readFileSync(started, "utf8") !== "", 30))) throw new Error(`series ${spec.name} never started`);
+  return { done };
+}
+
+/** A MenuPad's text box in screen pixels: its frame minus the border, title and menu bar, whose
+ * accent colours and ClearType text fringes could pass for the cursor. `scale` is the display's. */
+const inner = ([x, y, w, h]: Rect, scale: number): Rect => {
+  const [side, top, bottom] = [12, 70, 14].map((m) => Math.round(m * scale));
+  return [x + side, y + top, w - 2 * side, h - top - bottom];
+};
+
+/** bcu works in A, a MenuPad in the background, through the real plugin server (plugin/server/run.sh
+ * over the driver under test, with the session label and fast cursor clients get). Then windows
+ * start to cover it, and the cursor must not show on any of them:
+ * - shown: a click at A's centre. The cursor must show there, its tip within 12 px of the click
+ *   point, and this reads its colour.
+ * - slide: B slides over the resting cursor. Frames start the moment B moves.
+ * - under: bcu keeps clicking points of A under B, by pixel and by element.
+ * - again: a click on a part of A nothing covers. The cursor must show again.
+ * - opened: a new app window (C) opens over the resting cursor.
+ * - fullscreen: B is maximized over everything while bcu keeps clicking A.
+ * Frame series are counted inside each covering window's client area, on pixels where that window
+ * is on top: other sessions' windows can open on this desktop mid-run. */
+async function checkCursoroverlay(run: Run) {
+  const policy = path.join(mkdtempSync(path.join(tmpdir(), "bcu-overlay-")), "policy.json");
+  writeFileSync(policy, JSON.stringify({ allow: ["MenuPad"], foreground: "deny" }));
+  const a = await openMenupad(["--at", "520", "100"], "MenuPad-A");
+  try {
+    const b = await openMenupad(["--at", "900", "500"], "MenuPad-B");
+    // Other apps on the desktop may sit over A, and a new window doesn't always get the foreground.
+    // So: A to the front without activating it, then B to the foreground. A is in the background,
+    // directly under B, and on top wherever B isn't.
+    const [ax, ay, aw, ah] = await boundsOf(run, a.pid, a.hwnd);
+    await placeOnTop(a.hwnd, [ax - 7, ay, aw + 14, ah + 7]); // window rect = DWM frame plus the invisible border
+    const foreground = async () => Number((await shots("[CursorShots]::Foreground()")).trim());
+    await run.call("bring_to_front", { pid: b.pid, window_id: b.hwnd });
+    if (await foreground() === a.hwnd) await run.call("bring_to_front", { pid: b.pid, window_id: b.hwnd }); // it doesn't always stick
+    const foregroundAtStart = await foreground();
+    // MenuPad places itself in logical pixels; A was asked for x = 520, so its frame position gives the display scale.
+    const scale = (ax - 7) / 520;
+    const client = (r: Rect) => inner(r, scale);
+    await using bcu = await McpClient.start([path.join(HERE, "..", "plugin/server/run.sh")], {
+      env: { BCU_CUA_DRIVER: path.resolve(EXE), BCU_POLICY: policy, BCU_AUDIT: "off" }, elicit: "unsupported",
+    });
+    const js = async (code: string) => {
+      const { result, ms } = await bcu.call("js", { code }, 60_000);
+      const text = textOf(result);
+      run.log.push({ tool: "bcu js", args: { code }, ms: round1(ms), error: !!result.isError, text: text.slice(0, 600) });
+      console.log(`  bcu js ${ms.toFixed(1).padStart(7)} ms ${result.isError ? "ERR " : ""}${JSON.stringify(text.slice(0, 200))}`);
+      return { ms: round1(ms), error: !!result.isError, text: text.slice(0, 300) };
+    };
+    // Screenshot pixels map to screen as frame origin + 1; MenuPad's screenshot isn't downscaled.
+    // A click right after a read can come back "busy" with nothing sent, so each retries.
+    const clickCode = (target: string) => `{ const w = await cua.window({title: "MenuPad-A"}); let err;
+      for (let i = 0; i < 5; i++) { try { await w.click(${target}); return "ok" } catch (e) { err = String(e); if (!err.includes("busy")) break; await cua.sleep(300) } }
+      throw new Error(err) }`;
+    const clickAt = ([sx, sy]: readonly [number, number]) => js(clickCode(`[${sx - ax - 1}, ${sy - ay - 1}]`));
+    const clickEditor = () => js(clickCode(`await w.find("Text editor")`));
+
+    const centre = [ax + Math.floor(aw / 2), ay + Math.floor(ah / 2) + 20] as const;
+    const visible = [ax + 60, ay + ah - 40] as const;
+    const slideRect: Rect = [ax + Math.floor(aw / 4), ay + Math.floor(ah / 4), Math.floor(aw / 2) + 40, Math.floor(ah / 2) + 40];
+    const under = [centre, [centre[0] - 40, centre[1] - 20], [centre[0] + 40, centre[1] + 30]] as const;
+    const area: Rect = [ax - 40, ay - 40, aw + 260, ah + 260];
+
+    const onTopAtStart = { centre: await topWindowAt(centre), visible: await topWindowAt(visible) };
+    // shown: the cursor's colour comes off the screen, from captures before and after one click.
+    // A wide spot: a driver that draws the cursor away from its click point still gets caught.
+    const SPOT = 300;
+    const spot = [centre[0] - SPOT, centre[1] - SPOT, 2 * SPOT, 2 * SPOT] as const;
+    await shots(`[CursorShots]::Capture(${spot.join(",")}, '${WIN_TEMP}\\cursoroverlay-shown-0.png')`);
+    const shownClick = await clickAt(centre);
+    // The arrow's fill, read just below and right of its tip: the session badge under the arrow is
+    // larger, and its accent blue also turns up in window chrome. A new driver's overlay can take a
+    // moment to show its first cursor.
+    let colour = "";
+    for (let i = 0; i < 6 && !colour; i++) {
+      await sleep(500);
+      colour = (await shots(`[CursorShots]::Capture(${spot.join(",")}, '${WIN_TEMP}\\cursoroverlay-shown.png'); `
+        + `[CursorShots]::CursorColor('${WIN_TEMP}\\cursoroverlay-shown-0.png', '${WIN_TEMP}\\cursoroverlay-shown.png', ${SPOT}, ${SPOT}, 24, 24)`)).trim();
+    }
+    mkdirSync(OUT, { recursive: true });
+    for (const f of ["cursoroverlay-shown-0.png", "cursoroverlay-shown.png"]) copyFileSync(path.join(WSL_TEMP, f), path.join(OUT, `${STAMP}-${f}`));
+    if (!/^\d+,\d+,\d+$/.test(colour)) {
+      throw new Error(`the cursor never showed on A (${JSON.stringify(colour)}); on top at A's centre: ${onTopAtStart.centre} (A is ${a.hwnd}); click: ${shownClick.text}`);
+    }
+    const rgb = colour.split(",").map(Number);
+    // Where the arrow's tip landed relative to the click point.
+    const tip = (await shots(`[CursorShots]::Top('${WIN_TEMP}\\cursoroverlay-shown.png', [int[]]@(${rgb.join(",")}), 20)`)).trim().split(",").map(Number);
+    const cursorOffset = tip.length === 2 ? [tip[0] - SPOT, tip[1] - SPOT] : null;
+
+    // slide: B moves over the resting cursor inside the series call, before its first frame.
+    const slide = await (await startSeries({ name: "slide", area, rects: [client(slideRect)], owners: [b.hwnd], frames: 14, everyMs: 100, place: { hwnd: b.hwnd, rect: slideRect } }, rgb)).done;
+
+    // under: bcu keeps working in A beneath B.
+    const underSeries = await startSeries({ name: "under", area, rects: [client(slideRect)], owners: [b.hwnd], frames: 30, everyMs: 150 }, rgb);
+    const underClicks = [await clickAt(under[0]), await clickAt(under[1]), await clickAt(under[2]), await clickEditor()];
+    const underFrames = await underSeries.done;
+
+    // again: an uncovered part of A shows the cursor.
+    const onTopAgain = await topWindowAt(visible);
+    const againSeries = await startSeries({ name: "again", area, rects: [[visible[0] - 20, visible[1] - 20, 60, 60]], owners: [a.hwnd], frames: 10, everyMs: 150 }, rgb);
+    const againClick = await clickAt(visible);
+    const againFrames = await againSeries.done;
+
+    // opened: a new app window opens right on the resting cursor.
+    const logical = (v: number) => String(Math.round(v / scale));
+    const c = await openMenupad(["--at", logical(visible[0] - 300), logical(visible[1] - 300)], "MenuPad-C");
+    const cBounds = await boundsOf(run, c.pid, c.hwnd);
+    const [cx0, cy0, cw0, ch0] = client(cBounds);
+    const cCoversCursor = visible[0] > cx0 && visible[0] + 40 < cx0 + cw0 && visible[1] > cy0 && visible[1] + 40 < cy0 + ch0;
+    const opened = await (await startSeries({ name: "opened", area, rects: [client(cBounds)], owners: [c.hwnd], frames: 14, everyMs: 150 }, rgb)).done;
+
+    // fullscreen: B is maximized over everything, and bcu keeps clicking A underneath.
+    await shots(`[CursorShots]::Maximize(${b.hwnd})`);
+    await sleep(500);
+    const full = await boundsOf(run, b.pid, b.hwnd);
+    const fullSeries = await startSeries({ name: "fullscreen", area: full, rects: [client(full)], owners: [b.hwnd], frames: 30, everyMs: 150 }, rgb);
+    const fullClicks = [await clickEditor(), await clickAt(centre), await clickAt(visible), await clickAt(under[1])];
+    const fullFrames = await fullSeries.done;
+
+    const peak = (frames: Frame[]) => Math.max(0, ...frames.map((f) => f.counts[0]));
+    const clicks = [shownClick, ...underClicks, againClick, ...fullClicks];
+    return {
+      a_hwnd: a.hwnd, b_hwnd: b.hwnd, c_hwnd: c.hwnd, foreground_at_start: foregroundAtStart, a_bounds: [ax, ay, aw, ah],
+      on_top_at_start: onTopAtStart, on_top_again: onTopAgain, c_covers_cursor: cCoversCursor, cursor_offset: cursorOffset,
+      slide_rect: slideRect, c_bounds: cBounds, full_bounds: full, cursor_rgb: rgb, clicks,
+      peaks: { slide: peak(slide), under: peak(underFrames), again: peak(againFrames), opened: peak(opened), fullscreen: peak(fullFrames) },
+      frames: { slide, under: underFrames, again: againFrames, opened, fullscreen: fullFrames },
+      passed: foregroundAtStart !== a.hwnd && onTopAtStart.centre === a.hwnd && onTopAgain === a.hwnd && cCoversCursor
+        && cursorOffset !== null && Math.abs(cursorOffset[0]) <= 12 && Math.abs(cursorOffset[1]) <= 12 && clicks.every((k) => !k.error)
+        && peak(slide) === 0 && peak(underFrames) === 0 && peak(againFrames) > 0 && peak(opened) === 0 && peak(fullFrames) === 0,
+    };
+  } finally {
+    await stopMenupads();
+  }
+}
+
 // --- 6. Helium: the browser_* route on the user's real browser, in a background tab ----------
 
 const HELIUM_EXE = String.raw`\imput\Helium\Application\chrome.exe`;
@@ -851,7 +1170,8 @@ type Outcome = { passed: boolean; sampler?: Sampled; exception?: string };
 const CHECKS = {
   saveas: checkSaveas, closedmenu: checkClosedmenu, replace: checkReplace, edge: checkEdge, edge_alert: checkEdgeAlert,
   calc: checkCalc, explorer: checkExplorer, win32menu: checkWin32menu, win32menu_bypos: checkWin32menuBypos,
-  menubg: checkMenubg, ownership: checkOwnership, fgpoint: checkFgpoint, helium: checkHelium,
+  menubg: checkMenubg, ownership: checkOwnership, fgpoint: checkFgpoint, cursorclip: checkCursorclip, cursoroverlay: checkCursoroverlay,
+  helium: checkHelium,
 } satisfies Record<string, (run: Run) => Promise<Outcome>>;
 type CheckName = keyof typeof CHECKS;
 
@@ -888,6 +1208,6 @@ for (const name of (requested.length ? requested : Object.keys(CHECKS)).filter(i
   console.log(`  -> passed=${results[name].passed} sampler=${JSON.stringify(results[name].sampler)}`);
 }
 mkdirSync(OUT, { recursive: true });
-const out = path.join(OUT, `acceptance-${timestamp()}.json`);
+const out = path.join(OUT, `acceptance-${STAMP}.json`);
 writeFileSync(out, JSON.stringify({ results, calls: log }, null, 1));
 console.log("written:", out);

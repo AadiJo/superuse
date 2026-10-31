@@ -121,6 +121,13 @@ function audit(entry: Record<string, unknown>) {
   } catch { /* auditing must never break an action */ }
 }
 
+/** How the driver delivered a pixel click, from its result's `route`. */
+const PIXEL_ROUTES: Record<string, string> = {
+  accessibility: "a UI Automation action on the control at that point",
+  synthetic_events: "mouse messages sent to the window",
+  global_input: "real mouse input",
+};
+
 const KEY_ALIASES: Record<string, string> = { enter: "return", esc: "escape", del: "delete", ctl: "ctrl", control: "ctrl", win: "cmd" };
 const rowIndex = (line: string) => Number(line.match(/\[(\d+)\]/)?.[1] ?? NaN);
 
@@ -481,7 +488,7 @@ class Win {
   private async act(tool: string, args: Args) {
     const r = await this.d.driver.call(tool, args);
     this.d.markAction();
-    audit({ tool, app: this.app.key, window: this.id, delivery: args.delivery_mode ?? "background", ok: !r.isError });
+    audit({ tool, app: this.app.key, window: this.id, delivery: args.delivery_mode ?? "background", route: r.data.route, effect: r.data.effect, ok: !r.isError });
     if (r.isError) fail(r, tool);
     // Surface "a dialog probably opened" from the driver so the model looks for it.
     const summary = r.data.summary ?? r.text;
@@ -521,7 +528,15 @@ class Win {
       return void await this.act("click", { element_token: this.token(target), button, count, delivery_mode, action: select ? "select" : undefined });
     }
     await this.pixelTarget(target);
-    await this.act("click", { pid: this.pid, window_id: this.id, x: target[0], y: target[1], button, count, delivery_mode });
+    const r = await this.act("click", { pid: this.pid, window_id: this.id, x: target[0], y: target[1], button, count, delivery_mode });
+    // A pixel click reports success once it's sent. Say how, so a click that changed nothing can
+    // be told apart from one that never reached the app.
+    const { route = "", effect } = r.data;
+    if (effect === "unverifiable" || effect === "suspected_noop") {
+      const how = PIXEL_ROUTES[route] ?? (route.replaceAll("_", " ") || "an unreported route");
+      const seen = effect === "suspected_noop" ? "the driver suspects it did nothing" : "nothing confirmed its effect";
+      this.d.note(`click [${target.join(", ")}] went out as ${how}; ${seen}, so check the window before relying on it`);
+    }
   }
 
   async setValue(i: number, value: string) {

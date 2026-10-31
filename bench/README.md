@@ -11,6 +11,8 @@ node trace.ts out/mybatch/claude-bcu/calc_mul-r1 --calls   # each tool call: dur
 
 The scripts run on Node 24+ through type stripping, with no build step. `npm install` and `npm run typecheck` at the repo root check them.
 
+`node session-check.ts [--idle]` checks that the plugin's driver client starts its session again after the driver ends it, through the real driver, and writes `out/session-check-<time>.json`. `--idle` waits out the driver's real 5-minute idle timeout instead of ending the session.
+
 `node helium-check.ts [--direct | --claude]` checks the plugin's page API in your own Helium. It fills a test form in a tab it opens and closes again, and writes `out/helium-check-<time>.json`.
 
 ## Results

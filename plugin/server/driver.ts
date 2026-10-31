@@ -1,6 +1,7 @@
 // Cua Driver client. The driver is our fork's cua-driver.exe; we speak its stdio MCP server as
 // newline-delimited JSON-RPC. One long-lived process serves every call, and calls run one at a
-// time in the order they were issued. If the driver exits, the next call starts a fresh one.
+// time in the order they were issued. If the driver exits, the next call starts a fresh one; if it
+// ends our session after the idle timeout, the next call starts the session again.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
@@ -31,6 +32,10 @@ export type DriverData = Partial<{
   total_element_count: number;
   truncated: boolean;
   summary: string;
+  // Input tools: how the driver delivered the action ("accessibility", "synthetic_events",
+  // "global_input", ...), and what it saw of the effect ("confirmed", "unverifiable", "suspected_noop", ...).
+  route: string;
+  effect: string;
   pid: number;
   screenshot_width: number;
   screenshot_height: number;
@@ -121,10 +126,15 @@ export class Driver {
       this.toolNames.add(t.name);
       if (t.inputSchema?.properties?.session) this.sessionTools.add(t.name);
     }
+    await this.configureCursor();
+  }
+
+  /** Cursor settings are per session, so they're applied again whenever the session restarts. */
+  private async configureCursor() {
     // The agent cursor glides to every click target before acting: about 430 ms per click when
     // animated, 65 ms with an 80 ms fixed glide, 7 ms hidden (measured on Calculator).
-    if (this.cursor === "off") await this.request("tools/call", { name: "set_agent_cursor_enabled", arguments: { session: SESSION, enabled: false } });
-    else if (this.cursor === "fast") await this.request("tools/call", { name: "set_agent_cursor_motion", arguments: { session: SESSION, timing: "fixed", glide_duration_ms: 80, dwell_after_click_ms: 0 } });
+    if (this.cursor === "off") await this.timedCall("set_agent_cursor_enabled", { session: SESSION, enabled: false });
+    else if (this.cursor === "fast") await this.timedCall("set_agent_cursor_motion", { session: SESSION, timing: "fixed", glide_duration_ms: 80, dwell_after_click_ms: 0 });
   }
 
   private send(msg: object) {
@@ -170,15 +180,13 @@ export class Driver {
     }
     const clean: Args = Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== null));
     if (this.sessionTools.has(name)) clean.session = SESSION;
-    const started = performance.now();
-    let ok = false;
-    let res: ToolResult;
-    try {
-      res = (await withTimeout(this.request("tools/call", { name, arguments: clean }), name,
-        "the app is probably blocked by a modal dialog. Check cua.windows() for a new window.")) as ToolResult;
-      ok = !res.isError;
-    } finally {
-      trace({ driver: name, ms: Math.round(performance.now() - started), ok }); // timeouts too: they're the slow calls
+    let res = await this.timedCall(name, clean);
+    // The driver ends a session after 5 idle minutes and then refuses every call on it, before
+    // dispatch, so nothing was sent. Start the session again and retry once.
+    if (res.isError && res.structuredContent?.refusal?.code === "session_ended") {
+      await this.timedCall("start_session", { session: SESSION });
+      await this.configureCursor();
+      res = await this.timedCall(name, clean);
     }
     const content = res.content ?? [];
     const text = content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
@@ -188,5 +196,18 @@ export class Driver {
       try { data = JSON.parse(text) as DriverData; } catch { /* plain text */ }
     }
     return { text, data, images, isError: !!res.isError };
+  }
+
+  private async timedCall(name: string, args: Args): Promise<ToolResult> {
+    const started = performance.now();
+    let ok = false;
+    try {
+      const res = (await withTimeout(this.request("tools/call", { name, arguments: args }), name,
+        "the app is probably blocked by a modal dialog. Check cua.windows() for a new window.")) as ToolResult;
+      ok = !res.isError;
+      return res;
+    } finally {
+      trace({ driver: name, ms: Math.round(performance.now() - started), ok }); // timeouts too: they're the slow calls
+    }
   }
 }

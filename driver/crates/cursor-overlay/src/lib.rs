@@ -52,9 +52,9 @@ pub use session_badge::{
 };
 pub use surface_fit::{SurfaceFit, SurfaceGeometry, SURFACE_REFIT_INTERVAL};
 pub use theme::{
-    session_fill_hex, session_fill_rgba, CursorAction, CursorVisualState, DeliveryModifier,
-    PlaybackKind, ReducedMotion, TargetModifier, DEFAULT_CURSOR_FILL, DEFAULT_THEME_ID,
-    DEFAULT_THEME_VERSION, THEME_PROFILE,
+    cursor_fill_rgba, set_cursor_fill_slot, CursorAction, CursorVisualState, DeliveryModifier,
+    PlaybackKind, ReducedMotion, TargetModifier, CURSOR_FILLS, DEFAULT_CURSOR_FILL,
+    DEFAULT_THEME_ID, DEFAULT_THEME_VERSION, THEME_PROFILE,
 };
 pub use theme_artifact::{
     decode_theme, embedded_default_theme, inspect_artifact, list_installed_themes,

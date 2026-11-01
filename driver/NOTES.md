@@ -370,3 +370,18 @@ A user saw the agent cursor clicking around on top of a full-screen app while th
 - Two sessions' cursors that overlap can erase each other's pixels outside their own windows. The plugin drives one session.
 - Cursors without a pinned window paint unclipped, as before.
 - Windows-only. The macOS and Linux overlays are unchanged.
+
+## Each agent's cursor gets its own color
+
+Several agents can run Superuse at once, each with its own driver and overlay. Before this change, every cursor took its color from a hash of its session key, `__cua_runtime_<uuid>:superuse`, where the uuid is new on each launch. So a cursor's color was random per launch from a 9-color palette. Two agents matched about one time in nine, and no agent drew Cua blue, which only the `default` cursor key kept. `bench/acceptance.ts` reads the color off the screen for this reason.
+
+- `cursor_overlay::CURSOR_FILLS` has 8 colors, most distinct first. Slot 0 is the original Cua blue (`DEFAULT_CURSOR_FILL`). Every cursor in a process draws with the process's slot (`cursor_fill_rgba`), which tints the embedded theme, its glow, the click effects and the session badge. Installed custom themes keep their own colors, as before.
+- The Windows overlay claims its slot before it creates its window (`claim_cursor_fill_slot` in `overlay.rs`). Each slot is a named mutex, `Local\superuse-driver-cursor-slot-<N>`, and the driver takes the first one that `CreateMutexW` creates new. Creating a named object is atomic, so drivers that start together can't both take one slot. The handle stays open while the process lives, and Windows deletes the mutex when its last handle closes, so a driver that exits or crashes frees its slot. With all 8 taken, the pid picks one. The overlay title ends in `.slot<N>`.
+- A driver started with `--no-overlay` claims nothing. A plugin session with the cursor off still has an overlay, so it holds a slot.
+
+`bench/cursor-colors.ts` checks this end to end on three MenuPads: `SUPERUSE_DRIVER=tools/out/superuse-driver.exe node bench/cursor-colors.ts --baseline <exe>`. Three drivers start at once and click at the same moment. They drew amber, blue and magenta (slots 1, 0, 2). The driver on slot 0 then exits, and the next driver gets slot 0 back. One driver alone draws Cua blue, with a fill the same size as the release build's (202 to 204 px against 200 to 203). The release build `driver-130d6b189ad7` drew green, pink, cyan and amber in four runs. Passing runs: `bench/out/cursor-colors/20261101-143745.json`, `-143828.json` and `-144124.json`, with the PNGs beside them.
+
+### Limits
+
+- The color belongs to the driver process, not the session. Several sessions in one driver share a color, and only their badges tell them apart. The plugin runs one session per driver. One exception: when a history preview admission file exists, `mcp` proxies every agent into one shared `serve` daemon (`superuse-driver/src/main.rs`), so all of them draw one color. The plugin never sets that file up.
+- Drivers from builds before this one claim no slot, so one of them can match a new driver's color.

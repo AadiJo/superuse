@@ -13,6 +13,6 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true
   },
-  "include": ["bench/**/*.ts", "fork/**/*.ts", "scripts/**/*.ts"],
-  "exclude": ["bench/out", "fork/acceptance-runs", "tools"]
+  "include": ["bench/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["bench/out", "tools"]
 }

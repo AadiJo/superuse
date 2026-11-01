@@ -1,16 +1,14 @@
-# Cua Driver fork
+# Driver notes
 
-Our local fork of [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver) (MIT), the native Windows layer under the plugin. Nothing here goes upstream.
+`driver/` is a hard fork of [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver) (MIT, see `LICENSE`), the native Windows layer under the plugin. It was imported from `trycua/cua` at `9579e561613bbe7f7253fb561ae3ae4041c2cab3` (`libs/cua-driver/rust`) with our 25 patches applied, and we no longer track upstream. To take an upstream fix, read Cua's release notes and port the change by hand.
 
-- `UPSTREAM`: the upstream repo and pinned commit.
-- `patches/`: our changes as one patch per commit, applied in order on top of that commit.
-- `build.sh`: clones upstream into `tools/src/cua` (gitignored) if needed, applies the patches on branch `bcu`, cross-builds from WSL and installs `plugin/driver/cua-driver.exe`. `build.sh --clean` builds from a fresh clone in `tools/clean` instead, for releases and `scripts/install.sh --build`.
-- `release.json`: the published driver build installs download (written by `scripts/release-driver.ts`).
-- `export-patches.sh`: writes new commits on `bcu` back to `patches/`.
-- `acceptance.ts`: live checks against real apps. `node fork/acceptance.ts [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu] [helium] ...`. Each run writes `fork/acceptance-runs/acceptance-<time>.json` with every tool call, its time, and the cursor and foreground samples. `BCU_CUA_DRIVER` picks the exe under test.
-- `apps/MenuPad.cs`: a small app with a real Win32 menu bar for the `win32menu` check. `acceptance.ts` builds it into `%TEMP%\bcu`.
+- `scripts/build-driver.sh` cross-builds the driver from WSL and installs `plugin/driver/cua-driver.exe`. `--no-install` leaves the build in `tools/out/` for `scripts/install.sh --build` and `scripts/release-driver.ts`.
+- `release.json` pins the published driver build that installs download (written by `scripts/release-driver.ts`). Every tracked file in `driver/` except this one, plus the build script, is part of the source fingerprint.
+- `bench/acceptance.ts` runs live checks against real apps: `node bench/acceptance.ts [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer] [win32menu] [helium] ...`. Each run writes `bench/out/acceptance-runs/acceptance-<time>.json` with every tool call, its time, and the cursor and foreground samples. `BCU_CUA_DRIVER` picks the exe under test. `bench/apps/MenuPad.cs` is the small app with a real Win32 menu bar for the `win32menu` check.
 
-The sections below describe fork v2, the state after round 2 of the experiments (`research/08-experiments.md`). "Fork v3" at the end covers round 3.
+What we changed from upstream beyond the patches below: telemetry is off and can't send (`telemetry.rs`), every update check and installer run takes the "managed by a package manager" refusal (`updater.rs`), and skill-pack downloads are refused (`skills.rs`).
+
+The sections below are the history of the patches, written when they were still a patch series. "Fork v2" is the state after round 2 of the experiments (`research/08-experiments.md`); later sections cover each later round.
 
 ## What changed
 

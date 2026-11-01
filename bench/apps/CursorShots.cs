@@ -1,4 +1,4 @@
-// Screen captures for fork/acceptance.ts's cursor checks, compiled into %TEMP%\bcu\CursorShots.dll.
+// Screen captures for bench/acceptance.ts's cursor checks, compiled into %TEMP%\bcu\CursorShots.dll.
 //
 // The agent cursor's colour changes from run to run, so CursorColor reads it off the screen first:
 // the most common strongly coloured pixel that changed between two captures around a click. Series

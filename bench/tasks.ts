@@ -1,4 +1,4 @@
-// The Windows desktop task suite, used by run.ts, codex-app.ts, latency.ts and fork/acceptance.ts.
+// The Windows desktop task suite, used by run.ts, codex-app.ts, latency.ts and acceptance.ts.
 //
 // Each task prepares its own files under %TEMP%\bcu\<task id>, optionally opens the app, and
 // returns a checker that reads real Windows state (file contents, Calculator's display through

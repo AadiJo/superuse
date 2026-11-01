@@ -1,7 +1,7 @@
 // The driver binary: which one this checkout needs, and getting it there without trusting a file
 // just because it exists.
 //
-// fork/release.json pins a published build: its release tag, asset, executable SHA-256 and the
+// driver/release.json pins a published build: its release tag, asset, executable SHA-256 and the
 // fingerprint of the sources it was built from. plugin/driver/cua-driver.json records where the
 // installed exe came from. Setup compares both with the checkout's current fingerprint each run:
 //   current     the installed exe is the recorded one, built from today's sources: reuse it
@@ -23,14 +23,15 @@ export type Provenance = { source: "release" | "build"; fingerprint: string; sha
 export const EXE = path.join(PLUGIN, "driver", "cua-driver.exe");
 const RECORD = path.join(PLUGIN, "driver", "cua-driver.json");
 const PENDING = `${RECORD}.pending`; // the record for an exe being swapped in; see installExe
-const MANIFEST = path.join(REPO, "fork", "release.json");
+const MANIFEST = path.join(REPO, "driver", "release.json");
 
-/** SHA-256 over everything that decides the driver binary: the upstream pin, the build script
- *  (toolchain pins live there) and the patches in name order. Each file contributes
- *  "<path>\0<byte length>\0<bytes>". fork/release.json is not an input. */
+/** SHA-256 over everything that decides the driver binary: the build script (toolchain pins live
+ *  there) and every tracked file in driver/, in path order, as they are on disk. Each file
+ *  contributes "<path>\0<byte length>\0<bytes>". driver/release.json is not an input. */
 export function fingerprint(root = REPO): string {
-  const patches = fs.readdirSync(path.join(root, "fork", "patches")).filter((f) => f.endsWith(".patch")).sort();
-  const files = ["fork/UPSTREAM", "fork/build.sh", ...patches.map((p) => `fork/patches/${p}`)];
+  const listed = run("git", ["-C", root, "ls-files", "-z", "--", "driver", ":!driver/release.json"]);
+  if (listed.code !== 0) throw new Error(`git ls-files failed in ${root}: ${listed.stderr.trim()}`);
+  const files = ["scripts/build-driver.sh", ...listed.stdout.split("\0").filter(Boolean).sort()];
   const parts = files.flatMap((rel) => {
     const bytes = fs.readFileSync(path.join(root, rel));
     return [Buffer.from(`${rel}\0${bytes.length}\0`), bytes];
@@ -38,7 +39,7 @@ export function fingerprint(root = REPO): string {
   return sha256(Buffer.concat(parts));
 }
 
-/** fork/release.json, or null before the first release. BCU_RELEASE_MANIFEST reads another file. */
+/** driver/release.json, or null before the first release. BCU_RELEASE_MANIFEST reads another file. */
 export function readManifest(): ReleaseManifest | null {
   try { return JSON.parse(fs.readFileSync(process.env.BCU_RELEASE_MANIFEST ?? MANIFEST, "utf8")) as ReleaseManifest; } catch { return null; }
 }
@@ -98,7 +99,7 @@ function describe(s: State, fp: string): Check {
     case "fetch":
       return { id, status: "action", code: s.why === "missing" ? "DRIVER_MISSING" : "DRIVER_OUTDATED", summary: `${s.why === "missing" ? "not installed" : "older than these sources"}; release ${s.manifest.tag} matches`, next: "Run scripts/install.sh." };
     case "stale":
-      return { id, status: "fail", code: "DRIVER_NO_RELEASE", summary: `the fork sources (fingerprint ${short(fp)}) have no matching release${s.installed ? `; the installed driver was built from ${short(s.installed)}` : ""}`, next: BUILD_HINT };
+      return { id, status: "fail", code: "DRIVER_NO_RELEASE", summary: `the driver sources (fingerprint ${short(fp)}) have no matching release${s.installed ? `; the installed driver was built from ${short(s.installed)}` : ""}`, next: BUILD_HINT };
     case "unknown":
       return { id, status: "action", code: "DRIVER_UNKNOWN", summary: "plugin/driver/cua-driver.exe has no provenance record and isn't the pinned release; bcu left it alone", evidence: [`sha256 ${s.sha}`], next: "Move it away so install can put the pinned driver there, or point BCU_CUA_DRIVER at it to keep using it." };
   }
@@ -145,7 +146,7 @@ function download(m: ReleaseManifest, fp: string): Check {
     }
     const sha = sha256File(tmp);
     if (sha !== m.sha256) {
-      return { id, status: "fail", code: "DRIVER_CHECKSUM", summary: `the downloaded ${m.asset} doesn't match fork/release.json; it was deleted`, evidence: [`expected ${m.sha256}`, `got ${sha}`], next: "Rerun scripts/install.sh. If it keeps failing, the release asset changed: report it." };
+      return { id, status: "fail", code: "DRIVER_CHECKSUM", summary: `the downloaded ${m.asset} doesn't match driver/release.json; it was deleted`, evidence: [`expected ${m.sha256}`, `got ${sha}`], next: "Rerun scripts/install.sh. If it keeps failing, the release asset changed: report it." };
     }
     installExe(tmp, { source: "release", fingerprint: fp, sha256: m.sha256, tag: m.tag });
     return { id, status: "ok", code: "DRIVER_DOWNLOADED", summary: `installed release ${m.tag}`, evidence: [`sha256 ${m.sha256}`] };
@@ -154,14 +155,14 @@ function download(m: ReleaseManifest, fp: string): Check {
   }
 }
 
-/** fork/build.sh --clean, then install its exe with a record of the sources it came from. Build
- *  output goes to stderr so a --json report on stdout stays parseable. */
+/** scripts/build-driver.sh --no-install, then install its exe with a record of the sources it came
+ *  from. Build output goes to stderr so a --json report on stdout stays parseable. */
 export function buildDriver(fp: string): Check {
   const id = "driver";
-  const built = run(path.join(REPO, "fork", "build.sh"), ["--clean"], { stdio: ["ignore", 2, 2] });
-  if (built.code !== 0) return { id, status: "fail", code: "DRIVER_BUILD_FAILED", summary: "fork/build.sh --clean failed; its output is above", next: "Fix the build error, then rerun with --build. The existing install is unchanged." };
-  if (fingerprint() !== fp) return { id, status: "fail", code: "DRIVER_SOURCES_CHANGED", summary: "the fork sources changed during the build", next: "Rerun with --build." };
-  const out = path.join(REPO, "tools", "clean", "out");
+  const built = run(path.join(REPO, "scripts", "build-driver.sh"), ["--no-install"], { stdio: ["ignore", 2, 2] });
+  if (built.code !== 0) return { id, status: "fail", code: "DRIVER_BUILD_FAILED", summary: "scripts/build-driver.sh failed; its output is above", next: "Fix the build error, then rerun with --build. The existing install is unchanged." };
+  if (fingerprint() !== fp) return { id, status: "fail", code: "DRIVER_SOURCES_CHANGED", summary: "the driver sources changed during the build", next: "Rerun with --build." };
+  const out = path.join(REPO, "tools", "out");
   const tmp = path.join(path.dirname(EXE), `.build-${process.pid}`);
   fs.mkdirSync(path.dirname(EXE), { recursive: true });
   fs.copyFileSync(path.join(out, "cua-driver.exe"), tmp);

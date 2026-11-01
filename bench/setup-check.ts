@@ -18,10 +18,10 @@
 //   moved        a checkout moved elsewhere that clients keep pointing at
 //   preserve     unrelated Codex servers, skills, policy settings or a hand-built driver that get replaced
 //   malformed    a broken policy file that gets overwritten with defaults
-//   no-release   changed fork patches that fall back to an unrelated binary
+//   no-release   changed driver sources that fall back to an unrelated binary
 //   temporary    a git worktree that gets registered and later vanishes
 //   app          a server that installs fine but can't drive a real app (doctor --verify, TestPad)
-//   --build      a clean build that reuses an old tools/src/cua tree (slow: compiles Rust)
+//   --build      a build from the changed sources that isn't recorded as theirs (slow: compiles Rust)
 //   --browser    browser attach reported ready without driving a tab (uses the user's real policy, read-only)
 //   --clients    a client that registers bcu but can't call it (runs Claude and Codex with the user's login)
 //
@@ -127,7 +127,7 @@ function snapshot(home: string, checkout: string): Record<string, string | null>
 const claudeJson = <T>(env: NodeJS.ProcessEnv, args: string[]) => JSON.parse(sh("claude", args, { env }).stdout) as T;
 const codexJson = <T>(env: NodeJS.ProcessEnv, args: string[]) => JSON.parse(sh("codex", args, { env }).stdout) as T;
 
-const manifest = JSON.parse(fs.readFileSync(path.join(REPO, "fork", "release.json"), "utf8")) as { sha256: string; tag: string; fingerprint: string };
+const manifest = JSON.parse(fs.readFileSync(path.join(REPO, "driver", "release.json"), "utf8")) as { sha256: string; tag: string; fingerprint: string };
 
 // --- cases --------------------------------------------------------------------------------------
 
@@ -271,18 +271,14 @@ const cloneC = clone("clone C");
 {
   fs.rmSync(path.join(cloneC, "plugin/driver/cua-driver.exe"));
   fs.rmSync(path.join(cloneC, "plugin/driver/cua-driver.json"));
-  const patch = fs.readdirSync(path.join(cloneC, "fork/patches")).sort()[0];
-  fs.appendFileSync(path.join(cloneC, "fork/patches", patch), "\n");
+  fs.appendFileSync(path.join(cloneC, "driver/VERSION"), "\n");
   const r = setup("no-release", cloneC, "install", envC);
-  check("no-release: changed patches need a build or release", r.code === 1 && r.has("DRIVER_NO_RELEASE") && !fs.existsSync(path.join(cloneC, "plugin/driver/cua-driver.exe")), r.summary);
-  check("no-release: no download, no build, clients left alone", !r.ran(/release download|curl|build\.sh|marketplace add|mcp add/) && r.has("CLIENT_SKIPPED"), r.summary);
+  check("no-release: changed driver sources need a build or release", r.code === 1 && r.has("DRIVER_NO_RELEASE") && !fs.existsSync(path.join(cloneC, "plugin/driver/cua-driver.exe")), r.summary);
+  check("no-release: no download, no build, clients left alone", !r.ran(/release download|curl|build-driver\.sh|marketplace add|mcp add/) && r.has("CLIENT_SKIPPED"), r.summary);
   if (flags.build) {
-    // An old dev tree must not decide what a clean build contains.
-    fs.mkdirSync(path.join(cloneC, "tools/src/cua"), { recursive: true });
-    fs.writeFileSync(path.join(cloneC, "tools/src/cua/stale"), "old tree");
     const b = setup("build", cloneC, "install", { ...envC, PATH: `${path.join(os.homedir(), ".cargo/bin")}:${envC.PATH}` }, ["--build"]);
     const record = JSON.parse(fs.readFileSync(path.join(cloneC, "plugin/driver/cua-driver.json"), "utf8")) as { source: string; sha256: string };
-    check("build: clean build from the changed patches, old tree untouched", b.has("DRIVER_BUILT") && record.source === "build" && record.sha256 === sha(path.join(cloneC, "plugin/driver/cua-driver.exe")) && fs.readFileSync(path.join(cloneC, "tools/src/cua/stale"), "utf8") === "old tree", b.summary);
+    check("build: built from the changed sources and recorded as a build", b.has("DRIVER_BUILT") && record.source === "build" && record.sha256 === sha(path.join(cloneC, "plugin/driver/cua-driver.exe")), b.summary);
   }
 }
 

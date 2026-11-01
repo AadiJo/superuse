@@ -2,9 +2,8 @@
 bench/out/
 bench/workdir/
 bench/.codex-home/
-fork/acceptance-runs/
 
-# Downloads, clones and builds (fork/build.sh recreates them).
+# Downloads and builds (scripts/build-driver.sh recreates them).
 /tools/
 /plugin/driver/
 

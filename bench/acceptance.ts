@@ -1,13 +1,13 @@
 // Live acceptance checks for the forked Cua Driver on the Windows desktop.
 //
-//   node fork/acceptance.ts [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer]
+//   node bench/acceptance.ts [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer]
 //       [win32menu] [win32menu_bypos] [menubg] [ownership] [fgpoint] [cursorclip] [cursoroverlay] [helium]
 //
 // Drives the driver (BCU_CUA_DRIVER, default plugin/driver/cua-driver.exe) over MCP stdio against
-// windows this script opens itself (TestPad, MenuPad from fork/apps, an Explorer window on
+// windows this script opens itself (TestPad, MenuPad from bench/apps, an Explorer window on
 // %TEMP%\bcu\explorer_move, the throwaway-profile Edge form, Calculator), records every tool call
 // with its time, samples the real cursor and foreground window, and writes
-// fork/acceptance-runs/acceptance-<time>.json. Tool calls only target windows this script opened.
+// bench/out/acceptance-runs/acceptance-<time>.json. Tool calls only target windows this script opened.
 // Explorer windows share the shell's pid, so the explorer check matches titles in memory to find
 // its own window and logs none of them.
 //
@@ -25,14 +25,14 @@ import { tmpdir } from "node:os";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { McpClient, textOf, type Args, type Structured, type ToolResult } from "../bench/mcp-client.ts";
-import { calcDisplay, edgeFormSetup, editReplaceSetup, editSaveasSetup, equalLists, explorerMoveSetup, openFormPage, readLines, start } from "../bench/tasks.ts";
-import { closeNewWindows, killBenchEdge, killTestPad, listWindows, ps, Sampler, timestamp, WIN_TEMP, WSL_TEMP, type Disturbance, type Win } from "../bench/win.ts";
+import { McpClient, textOf, type Args, type Structured, type ToolResult } from "./mcp-client.ts";
+import { calcDisplay, edgeFormSetup, editReplaceSetup, editSaveasSetup, equalLists, explorerMoveSetup, openFormPage, readLines, start } from "./tasks.ts";
+import { closeNewWindows, killBenchEdge, killTestPad, listWindows, ps, Sampler, timestamp, WIN_TEMP, WSL_TEMP, type Disturbance, type Win } from "./win.ts";
 
 const HERE = import.meta.dirname;
 // The driver under test: BCU_CUA_DRIVER, else the one the plugin ships.
 const EXE = process.env.BCU_CUA_DRIVER ?? path.join(HERE, "..", "plugin/driver/cua-driver.exe");
-const OUT = path.join(HERE, "acceptance-runs");
+const OUT = path.join(HERE, "out", "acceptance-runs");
 const STAMP = timestamp(); // names this run's JSON and the images checks save beside it
 const ENV = { DO_NOT_TRACK: "1", WSLENV: "DO_NOT_TRACK" };
 const ROW = /^\s*- \[(\d+)\] (\w+)(?: "([^"]*)")?(.*)$/s; // s: a multi-line value leaves a \r on the row, which . must match
@@ -353,7 +353,7 @@ async function checkExplorer(run: Run) {
 
 const MENUPAD_SRC = path.join(HERE, "apps", "MenuPad.cs");
 
-/** Build fork/apps/MenuPad.cs into %TEMP%\bcu\MenuPad.exe (like TestPad) and start it with `flags`,
+/** Build bench/apps/MenuPad.cs into %TEMP%\bcu\MenuPad.exe (like TestPad) and start it with `flags`,
  * plus `--title` when given. Start-Process joins arguments with spaces, so none may contain one.
  * Returns the new window with that title. */
 async function openMenupad(flags: string[] = [], title?: string): Promise<Win> {
@@ -722,7 +722,7 @@ async function checkCursorclip(run: Run) {
 const SHOTS_SRC = path.join(HERE, "apps", "CursorShots.cs");
 const SHOTS_DLL = `${WIN_TEMP}\\CursorShots.dll`;
 
-/** Run `script` with fork/apps/CursorShots.cs loaded, compiling it when the source is newer. */
+/** Run `script` with bench/apps/CursorShots.cs loaded, compiling it when the source is newer. */
 async function shots(script: string, timeoutMs = 60_000): Promise<string> {
   const dll = path.join(WSL_TEMP, "CursorShots.dll");
   if (!existsSync(dll) || statSync(dll).mtimeMs < statSync(SHOTS_SRC).mtimeMs) {

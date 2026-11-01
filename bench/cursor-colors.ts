@@ -3,7 +3,7 @@
 //   SUPERUSE_DRIVER=tools/out/superuse-driver.exe node bench/cursor-colors.ts [--baseline <exe>]
 //
 // Sends input to the shared desktop, so run it under `flock /tmp/superuse-desktop.lock` on an idle
-// desktop. It opens three MenuPads (bench/apps), raises them without activating them, and only
+// desktop, with no other driver from this build running (it refuses to start if one holds a slot). It opens three MenuPads (bench/apps), raises them without activating them, and only
 // clicks inside them.
 // - three: three drivers start at once and each clicks its own MenuPad at the same moment. One
 //   capture shows all three cursors; each must have a different palette color.
@@ -148,7 +148,8 @@ Add-Type -TypeDefinition (Get-Content -Raw '${WIN_TEMP}\\MenuPad.cs') -OutputAss
   throw new Error(`MenuPad ${title} did not open`);
 }
 
-/** Overlay windows of this script's drivers, by slot from their titles (`...<cursor id>.slot<N>`). */
+/** Every driver overlay on the desktop, by slot from its title (`...<cursor id>.slot<N>`). Builds
+ *  before slots have no `.slot<N>` suffix and read as null. */
 async function overlaySlots(): Promise<{ pid: number; slot: number | null; title: string }[]> {
   return (await listWindows(true)).filter((w) => w.cls === OVERLAY_CLASS).map((w) => {
     const m = /\.slot(\d+)$/.exec(w.title);
@@ -241,6 +242,10 @@ const pads: Win[] = [];
 const agents: Agent[] = [];
 const result: Record<string, unknown> = { exe: EXE, baseline: BASELINE ?? null, stamp: STAMP };
 try {
+  // Slots are machine-wide, so another driver from this build (e.g. the user's own session) would
+  // shift every expected slot. Refuse to run rather than report a false failure.
+  const foreign = (await overlaySlots()).filter((o) => o.slot !== null);
+  if (foreign.length) throw new Error(`other drivers already hold cursor slots: ${JSON.stringify(foreign)}. Close those sessions first.`);
   for (const [i, x] of [40, 580, 1120].entries()) pads.push(await openMenupad(x, 120, `MenuPad-color-${i + 1}`));
   // Other windows on a shared desktop can cover a MenuPad, and the overlay hides a cursor there.
   await shot(pads.map((p) => `[SuperuseColors]::Raise(${p.hwnd})`).join("; "));

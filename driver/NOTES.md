@@ -383,5 +383,5 @@ Several agents can run Superuse at once, each with its own driver and overlay. B
 
 ### Limits
 
-- The color belongs to the driver process, not the session. Several sessions in one driver share a color, and only their badges tell them apart. The plugin runs one session per driver.
+- The color belongs to the driver process, not the session. Several sessions in one driver share a color, and only their badges tell them apart. The plugin runs one session per driver. One exception: when a history preview admission file exists, `mcp` proxies every agent into one shared `serve` daemon (`superuse-driver/src/main.rs`), so all of them draw one color. The plugin never sets that file up.
 - Drivers from builds before this one claim no slot, so one of them can match a new driver's color.

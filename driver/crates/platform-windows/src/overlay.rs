@@ -661,7 +661,7 @@ fn run_overlay_thread(cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
 /// Claim the first cursor color slot ([`cursor_overlay::CURSOR_FILLS`]) that
 /// no other live driver holds, so concurrent agents draw different colors.
 ///
-/// Each slot is a named mutex in this logon session. Creating a named object
+/// Each slot is a named mutex in this desktop session (`Local\`). Creating a named object
 /// is atomic, so two drivers starting together can't both get a slot as new.
 /// The claiming handle stays open for the life of the process, and Windows
 /// deletes the mutex when its last handle closes, so a driver that exits or

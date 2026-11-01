@@ -1,6 +1,6 @@
 ---
 name: computer-use
-description: Windows desktop apps and the user's open browser through the bcu `js` tool. Use for GUI-only work in native apps (menus, dialogs, forms, Calculator, File Explorer) and for web pages in the user's Chrome, Edge or Helium.
+description: Windows desktop apps and the user's open browser through the Superuse `js` tool. Use for GUI-only work in native apps (menus, dialogs, forms, Calculator, File Explorer) and for web pages in the user's Chrome, Edge or Helium.
 ---
 
 # Windows computer use

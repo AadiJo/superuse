@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Report whether this checkout's bcu install works, without changing anything.
+# Report whether this checkout's superuse install works, without changing anything.
 #
 #   scripts/doctor.sh             text report
 #   scripts/doctor.sh --json      one JSON report on stdout
@@ -10,5 +10,5 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 source "$root/scripts/node.sh"
-node="$(bcu_node)" || exit 1
+node="$(superuse_node)" || exit 1
 exec "$node" "$root/scripts/setup.ts" doctor "$@"

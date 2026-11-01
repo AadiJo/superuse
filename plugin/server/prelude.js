@@ -7,8 +7,8 @@
 // (an un-awaited `w.find(...)`); they resolve inside the queue, just before the call runs.
 // Calls queued by a js call that timed out are cancelled, not run later behind the next call.
 (() => {
-  const host = globalThis.__bcu_host;
-  delete globalThis.__bcu_host;
+  const host = globalThis.__superuse_host;
+  delete globalThis.__superuse_host;
 
   const METHODS = ["state", "find", "click", "setValue", "select", "type", "key", "drag", "menu", "screenshot", "waitFor"];
   const PAGE_METHODS = ["read", "click", "type", "key", "select", "go", "close", "tabs", "waitFor", "screenshot"];
@@ -114,7 +114,7 @@
   fixed("setTimeout", (fn, ms) => { call("cua.sleep", [ms]).then(() => fn()); });
 
   /** Called by the host once per js call with the model's code wrapped in an async function. */
-  fixed("__bcu_run", async (fn) => {
+  fixed("__superuse_run", async (fn) => {
     pending = []; errors = []; logs = [];
     let value, error = null;
     try { value = await settle(await fn()); } catch (e) { error = message(e); }
@@ -128,5 +128,5 @@
   });
 
   /** After a timed-out call: cancel everything it queued, and let new calls start right away. */
-  fixed("__bcu_reset_queue", () => { epoch++; tail = Promise.resolve(); });
+  fixed("__superuse_reset_queue", () => { epoch++; tail = Promise.resolve(); });
 })();

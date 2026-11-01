@@ -3,9 +3,9 @@
 //   node bench/acceptance.ts [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer]
 //       [win32menu] [win32menu_bypos] [menubg] [ownership] [fgpoint] [cursorclip] [cursoroverlay] [helium]
 //
-// Drives the driver (BCU_CUA_DRIVER, default plugin/driver/cua-driver.exe) over MCP stdio against
+// Drives the driver (SUPERUSE_DRIVER, default plugin/driver/cua-driver.exe) over MCP stdio against
 // windows this script opens itself (TestPad, MenuPad from bench/apps, an Explorer window on
-// %TEMP%\bcu\explorer_move, the throwaway-profile Edge form, Calculator), records every tool call
+// %TEMP%\superuse\explorer_move, the throwaway-profile Edge form, Calculator), records every tool call
 // with its time, samples the real cursor and foreground window, and writes
 // bench/out/acceptance-runs/acceptance-<time>.json. Tool calls only target windows this script opened.
 // Explorer windows share the shell's pid, so the explorer check matches titles in memory to find
@@ -30,8 +30,8 @@ import { calcDisplay, edgeFormSetup, editReplaceSetup, editSaveasSetup, equalLis
 import { closeNewWindows, killBenchEdge, killTestPad, listWindows, ps, Sampler, timestamp, WIN_TEMP, WSL_TEMP, type Disturbance, type Win } from "./win.ts";
 
 const HERE = import.meta.dirname;
-// The driver under test: BCU_CUA_DRIVER, else the one the plugin ships.
-const EXE = process.env.BCU_CUA_DRIVER ?? path.join(HERE, "..", "plugin/driver/cua-driver.exe");
+// The driver under test: SUPERUSE_DRIVER, else the one the plugin ships.
+const EXE = process.env.SUPERUSE_DRIVER ?? path.join(HERE, "..", "plugin/driver/cua-driver.exe");
 const OUT = path.join(HERE, "out", "acceptance-runs");
 const STAMP = timestamp(); // names this run's JSON and the images checks save beside it
 const ENV = { DO_NOT_TRACK: "1", WSLENV: "DO_NOT_TRACK" };
@@ -221,10 +221,10 @@ async function checkReplace(run: Run) {
 
 // --- 3. Edge form -----------------------------------------------------------------
 
-/** PIDs of Edge processes running the throwaway bcu profile. */
+/** PIDs of Edge processes running the throwaway superuse profile. */
 async function edgePids(): Promise<Set<number>> {
   const out = await ps("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
-    + "Where-Object { $_.CommandLine -like '*bcu\\edge-profile*' } | ForEach-Object { $_.ProcessId }");
+    + "Where-Object { $_.CommandLine -like '*superuse\\edge-profile*' } | ForEach-Object { $_.ProcessId }");
   return new Set(out.split(/\s+/).filter((x) => /^\d+$/.test(x)).map(Number));
 }
 
@@ -334,18 +334,18 @@ async function checkExplorer(run: Run) {
       if (rows.some((r) => r.role === "ListItem" && r.name === "archive")) break;
       await sleep(200);
     }
-    await step("select a.bcu", "click", { pid, element_token: find(rows, "ListItem", "a.bcu").token, action: "select" });
+    await step("select a.superuse", "click", { pid, element_token: find(rows, "ListItem", "a.superuse").token, action: "select" });
     await step("cut", "hotkey", { pid, window_id: hwnd, keys: ["ctrl", "x"] });
     await step("open archive", "click", { pid, element_token: find(rows, "ListItem", "archive").token });
     const navigated = await waitFor(async () => (await windowsOf(new Set([pid]))).some((w) => w.hwnd === hwnd && w.title.startsWith("archive")), 5);
     await step("paste", "hotkey", { pid, window_id: hwnd, keys: ["ctrl", "v"] });
-    const moved = await waitFor(() => existsSync(path.join(dir, "archive", "a.bcu")) && !existsSync(path.join(dir, "a.bcu")));
+    const moved = await waitFor(() => existsSync(path.join(dir, "archive", "a.superuse")) && !existsSync(path.join(dir, "a.superuse")));
     return { steps, new_folder_created: newFolderCreated, renamed, navigated, moved, tool_ms_total: round1(steps.reduce((t, s) => t + s.ms, 0)) };
   });
   const contents = readdirSync(dir, { recursive: true, encoding: "utf8" }).toSorted();
   return {
     ...res, sampler, contents,
-    passed: equalLists(contents, ["archive", "archive/a.bcu", "b.bcu"]) && !res.steps.some((s) => s.error) && sampler.cursor_max_displacement_px === 0,
+    passed: equalLists(contents, ["archive", "archive/a.superuse", "b.superuse"]) && !res.steps.some((s) => s.error) && sampler.cursor_max_displacement_px === 0,
   };
 }
 
@@ -353,7 +353,7 @@ async function checkExplorer(run: Run) {
 
 const MENUPAD_SRC = path.join(HERE, "apps", "MenuPad.cs");
 
-/** Build bench/apps/MenuPad.cs into %TEMP%\bcu\MenuPad.exe (like TestPad) and start it with `flags`,
+/** Build bench/apps/MenuPad.cs into %TEMP%\superuse\MenuPad.exe (like TestPad) and start it with `flags`,
  * plus `--title` when given. Start-Process joins arguments with spaces, so none may contain one.
  * Returns the new window with that title. */
 async function openMenupad(flags: string[] = [], title?: string): Promise<Win> {
@@ -502,16 +502,16 @@ async function boundsOf(run: Run, pid: number, hwnd: number): Promise<[x: number
 const HIT_PS = String.raw`
 Add-Type @"
 using System; using System.Runtime.InteropServices;
-public class BcuHit {
+public class SuperuseHit {
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint f);
 }
 "@
-[void][BcuHit]::SetThreadDpiAwarenessContext([IntPtr](-4))
-$p = New-Object BcuHit+POINT; $p.X = %X%; $p.Y = %Y%
-[BcuHit]::GetAncestor([BcuHit]::WindowFromPoint($p), 2).ToInt64()
+[void][SuperuseHit]::SetThreadDpiAwarenessContext([IntPtr](-4))
+$p = New-Object SuperuseHit+POINT; $p.X = %X%; $p.Y = %Y%
+[SuperuseHit]::GetAncestor([SuperuseHit]::WindowFromPoint($p), 2).ToInt64()
 `;
 
 /** Top-level window at screen pixel (x, y), as a per-monitor DPI-aware caller sees it. */
@@ -593,7 +593,7 @@ async function checkFgpoint(run: Run) {
 const CURSOR_PS = String.raw`
 Add-Type -ReferencedAssemblies System.Drawing @"
 using System; using System.Drawing; using System.Drawing.Imaging; using System.Runtime.InteropServices;
-public class BcuCursor {
+public class SuperuseCursor {
   [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int ht, uint f);
   public static string Count(int x, int y, int w, int h, string path, string basePath, int[] rects) {
@@ -629,7 +629,7 @@ type Rect = readonly [x: number, y: number, w: number, h: number];
 async function cursorPixels(area: Rect, name: string, rects: Rect[], before?: string): Promise<number[]> {
   const file = `cursorclip-${name}.png`;
   const base = before ? `${WIN_TEMP}\\cursorclip-${before}.png` : "";
-  const out = await ps(`${CURSOR_PS}[BcuCursor]::Count(${area.join(",")}, '${WIN_TEMP}\\${file}', '${base}', [int[]]@(${rects.flat().join(",")}))`);
+  const out = await ps(`${CURSOR_PS}[SuperuseCursor]::Count(${area.join(",")}, '${WIN_TEMP}\\${file}', '${base}', [int[]]@(${rects.flat().join(",")}))`);
   mkdirSync(OUT, { recursive: true });
   copyFileSync(path.join(WSL_TEMP, file), path.join(OUT, `${STAMP}-${file}`));
   return base ? (out.trim().split(/\s+/).at(-1) ?? "").split(",").map(Number) : [];
@@ -638,8 +638,8 @@ async function cursorPixels(area: Rect, name: string, rects: Rect[], before?: st
 /** Move and size a window this script opened and put it at the front of the ordinary windows,
  * without activating it. Topmost and back is the lock-free way to raise another app's window. */
 async function placeOnTop(hwnd: number, [x, y, w, h]: Rect): Promise<void> {
-  const pos = (after: number, flags: number) => `[void][BcuCursor]::SetWindowPos([IntPtr]${hwnd}, [IntPtr](${after}), ${x}, ${y}, ${w}, ${h}, ${flags});`;
-  await ps(`${CURSOR_PS}[void][BcuCursor]::SetThreadDpiAwarenessContext([IntPtr](-4)); ${pos(-1, 0x10)} ${pos(-2, 0x13)}`); // HWND_TOPMOST, then HWND_NOTOPMOST; SWP_NOACTIVATE (| NOSIZE | NOMOVE)
+  const pos = (after: number, flags: number) => `[void][SuperuseCursor]::SetWindowPos([IntPtr]${hwnd}, [IntPtr](${after}), ${x}, ${y}, ${w}, ${h}, ${flags});`;
+  await ps(`${CURSOR_PS}[void][SuperuseCursor]::SetThreadDpiAwarenessContext([IntPtr](-4)); ${pos(-1, 0x10)} ${pos(-2, 0x13)}`); // HWND_TOPMOST, then HWND_NOTOPMOST; SWP_NOACTIVATE (| NOSIZE | NOMOVE)
 }
 
 /** A: target. B: an ordinary window raised above A. With a session label the driver draws its
@@ -649,7 +649,7 @@ async function placeOnTop(hwnd: number, [x, y, w, h]: Rect): Promise<void> {
  * - covered: B moved over all of A (a full-screen app over the target), then an element click.
  * Each count is the cursor pixels in that region after the click, against a capture just before it. */
 async function checkCursorclip(run: Run) {
-  const session = "bcu"; // as the plugin's calls carry
+  const session = "superuse"; // as the plugin's calls carry
   const a = await openMenupad(["--at", "100", "100"], "MenuPad-A");
   try {
     const b = await openMenupad(["--at", "700", "100"], "MenuPad-B");
@@ -717,7 +717,7 @@ async function checkCursorclip(run: Run) {
   }
 }
 
-// --- 10. The bcu cursor hides when windows move over its background window --------------------
+// --- 10. The superuse cursor hides when windows move over its background window --------------------
 
 const SHOTS_SRC = path.join(HERE, "apps", "CursorShots.cs");
 const SHOTS_DLL = `${WIN_TEMP}\\CursorShots.dll`;
@@ -771,20 +771,20 @@ const inner = ([x, y, w, h]: Rect, scale: number): Rect => {
   return [x + side, y + top, w - 2 * side, h - top - bottom];
 };
 
-/** bcu works in A, a MenuPad in the background, through the real plugin server (plugin/server/run.sh
+/** superuse works in A, a MenuPad in the background, through the real plugin server (plugin/server/run.sh
  * over the driver under test, with the session label and fast cursor clients get). Then windows
  * start to cover it, and the cursor must not show on any of them:
  * - shown: a click at A's centre. The cursor must show there, its tip within 12 px of the click
  *   point, and this reads its colour.
  * - slide: B slides over the resting cursor. Frames start the moment B moves.
- * - under: bcu keeps clicking points of A under B, by pixel and by element.
+ * - under: superuse keeps clicking points of A under B, by pixel and by element.
  * - again: a click on a part of A nothing covers. The cursor must show again.
  * - opened: a new app window (C) opens over the resting cursor.
- * - fullscreen: B is maximized over everything while bcu keeps clicking A.
+ * - fullscreen: B is maximized over everything while superuse keeps clicking A.
  * Frame series are counted inside each covering window's client area, on pixels where that window
  * is on top: other sessions' windows can open on this desktop mid-run. */
 async function checkCursoroverlay(run: Run) {
-  const policy = path.join(mkdtempSync(path.join(tmpdir(), "bcu-overlay-")), "policy.json");
+  const policy = path.join(mkdtempSync(path.join(tmpdir(), "superuse-overlay-")), "policy.json");
   writeFileSync(policy, JSON.stringify({ allow: ["MenuPad"], foreground: "deny" }));
   const a = await openMenupad(["--at", "520", "100"], "MenuPad-A");
   try {
@@ -801,14 +801,14 @@ async function checkCursoroverlay(run: Run) {
     // MenuPad places itself in logical pixels; A was asked for x = 520, so its frame position gives the display scale.
     const scale = (ax - 7) / 520;
     const client = (r: Rect) => inner(r, scale);
-    await using bcu = await McpClient.start([path.join(HERE, "..", "plugin/server/run.sh")], {
-      env: { BCU_CUA_DRIVER: path.resolve(EXE), BCU_POLICY: policy, BCU_AUDIT: "off" }, elicit: "unsupported",
+    await using superuse = await McpClient.start([path.join(HERE, "..", "plugin/server/run.sh")], {
+      env: { SUPERUSE_DRIVER: path.resolve(EXE), SUPERUSE_POLICY: policy, SUPERUSE_AUDIT: "off" }, elicit: "unsupported",
     });
     const js = async (code: string) => {
-      const { result, ms } = await bcu.call("js", { code }, 60_000);
+      const { result, ms } = await superuse.call("js", { code }, 60_000);
       const text = textOf(result);
-      run.log.push({ tool: "bcu js", args: { code }, ms: round1(ms), error: !!result.isError, text: text.slice(0, 600) });
-      console.log(`  bcu js ${ms.toFixed(1).padStart(7)} ms ${result.isError ? "ERR " : ""}${JSON.stringify(text.slice(0, 200))}`);
+      run.log.push({ tool: "superuse js", args: { code }, ms: round1(ms), error: !!result.isError, text: text.slice(0, 600) });
+      console.log(`  superuse js ${ms.toFixed(1).padStart(7)} ms ${result.isError ? "ERR " : ""}${JSON.stringify(text.slice(0, 200))}`);
       return { ms: round1(ms), error: !!result.isError, text: text.slice(0, 300) };
     };
     // Screenshot pixels map to screen as frame origin + 1; MenuPad's screenshot isn't downscaled.
@@ -854,7 +854,7 @@ async function checkCursoroverlay(run: Run) {
     // slide: B moves over the resting cursor inside the series call, before its first frame.
     const slide = await (await startSeries({ name: "slide", area, rects: [client(slideRect)], owners: [b.hwnd], frames: 14, everyMs: 100, place: { hwnd: b.hwnd, rect: slideRect } }, rgb)).done;
 
-    // under: bcu keeps working in A beneath B.
+    // under: superuse keeps working in A beneath B.
     const underSeries = await startSeries({ name: "under", area, rects: [client(slideRect)], owners: [b.hwnd], frames: 30, everyMs: 150 }, rgb);
     const underClicks = [await clickAt(under[0]), await clickAt(under[1]), await clickAt(under[2]), await clickEditor()];
     const underFrames = await underSeries.done;
@@ -873,7 +873,7 @@ async function checkCursoroverlay(run: Run) {
     const cCoversCursor = visible[0] > cx0 && visible[0] + 40 < cx0 + cw0 && visible[1] > cy0 && visible[1] + 40 < cy0 + ch0;
     const opened = await (await startSeries({ name: "opened", area, rects: [client(cBounds)], owners: [c.hwnd], frames: 14, everyMs: 150 }, rgb)).done;
 
-    // fullscreen: B is maximized over everything, and bcu keeps clicking A underneath.
+    // fullscreen: B is maximized over everything, and superuse keeps clicking A underneath.
     await shots(`[CursorShots]::Maximize(${b.hwnd})`);
     await sleep(500);
     const full = await boundsOf(run, b.pid, b.hwnd);
@@ -901,7 +901,7 @@ async function checkCursoroverlay(run: Run) {
 // --- 6. Helium: the browser_* route on the user's real browser, in a background tab ----------
 
 const HELIUM_EXE = String.raw`\imput\Helium\Application\chrome.exe`;
-const HELIUM_FORM = `<!doctype html><html><head><meta charset="utf-8"><title>BCU Helium test</title></head><body>
+const HELIUM_FORM = `<!doctype html><html><head><meta charset="utf-8"><title>Superuse Helium test</title></head><body>
 <form id="f">
 <label>Name <input id="name"></label>
 <label>Email <input id="email" type="email"></label>
@@ -971,7 +971,7 @@ async function heliumStripStrays(run: Run, wins: Win[]): Promise<string[]> {
       session: "acceptance-helium-strip", pid: w.pid, window_id: w.hwnd, include_screenshot: false, full_output: true,
     });
     for (const [, name] of (result.structuredContent?.tree_markdown ?? "").matchAll(/TabItem "([^"]*)"/g)) {
-      if (name.startsWith("BCU Helium test") || name.startsWith("Inspect with")) strays.push(name);
+      if (name.startsWith("Superuse Helium test") || name.startsWith("Inspect with")) strays.push(name);
     }
   }
   return strays;

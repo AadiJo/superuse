@@ -37,13 +37,13 @@ const submissions: Submission[] = [];
 
 // The bench form, plus a contenteditable Notes box, and a beacon to this server on submit.
 const PAGE = FORM_HTML
-  .replaceAll("<title>Signup form</title>", "<title>BCU Helium test</title>")
+  .replaceAll("<title>Signup form</title>", "<title>Superuse Helium test</title>")
   .replaceAll('<button type="submit">Submit</button>',
     '<label>Notes <div id="notes" contenteditable="true" role="textbox" aria-label="Notes" '
     + 'style="border:1px solid #888;min-height:40px"></div></label>\n<button type="submit">Submit</button>')
-  // The title keeps "BCU Helium test" after submit, whatever was typed, so cleanup can find the tab.
+  // The title keeps "Superuse Helium test" after submit, whatever was typed, so cleanup can find the tab.
   .replaceAll("document.title = 'SUBMITTED ' + s;",
-    "document.title = 'BCU Helium test: SUBMITTED ' + s; fetch('/submitted?' + new URLSearchParams({name: v('name').value, "
+    "document.title = 'Superuse Helium test: SUBMITTED ' + s; fetch('/submitted?' + new URLSearchParams({name: v('name').value, "
     + "email: v('email').value, plan: v('plan').value, agree: v('agree').checked ? 'yes' : 'no', "
     + "notes: v('notes').textContent}));");
 
@@ -79,7 +79,7 @@ async function cleanup(): Promise<string[]> {
   const done: string[] = [];
   const prompts = await debuggingPrompts();
   if (prompts.length) {
-    await ps(WIN_TYPES + prompts.map((w) => `[void][BcuW]::PostMessage([IntPtr]${w.hwnd},0x0010,[IntPtr]::Zero,[IntPtr]::Zero)\n`).join(""));
+    await ps(WIN_TYPES + prompts.map((w) => `[void][SuperuseW]::PostMessage([IntPtr]${w.hwnd},0x0010,[IntPtr]::Zero,[IntPtr]::Zero)\n`).join(""));
     done.push(`denied ${prompts.length} prompt(s)`);
   }
   await using c = await McpClient.start([path.join(REPO, "plugin/driver/cua-driver.exe"), "mcp"], { env: { DO_NOT_TRACK: "1", WSLENV: "DO_NOT_TRACK" } });
@@ -91,7 +91,7 @@ async function cleanup(): Promise<string[]> {
       const lines = (d.tree_markdown ?? "").split(/\r?\n/);
       // Only the test page, whose title always starts with its marker. Any other tab may be the
       // user's, including a chrome://inspect page, which the driver's setup can also open.
-      const hit = lines.findIndex((l) => l.includes("TabItem") && l.includes('"BCU Helium test'));
+      const hit = lines.findIndex((l) => l.includes("TabItem") && l.includes('"Superuse Helium test'));
       if (hit < 0) break;
       // The tab's own Close button: one of the next few rows, nested under the tab.
       const close = lines.slice(hit + 1, hit + 6).find((l) => indent(l) > indent(lines[hit]) && l.includes('Button "Close"'));
@@ -126,7 +126,7 @@ const STEPS: Array<[label: string, code: string]> = [
 
 /** Run STEPS through one plugin server session, under the desktop sampler. */
 async function runSteps() {
-  await using c = await McpClient.start(["node", path.join(REPO, "plugin/server/main.ts")], { env: { BCU_AUDIT: "off" } });
+  await using c = await McpClient.start(["node", path.join(REPO, "plugin/server/main.ts")], { env: { SUPERUSE_AUDIT: "off" } });
   const sampler = await Sampler.start();
   const t0 = Date.now();
   const steps: Array<{ step: string; ms: number; ok: boolean; detail: string }> = [];
@@ -167,7 +167,7 @@ async function claudeRun(hideHeliumMcp: boolean) {
     const stdout = openSync(transcript, "w");
     // --no-helium-mcp hides the user's own chrome-devtools-mcp server ("helium"), to test the plugin path alone.
     const hide = hideHeliumMcp ? ["--disallowedTools", "mcp__helium"] : [];
-    const proc = spawn("claude", ["-p", prompt, "--allowedTools", "mcp__plugin_bcu_computer__js", "Skill", ...hide,
+    const proc = spawn("claude", ["-p", prompt, "--allowedTools", "mcp__plugin_superuse_computer__js", "Skill", ...hide,
       "--output-format", "stream-json", "--verbose", "--no-session-persistence"], { stdio: ["ignore", stdout, "ignore"], cwd: "/tmp" });
     closeSync(stdout);
     const deadline = setTimeout(() => proc.kill("SIGKILL"), 400_000);

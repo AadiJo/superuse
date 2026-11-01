@@ -1,7 +1,7 @@
 // Checks that run the real server through its launcher, the way a client does.
 //
 // The server starts with PATH=/usr/bin:/bin, like a client launched from a GUI, so it only works if
-// the launcher finds the recorded Node. Inherited BCU_APPS/BCU_FOREGROUND/BCU_BROWSERS/BCU_CUA_DRIVER
+// the launcher finds the recorded Node. Inherited SUPERUSE_APPS/SUPERUSE_FOREGROUND/SUPERUSE_BROWSERS/SUPERUSE_DRIVER
 // are removed, so a variable in this shell can't hide a problem the registered clients would hit.
 //
 // checkServer: handshake, version, QuickJS and the driver's window list (read-only).
@@ -21,7 +21,7 @@ import { browsersByHint } from "./access.ts";
 import { LAUNCHER, REPO, VERSION, run, windowsDir, type Check } from "./lib.ts";
 
 const serverEnv = (extra: Record<string, string> = {}) =>
-  ({ PATH: "/usr/bin:/bin", BCU_AUDIT: "off", BCU_APPS: undefined, BCU_FOREGROUND: undefined, BCU_BROWSERS: undefined, BCU_CUA_DRIVER: undefined, ...extra });
+  ({ PATH: "/usr/bin:/bin", SUPERUSE_AUDIT: "off", SUPERUSE_APPS: undefined, SUPERUSE_FOREGROUND: undefined, SUPERUSE_BROWSERS: undefined, SUPERUSE_DRIVER: undefined, ...extra });
 
 async function js(c: McpClient, code: string, timeoutMs = 60_000) {
   const { result } = await c.call("js", { code }, timeoutMs);
@@ -34,7 +34,7 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export async function checkServer(driver?: string): Promise<Check> {
   const id = "server";
   try {
-    await using c = await McpClient.start([LAUNCHER], { env: serverEnv(driver ? { BCU_CUA_DRIVER: driver } : {}), elicit: "unsupported" });
+    await using c = await McpClient.start([LAUNCHER], { env: serverEnv(driver ? { SUPERUSE_DRIVER: driver } : {}), elicit: "unsupported" });
     if (c.serverInfo.version !== VERSION) return { id, status: "fail", code: "SERVER_VERSION", summary: `the launcher ran server ${c.serverInfo.version}, expected ${VERSION}` };
     const tools = (await c.request("tools/list", {}, 30_000)) as { tools?: Array<{ name: string }> };
     if (!tools.tools?.some((t) => t.name === "js")) return { id, status: "fail", code: "SERVER_NO_TOOL", summary: "the server doesn't list the js tool" };
@@ -54,7 +54,7 @@ const q = (s: string) => `'${s.replaceAll("'", "''")}'`;
 export async function withTestPad<T>(use: (t: { pid: number; file: string }) => Promise<T>): Promise<T> {
   const temp = windowsDir("TEMP");
   if (!temp) throw new Error("couldn't read %TEMP% through WSL interop");
-  const dir = fs.mkdtempSync(path.join(temp, "bcu-setup-"));
+  const dir = fs.mkdtempSync(path.join(temp, "superuse-setup-"));
   const win = run("wslpath", ["-w", dir]).stdout.trim();
   let pid = 0;
   try {
@@ -72,10 +72,10 @@ export async function withTestPad<T>(use: (t: { pid: number; file: string }) => 
 
 export async function verifyApp(): Promise<Check> {
   const id = "verify:app";
-  const expected = `bcu setup check ${randomUUID().slice(0, 8)}`;
+  const expected = `superuse setup check ${randomUUID().slice(0, 8)}`;
   try {
     return await withTestPad(async ({ pid, file }): Promise<Check> => {
-      await using c = await McpClient.start([LAUNCHER], { env: serverEnv({ BCU_APPS: "TestPad" }), elicit: "unsupported" });
+      await using c = await McpClient.start([LAUNCHER], { env: serverEnv({ SUPERUSE_APPS: "TestPad" }), elicit: "unsupported" });
       const r = await js(c, `let w;
 for (let i = 0; i < 40 && !w; i++) { try { w = await cua.window({ pid: ${pid} }) } catch { await cua.sleep(250) } }
 if (!w) throw new Error("TestPad never showed a window");
@@ -100,8 +100,8 @@ export async function verifyBrowser(): Promise<Check> {
   const id = "browser";
   const nonce = randomUUID().slice(0, 8);
   let clicked = false;
-  const page = `<!doctype html><title>bcu check ${nonce}</title><p id="s">waiting ${nonce}</p>
-<button onclick="fetch('/clicked?n=${nonce}').then(() => { document.getElementById('s').textContent = 'clicked ${nonce}' })">bcu check</button>`;
+  const page = `<!doctype html><title>superuse check ${nonce}</title><p id="s">waiting ${nonce}</p>
+<button onclick="fetch('/clicked?n=${nonce}').then(() => { document.getElementById('s').textContent = 'clicked ${nonce}' })">superuse check</button>`;
   const server = http.createServer((req, res) => {
     if (req.url === `/clicked?n=${nonce}`) clicked = true;
     res.setHeader("content-type", "text/html").end(page);
@@ -123,7 +123,7 @@ for (const app of order) {
   try { p = await (await w.page()).newTab(${JSON.stringify(url)}); } catch (e) { tried.push(app + ": " + e.message); continue; }
   try {
     await p.waitFor("waiting ${nonce}", 15000);
-    const ref = (await p.read({ query: "bcu check" })).match(/\\[([^\\]]+)\\] button "bcu check"/)?.[1];
+    const ref = (await p.read({ query: "superuse check" })).match(/\\[([^\\]]+)\\] button "superuse check"/)?.[1];
     if (!ref) throw new Error("the test page's button isn't in the page read");
     await p.click(ref);
     await p.waitFor("clicked ${nonce}", 10000);

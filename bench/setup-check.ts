@@ -1,5 +1,5 @@
 // End-to-end checks of scripts/install.sh and scripts/doctor.sh, run against fresh clones in
-// isolated client configuration. Nothing here touches the user's Claude, Codex or bcu settings.
+// isolated client configuration. Nothing here touches the user's Claude, Codex or superuse settings.
 //
 //   node bench/setup-check.ts [--build] [--browser] [--clients]
 //
@@ -23,7 +23,7 @@
 //   app          a server that installs fine but can't drive a real app (doctor --verify, TestPad)
 //   --build      a build from the changed sources that isn't recorded as theirs (slow: compiles Rust)
 //   --browser    browser attach reported ready without driving a tab (uses the user's real policy, read-only)
-//   --clients    a client that registers bcu but can't call it (runs Claude and Codex with the user's login)
+//   --clients    a client that registers superuse but can't call it (runs Claude and Codex with the user's login)
 //
 // Prompt handling (unsupported, accepted, declined) is covered by bench/server-check.ts.
 
@@ -76,10 +76,10 @@ fs.symlinkSync(realClaude, path.join(SHIMS, "claude"));
 fs.writeFileSync(path.join(SHIMS, "codex"), `#!/bin/sh\nexec ${JSON.stringify(realNode)} ${JSON.stringify(codexJs)} "$@"\n`, { mode: 0o755 });
 
 /** Environment for one isolated user: their own HOME, Claude config, Codex home and policy. No
- *  node, cargo or inherited bcu/Claude/Codex variables. gh uses the real login unless `noAuth`. */
+ *  node, cargo or inherited superuse/Claude/Codex variables. gh uses the real login unless `noAuth`. */
 function userEnv(home: string, opts: { noAuth?: boolean; extra?: Record<string, string> } = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(process.env)) if (!/^(BCU_|CLAUDE|CODEX_|GH_|NODE_|npm_)/.test(k)) env[k] = v;
+  for (const [k, v] of Object.entries(process.env)) if (!/^(SUPERUSE_|CLAUDE|CODEX_|GH_|NODE_|npm_)/.test(k)) env[k] = v;
   const noGh = path.join(RUN, "no-gh");
   fs.mkdirSync(noGh, { recursive: true });
   return {
@@ -119,7 +119,7 @@ function setup(caseName: string, checkout: string, script: "install" | "doctor",
 
 /** Hashes of every file a rerun must leave alone. */
 function snapshot(home: string, checkout: string): Record<string, string | null> {
-  const files = [".claude/settings.json", ".claude/plugins/installed_plugins.json", ".claude/plugins/known_marketplaces.json", ".codex/config.toml", ".config/bcu/policy.json", ".config/bcu/node-path"].map((f) => path.join(home, f));
+  const files = [".claude/settings.json", ".claude/plugins/installed_plugins.json", ".claude/plugins/known_marketplaces.json", ".codex/config.toml", ".config/superuse/policy.json", ".config/superuse/node-path"].map((f) => path.join(home, f));
   files.push(path.join(checkout, "plugin/driver/cua-driver.exe"), path.join(checkout, "plugin/driver/cua-driver.json"));
   return Object.fromEntries(files.map((f) => [f, sha(f)]));
 }
@@ -138,17 +138,17 @@ const cloneA = clone("clone A");
 {
   const r = setup("fresh", cloneA, "install", envA);
   check("fresh: outcome restart_required, exit 0", r.code === 0 && r.report.outcome === "restart_required", r.summary);
-  const node = fs.readFileSync(path.join(homeA, ".config/bcu/node-path"), "utf8").trim();
-  check("fresh: Node downloaded into bcu's own folder and recorded", node.startsWith(path.join(homeA, ".local/share/bcu/node/")), node);
+  const node = fs.readFileSync(path.join(homeA, ".config/superuse/node-path"), "utf8").trim();
+  check("fresh: Node downloaded into superuse's own folder and recorded", node.startsWith(path.join(homeA, ".local/share/superuse/node/")), node);
   check("fresh: driver downloaded, nothing built", r.has("DRIVER_DOWNLOADED") && !r.ran(/build\.sh/) && sha(path.join(cloneA, "plugin/driver/cua-driver.exe")) === manifest.sha256, r.summary);
   check("fresh: both clients registered", r.has("CLAUDE_RESTART") && r.has("CODEX_RESTART"), r.summary);
   check("fresh: server verified through the launcher", r.has("SERVER_VERIFIED"), r.summary);
 }
 
 {
-  const plugin = claudeJson<Array<{ id: string; version: string; readFromFolder?: string; mcpServers?: Record<string, { command: string }> }>>(envA, ["plugin", "list", "--json"]).find((p) => p.id === "bcu@better-computer-use");
+  const plugin = claudeJson<Array<{ id: string; version: string; readFromFolder?: string; mcpServers?: Record<string, { command: string }> }>>(envA, ["plugin", "list", "--json"]).find((p) => p.id === "superuse@superuse");
   check("clients: Claude loads this checkout's plugin", plugin?.readFromFolder === path.join(cloneA, "plugin") && plugin.version === manifestVersion(cloneA), JSON.stringify(plugin ?? null).slice(0, 300));
-  const codex = codexJson<{ transport: { command: string } }>(envA, ["mcp", "get", "bcu", "--json"]);
+  const codex = codexJson<{ transport: { command: string } }>(envA, ["mcp", "get", "superuse", "--json"]);
   const launcher = path.join(cloneA, "plugin/server/run.sh");
   check("clients: Codex runs this checkout's launcher", codex.transport.command === launcher, codex.transport.command);
   check("clients: Codex skill linked", fs.readlinkSync(path.join(homeA, ".agents/skills/computer-use")) === path.join(cloneA, "plugin/skills/computer-use"), "");
@@ -157,8 +157,8 @@ const cloneA = clone("clone A");
   for (const [client, cmd] of [["Claude", claudeCmd], ["Codex", codex.transport.command]] as const) {
     try {
       // Overrides from this shell would hide a broken recorded Node or installed driver.
-      const clean = { BCU_NODE: undefined, BCU_CUA_DRIVER: undefined, BCU_APPS: undefined, BCU_POLICY: undefined };
-      await using c = await McpClient.start([cmd], { env: { ...clean, HOME: homeA, PATH: "/usr/bin:/bin", BCU_AUDIT: "off" }, elicit: "unsupported" });
+      const clean = { SUPERUSE_NODE: undefined, SUPERUSE_DRIVER: undefined, SUPERUSE_APPS: undefined, SUPERUSE_POLICY: undefined };
+      await using c = await McpClient.start([cmd], { env: { ...clean, HOME: homeA, PATH: "/usr/bin:/bin", SUPERUSE_AUDIT: "off" }, elicit: "unsupported" });
       const { result } = await c.call("js", { code: "return (await cua.windows()).length" }, 30_000);
       check(`clients: ${client}'s registered command answers with PATH=/usr/bin:/bin`, /^\d+$/.test(textOf(result)), textOf(result));
     } catch (e) {
@@ -190,7 +190,7 @@ const recordA = path.join(cloneA, "plugin/driver/cua-driver.json");
   fs.rmSync(recordA);
   const bad = path.join(RUN, "bad-release.json");
   fs.writeFileSync(bad, JSON.stringify({ ...manifest, sha256: "0".repeat(64) }));
-  const r = setup("checksum", cloneA, "install", { ...envA, BCU_RELEASE_MANIFEST: bad });
+  const r = setup("checksum", cloneA, "install", { ...envA, SUPERUSE_RELEASE_MANIFEST: bad });
   const leftovers = fs.readdirSync(path.dirname(exeA)).filter((f) => f.startsWith("."));
   check("checksum: mismatch fails and installs nothing", r.code === 1 && r.has("DRIVER_CHECKSUM") && !fs.existsSync(exeA) && !leftovers.length, `${r.summary}; leftovers ${leftovers.join(",") || "none"}`);
   const again = setup("checksum", cloneA, "install", envA);
@@ -215,18 +215,18 @@ const recordA = path.join(cloneA, "plugin/driver/cua-driver.json");
   const pj = path.join(cloneA, "plugin/.claude-plugin/plugin.json");
   const real = fs.readFileSync(pj, "utf8");
   fs.writeFileSync(pj, real.replace(/"version": "[^"]+"/, '"version": "0.0.1"'));
-  sh("claude", ["plugin", "update", "bcu@better-computer-use", "--scope", "user"], { env: envA });
+  sh("claude", ["plugin", "update", "superuse@superuse", "--scope", "user"], { env: envA });
   fs.writeFileSync(pj, real);
   const r = setup("upgrade", cloneA, "install", envA);
-  const plugin = claudeJson<Array<{ id: string; version: string }>>(envA, ["plugin", "list", "--json"]).find((p) => p.id === "bcu@better-computer-use");
+  const plugin = claudeJson<Array<{ id: string; version: string }>>(envA, ["plugin", "list", "--json"]).find((p) => p.id === "superuse@superuse");
   check("upgrade: Claude's recorded plugin version is updated", r.ran(/plugin update/) && r.has("CLAUDE_RESTART") && plugin?.version === manifestVersion(cloneA), `${r.summary}; claude has ${plugin?.version}`);
 }
 
 {
   const cloneB = clone("clone B");
   const r = setup("moved", cloneB, "install", envA);
-  const market = claudeJson<Array<{ name: string; path?: string }>>(envA, ["plugin", "marketplace", "list", "--json"]).find((m) => m.name === "better-computer-use");
-  const codex = codexJson<{ transport: { command: string } }>(envA, ["mcp", "get", "bcu", "--json"]);
+  const market = claudeJson<Array<{ name: string; path?: string }>>(envA, ["plugin", "marketplace", "list", "--json"]).find((m) => m.name === "superuse");
+  const codex = codexJson<{ transport: { command: string } }>(envA, ["mcp", "get", "superuse", "--json"]);
   const skill = fs.readlinkSync(path.join(homeA, ".agents/skills/computer-use"));
   check("moved: every registration follows the new checkout", market?.path === cloneB && codex.transport.command === path.join(cloneB, "plugin/server/run.sh") && skill === path.join(cloneB, "plugin/skills/computer-use"), `${r.summary}; claude ${market?.path}; codex ${codex.transport.command}; skill ${skill}`);
   const back = setup("moved", cloneA, "doctor", envA);
@@ -234,13 +234,13 @@ const recordA = path.join(cloneA, "plugin/driver/cua-driver.json");
 }
 
 const homeC = newHome("c");
-fs.mkdirSync(path.join(homeC, ".config/bcu"), { recursive: true });
-fs.copyFileSync(path.join(homeA, ".config/bcu/node-path"), path.join(homeC, ".config/bcu/node-path")); // reuse A's downloaded Node
+fs.mkdirSync(path.join(homeC, ".config/superuse"), { recursive: true });
+fs.copyFileSync(path.join(homeA, ".config/superuse/node-path"), path.join(homeC, ".config/superuse/node-path")); // reuse A's downloaded Node
 const envC = userEnv(homeC);
 const cloneC = clone("clone C");
 
 {
-  const policy = path.join(homeC, ".config/bcu/policy.json");
+  const policy = path.join(homeC, ".config/superuse/policy.json");
   const policyText = `{"allow": ["testpad"], "deny": ["slack"], "note": "mine"}\n`;
   fs.writeFileSync(policy, policyText);
   fs.writeFileSync(path.join(homeC, ".codex/config.toml"), `[mcp_servers.other]\ncommand = "/bin/true"\n`);
@@ -286,8 +286,8 @@ const cloneC = clone("clone C");
   const wt = path.join(RUN, "worktree");
   sh("git", ["-C", cloneA, "worktree", "add", "-q", "--detach", wt]);
   const homeT = newHome("t");
-  const r = setup("temporary", wt, "install", userEnv(homeT, { extra: { BCU_NODE: fs.readFileSync(path.join(homeA, ".config/bcu/node-path"), "utf8").trim() } }));
-  check("temporary: a git worktree isn't registered", r.code === 2 && r.has("CHECKOUT_TEMPORARY") && !r.ran(/^claude|^codex|npm/) && !fs.existsSync(path.join(homeT, ".config/bcu/node-path")), r.summary);
+  const r = setup("temporary", wt, "install", userEnv(homeT, { extra: { SUPERUSE_NODE: fs.readFileSync(path.join(homeA, ".config/superuse/node-path"), "utf8").trim() } }));
+  check("temporary: a git worktree isn't registered", r.code === 2 && r.has("CHECKOUT_TEMPORARY") && !r.ran(/^claude|^codex|npm/) && !fs.existsSync(path.join(homeT, ".config/superuse/node-path")), r.summary);
 }
 
 {
@@ -296,8 +296,8 @@ const cloneC = clone("clone C");
 }
 
 if (flags.browser) {
-  const policy = path.join(os.homedir(), ".config/bcu/policy.json"); // read-only: the user's own grants
-  const r = setup("browser", cloneA, "doctor", { ...envA, BCU_POLICY: policy }, ["--verify"]);
+  const policy = path.join(os.homedir(), ".config/superuse/policy.json"); // read-only: the user's own grants
+  const r = setup("browser", cloneA, "doctor", { ...envA, SUPERUSE_POLICY: policy }, ["--verify"]);
   check("browser: doctor --verify drives an own tab", r.has("BROWSER_VERIFIED"), r.summary);
 }
 
@@ -309,15 +309,15 @@ if (flags.clients) await clientRuns();
  *  passed per run (--mcp-config, -c) rather than loaded from the isolated config. */
 async function clientRuns() {
   const { verifyClientRun } = await import("./setup-clients.ts");
-  const plugin = claudeJson<Array<{ id: string; readFromFolder?: string; mcpServers?: Record<string, { command: string }> }>>(envA, ["plugin", "list", "--json"]).find((p) => p.id === "bcu@better-computer-use");
+  const plugin = claudeJson<Array<{ id: string; readFromFolder?: string; mcpServers?: Record<string, { command: string }> }>>(envA, ["plugin", "list", "--json"]).find((p) => p.id === "superuse@superuse");
   const commands = {
     claude: plugin?.mcpServers?.computer?.command.replace("${CLAUDE_PLUGIN_ROOT}", plugin.readFromFolder ?? "") ?? "",
-    codex: codexJson<{ transport: { command: string } }>(envA, ["mcp", "get", "bcu", "--json"]).transport.command,
+    codex: codexJson<{ transport: { command: string } }>(envA, ["mcp", "get", "superuse", "--json"]).transport.command,
   };
   for (const client of ["claude", "codex"] as const) {
     const r = await verifyClientRun(client, commands[client], homeA, path.join(RUN, `client-${client}`));
-    if (r.blocked) blocked(`client: ${client} edits TestPad through bcu`, r.detail);
-    else check(`client: ${client} edits TestPad through bcu`, r.ok, r.detail);
+    if (r.blocked) blocked(`client: ${client} edits TestPad through superuse`, r.detail);
+    else check(`client: ${client} edits TestPad through superuse`, r.ok, r.detail);
   }
 }
 
@@ -325,7 +325,7 @@ blocked("agent: Claude and Codex each configure a fresh clone from \"configure t
   "needs scoped credentials for an isolated client config (CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY); copying the user's own login could rotate it. --clients covers the call path with the user's login instead");
 
 fs.writeFileSync(path.join(RUN, "versions.json"), JSON.stringify({
-  node: sh(fs.readFileSync(path.join(homeA, ".config/bcu/node-path"), "utf8").trim(), ["-v"]).stdout.trim(),
+  node: sh(fs.readFileSync(path.join(homeA, ".config/superuse/node-path"), "utf8").trim(), ["-v"]).stdout.trim(),
   claude: sh("claude", ["--version"], { env: envA }).stdout.trim(), codex: sh("codex", ["--version"], { env: envA }).stdout.trim(),
   plugin: manifestVersion(REPO), release: manifest, commit: sh("git", ["-C", REPO, "rev-parse", "HEAD"]).stdout.trim(),
 }, null, 2));

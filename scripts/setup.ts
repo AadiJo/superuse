@@ -1,4 +1,4 @@
-// bcu setup and diagnosis. Run through scripts/install.sh and scripts/doctor.sh, which find Node
+// superuse setup and diagnosis. Run through scripts/install.sh and scripts/doctor.sh, which find Node
 // first; `node scripts/setup.ts --help` lists the options.
 //
 // install: platform -> checkout -> Node -> server dependencies -> driver -> access choices ->
@@ -23,7 +23,7 @@ import { checkDriver, ensureDriver } from "./setup/driver.ts";
 import { commandLog, LAUNCHER, NODE_RECORD, PLUGIN, REPO, VERSION, run, sha256File, timed, writeAtomic, type Check, type Status } from "./setup/lib.ts";
 import { checkServer, verifyApp, verifyBrowser } from "./setup/verify.ts";
 
-const HELP = `usage: scripts/install.sh [options]     set up or update bcu from this checkout
+const HELP = `usage: scripts/install.sh [options]     set up or update superuse from this checkout
        scripts/doctor.sh [--json] [--verify] [--clients=...]
 
   --clients=claude,codex   clients to set up or check (default: the ones installed; "none" for neither)
@@ -34,9 +34,9 @@ const HELP = `usage: scripts/install.sh [options]     set up or update bcu from 
   --verify                 doctor only: drive a test app, and the browser if it's enabled
 
 Access choices (install only). Pass only what the user approved; nothing else changes:
-  --allow-apps=a,b         apps bcu may control without asking (e.g. TestPad,Calculator; "*" for all)
+  --allow-apps=a,b         apps superuse may control without asking (e.g. TestPad,Calculator; "*" for all)
   --foreground=ask|allow|deny
-                           whether bcu may briefly take the real mouse and focus
+                           whether superuse may briefly take the real mouse and focus
   --browsers=attach|off    whether w.page() may use the user's running, logged-in browser`;
 
 const { values: opts, positionals } = parseArgs({
@@ -94,7 +94,7 @@ function selectClients(): { clients: Client[]; explicit: boolean } {
 function checkPlatform(): Check {
   const id = "platform";
   const wsl = fs.existsSync("/proc/sys/fs/binfmt_misc/WSLInterop") || /microsoft/i.test(os.release());
-  if (!wsl || process.arch !== "x64") return { id, status: "fail", code: "PLATFORM_UNSUPPORTED", summary: `bcu needs WSL2 on Windows 11, x64 (this is ${os.platform()} ${process.arch})` };
+  if (!wsl || process.arch !== "x64") return { id, status: "fail", code: "PLATFORM_UNSUPPORTED", summary: `superuse needs WSL2 on Windows 11, x64 (this is ${os.platform()} ${process.arch})` };
   const r = run("/mnt/c/Windows/System32/cmd.exe", ["/d", "/c", "ver"], { cwd: "/mnt/c" });
   if (r.code !== 0) return { id, status: "fail", code: "INTEROP_BROKEN", summary: "WSL can't run Windows programs (interop is off)", evidence: [r.stderr.trim()], next: "Enable [interop] in /etc/wsl.conf, then run wsl --shutdown from Windows." };
   return { id, status: "ok", code: "PLATFORM_OK", summary: `WSL2 x64, ${r.stdout.trim()}` };
@@ -110,7 +110,7 @@ function checkCheckout(): Check {
   if ((worktree || temp) && !opts["allow-temporary-checkout"]) {
     return {
       id, status: "action", code: "CHECKOUT_TEMPORARY", summary: `${REPO} is ${worktree ? "a git worktree" : "in a temp directory"}; clients would break when it's removed`,
-      next: "Clone the repo to a permanent place (by default ~/.local/share/bcu/source) and run scripts/install.sh there, or pass --allow-temporary-checkout.",
+      next: "Clone the repo to a permanent place (by default ~/.local/share/superuse/source) and run scripts/install.sh there, or pass --allow-temporary-checkout.",
     };
   }
   return { id, status: "ok", code: "CHECKOUT_OK", summary: REPO };
@@ -125,11 +125,11 @@ function checkNode(): Check {
   const id = "node";
   let recorded = "";
   try { recorded = fs.readFileSync(NODE_RECORD, "utf8").trim(); } catch { /* none yet */ }
-  const node = process.env.BCU_NODE || recorded;
-  if (!node) return { id, status: "action", code: "NODE_NOT_RECORDED", summary: `no Node recorded in ${NODE_RECORD}; clients without Node 24 on PATH can't start bcu`, next: "Run scripts/install.sh." };
+  const node = process.env.SUPERUSE_NODE || recorded;
+  if (!node) return { id, status: "action", code: "NODE_NOT_RECORDED", summary: `no Node recorded in ${NODE_RECORD}; clients without Node 24 on PATH can't start superuse`, next: "Run scripts/install.sh." };
   const version = nodeVersion(node);
   if (!version || Number(version.split(".")[0]) < 24) return { id, status: "fail", code: "NODE_BROKEN", summary: `the recorded Node (${node}) ${version ? `is ${version}, not 24+` : "doesn't run"}`, next: "Run scripts/install.sh to record a working Node 24+." };
-  return { id, status: "ok", code: "NODE_OK", summary: `Node ${version} at ${node}${process.env.BCU_NODE ? " (BCU_NODE)" : ""}` };
+  return { id, status: "ok", code: "NODE_OK", summary: `Node ${version} at ${node}${process.env.SUPERUSE_NODE ? " (SUPERUSE_NODE)" : ""}` };
 }
 
 /** Record the Node running setup (install.sh validated it) for the launcher. */
@@ -141,7 +141,7 @@ function recordNode(): Check {
 }
 
 const SERVER_DIR = path.join(PLUGIN, "server");
-const LOCK_MARK = path.join(SERVER_DIR, "node_modules", ".bcu-lock-sha256");
+const LOCK_MARK = path.join(SERVER_DIR, "node_modules", ".superuse-lock-sha256");
 
 /** Dependencies are current when they were installed from today's lockfile and still load. */
 function depsCurrent(): { ok: boolean; why: string } {
@@ -209,7 +209,7 @@ if (!stopEarly) {
     }
   }
   if (!clients.length && !explicit) {
-    checks.push({ id: "clients", status: "action", code: "NO_CLIENTS", summary: "neither Claude Code nor Codex is installed", next: "Register bcu in your MCP client by hand (see below), or install one and rerun." });
+    checks.push({ id: "clients", status: "action", code: "NO_CLIENTS", summary: "neither Claude Code nor Codex is installed", next: "Register superuse in your MCP client by hand (see below), or install one and rerun." });
   }
   if (runtimeReady) await step(checkServer);
   if (!installing && opts.verify && runtimeReady) await step(verifyApp);
@@ -222,20 +222,20 @@ const outcome: Outcome = checks.some((c) => c.status === "fail") ? "failed"
   : "server_verified";
 
 const manual = { command: LAUNCHER, args: [] as string[], skill: path.join(PLUGIN, "skills", "computer-use") };
-const report = { bcu: VERSION, command, checkout: REPO, outcome, checks, manual, commands: commandLog };
+const report = { superuse: VERSION, command, checkout: REPO, outcome, checks, manual, commands: commandLog };
 
 const MARK: Record<Status, string> = { ok: "ok", restart: "restart", action: "ACTION", fail: "FAIL", skip: "skip" };
 if (opts.json) {
   console.log(JSON.stringify(report, null, 2));
 } else {
-  const lines = [`bcu ${VERSION} ${command}: ${outcome}`, ""];
+  const lines = [`superuse ${VERSION} ${command}: ${outcome}`, ""];
   for (const c of checks) {
     lines.push(`  ${MARK[c.status].padEnd(8)}${c.id.padEnd(15)}${c.summary}`);
     for (const e of c.evidence ?? []) lines.push(`${" ".repeat(25)}${e}`);
     if (c.next && c.status !== "ok") lines.push(`${" ".repeat(25)}next: ${c.next}`);
   }
   if (outcome === "server_verified" || outcome === "restart_required") {
-    lines.push("", "A client counts as verified once it calls bcu's js tool itself, e.g. `return (await cua.windows()).length`.");
+    lines.push("", "A client counts as verified once it calls superuse's js tool itself, e.g. `return (await cua.windows()).length`.");
   }
   lines.push("", `Other MCP clients: stdio command ${JSON.stringify(manual.command)} with no arguments; skill folder ${manual.skill}.`);
   console.log(lines.join("\n"));

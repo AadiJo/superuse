@@ -14,8 +14,8 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
-export const WIN_TEMP = String.raw`C:\Users\Aadi\AppData\Local\Temp\bcu`;
-export const WSL_TEMP = "/mnt/c/Users/Aadi/AppData/Local/Temp/bcu";
+export const WIN_TEMP = String.raw`C:\Users\Aadi\AppData\Local\Temp\superuse`;
+export const WSL_TEMP = "/mnt/c/Users/Aadi/AppData/Local/Temp/superuse";
 
 // Win32 helpers compiled once per PowerShell process.
 export const WIN_TYPES = String.raw`
@@ -24,7 +24,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class BcuW {
+public static class SuperuseW {
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
@@ -86,7 +86,7 @@ const isDigits = (s: string) => /^\d+$/.test(s);
 export async function listWindows(titles = false): Promise<Win[]> {
   const out = await ps(WIN_TYPES + `
 $procs = @{}; Get-Process | ForEach-Object { $procs[[int]$_.Id] = $_.ProcessName }
-foreach ($l in [BcuW]::Windows($${titles})) {
+foreach ($l in [SuperuseW]::Windows($${titles})) {
   $p = $l.Split("\`t"); "$($p[0])\`t$($p[1])\`t$($p[2])\`t$($procs[[int]$p[1]])\`t$($p[3])"
 }`);
   return out.split("\n").flatMap((line) => {
@@ -99,7 +99,7 @@ foreach ($l in [BcuW]::Windows($${titles})) {
 // - TestPad (benchmark-only exe): closed, then killed if it's still open.
 // - Calculator, Notepad, the Open With picker, System Properties: WM_CLOSE only, never killed, so
 //   an unsaved document of the user's gets its normal prompt instead of being destroyed.
-// - File Explorer: only folder windows showing a path under %TEMP%\bcu (benchExplorerWindows).
+// - File Explorer: only folder windows showing a path under %TEMP%\superuse (benchExplorerWindows).
 // - Edge: not here. Tasks run Edge in a throwaway profile that teardown kills by command line.
 // A class of null matches any window of that process.
 export const TASK_WINDOWS: ReadonlyArray<readonly [proc: string, cls: string | null]> = [
@@ -116,10 +116,10 @@ const KILLABLE = new Set(["TestPad"]);
 
 const isTaskWindow = (w: Win) => TASK_WINDOWS.some(([proc, cls]) => w.proc === proc && (cls === null || w.cls === cls));
 
-/** HWNDs of File Explorer windows currently showing a folder under %TEMP%\bcu. */
+/** HWNDs of File Explorer windows currently showing a folder under %TEMP%\superuse. */
 async function benchExplorerWindows(): Promise<Set<number>> {
   const out = await ps(String.raw`$s = New-Object -ComObject Shell.Application
-foreach ($w in $s.Windows()) { try { if ($w.Document.Folder.Self.Path -like '*\Temp\bcu*') { [int64]$w.HWND } } catch {} }`);
+foreach ($w in $s.Windows()) { try { if ($w.Document.Folder.Self.Path -like '*\Temp\superuse*') { [int64]$w.HWND } } catch {} }`);
   return new Set(out.split(/\s+/).filter(isDigits).map(Number));
 }
 
@@ -132,7 +132,7 @@ export async function closeNewWindows(before: Win[], graceMs = 3000): Promise<st
   const created = (await listWindows()).filter((w) => !beforeHwnds.has(w.hwnd) && (isTaskWindow(w) || explorer.has(w.hwnd)));
   if (!created.length) return [];
   const hwnds = created.map((w) => w.hwnd).join(",");
-  await ps(WIN_TYPES + `foreach ($h in @(${hwnds})) { [void][BcuW]::PostMessage([IntPtr]$h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }`);
+  await ps(WIN_TYPES + `foreach ($h in @(${hwnds})) { [void][SuperuseW]::PostMessage([IntPtr]$h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }`);
   await sleep(graceMs);
   const createdHwnds = new Set(created.map((w) => w.hwnd));
   const still = (await listWindows()).filter((w) => createdHwnds.has(w.hwnd));
@@ -165,10 +165,10 @@ export class Sampler {
   /** Start sampling; resolves at the first sample, or after 20 s if none arrives. */
   static async start(intervalMs = 100): Promise<Sampler> {
     const script = WIN_TYPES + `
-$p = New-Object BcuW+POINT
+$p = New-Object SuperuseW+POINT
 while ($true) {
-  [void][BcuW]::GetCursorPos([ref]$p)
-  $fg = [BcuW]::GetForegroundWindow().ToInt64()
+  [void][SuperuseW]::GetCursorPos([ref]$p)
+  $fg = [SuperuseW]::GetForegroundWindow().ToInt64()
   [Console]::Out.WriteLine("$($p.X) $($p.Y) $fg"); [Console]::Out.Flush()
   Start-Sleep -Milliseconds ${intervalMs}
 }`;
@@ -217,7 +217,7 @@ export async function openwithPids(): Promise<Set<number>> {
   return new Set(out.split(/\s+/).filter(isDigits).map(Number));
 }
 
-/** Kill pickers started during this run (double-clicking a .bcu file opens one). Pickers that
+/** Kill pickers started during this run (double-clicking a .superuse file opens one). Pickers that
  * already existed, such as one the user opened, are left alone. */
 export async function killNewOpenwith(before: Set<number>): Promise<number[]> {
   const created = [...(await openwithPids())].filter((p) => !before.has(p)).toSorted((a, b) => a - b);
@@ -226,10 +226,10 @@ export async function killNewOpenwith(before: Set<number>): Promise<number[]> {
 }
 
 const KILL_BENCH_EDGE = "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
-  + "Where-Object { $_.CommandLine -like '*bcu\\edge-profile*' } | "
+  + "Where-Object { $_.CommandLine -like '*superuse\\edge-profile*' } | "
   + "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
 
-/** Kill Edge running in the throwaway bcu profile. Only the benchmark starts that profile. */
+/** Kill Edge running in the throwaway superuse profile. Only the benchmark starts that profile. */
 export async function killBenchEdge(): Promise<void> {
   await ps(KILL_BENCH_EDGE);
 }
@@ -240,7 +240,7 @@ export async function killTestPad(): Promise<void> {
 }
 
 /** Kill benchmark-only processes left behind by an interrupted run: TestPad and Edge running in
- * the throwaway bcu profile. Both exist only because of this benchmark. */
+ * the throwaway superuse profile. Both exist only because of this benchmark. */
 export async function closeStrays(): Promise<void> {
   await ps("Stop-Process -Name TestPad -Force -ErrorAction SilentlyContinue; " + KILL_BENCH_EDGE);
 }

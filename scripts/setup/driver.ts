@@ -9,9 +9,9 @@
 //   adopt       an exe without a record whose hash is the pinned release: record it
 //   stale       sources changed and no release matches: needs --build or a new release
 //   unknown     an exe of unknown origin: kept, reported
-// BCU_CUA_DRIVER in this shell doesn't change any of this: registered clients don't inherit it, so
+// SUPERUSE_DRIVER in this shell doesn't change any of this: registered clients don't inherit it, so
 // setup manages and verifies the driver they actually run. To run your own build everywhere, set
-// BCU_CUA_DRIVER in each client's server environment yourself.
+// SUPERUSE_DRIVER in each client's server environment yourself.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -39,9 +39,9 @@ export function fingerprint(root = REPO): string {
   return sha256(Buffer.concat(parts));
 }
 
-/** driver/release.json, or null before the first release. BCU_RELEASE_MANIFEST reads another file. */
+/** driver/release.json, or null before the first release. SUPERUSE_RELEASE_MANIFEST reads another file. */
 export function readManifest(): ReleaseManifest | null {
-  try { return JSON.parse(fs.readFileSync(process.env.BCU_RELEASE_MANIFEST ?? MANIFEST, "utf8")) as ReleaseManifest; } catch { return null; }
+  try { return JSON.parse(fs.readFileSync(process.env.SUPERUSE_RELEASE_MANIFEST ?? MANIFEST, "utf8")) as ReleaseManifest; } catch { return null; }
 }
 
 function readJsonFile<T>(file: string): T | null {
@@ -84,7 +84,7 @@ export function checkDriver(): Check {
   const fp = fingerprint();
   const s = driverState(fp);
   const id = "driver";
-  const shell = process.env.BCU_CUA_DRIVER ? [`BCU_CUA_DRIVER=${process.env.BCU_CUA_DRIVER} is set in this shell; registered clients don't see it, so setup checks plugin/driver`] : [];
+  const shell = process.env.SUPERUSE_DRIVER ? [`SUPERUSE_DRIVER=${process.env.SUPERUSE_DRIVER} is set in this shell; registered clients don't see it, so setup checks plugin/driver`] : [];
   const c = describe(s, fp);
   return { ...c, evidence: [...(c.evidence ?? []), ...shell] };
 }
@@ -101,7 +101,7 @@ function describe(s: State, fp: string): Check {
     case "stale":
       return { id, status: "fail", code: "DRIVER_NO_RELEASE", summary: `the driver sources (fingerprint ${short(fp)}) have no matching release${s.installed ? `; the installed driver was built from ${short(s.installed)}` : ""}`, next: BUILD_HINT };
     case "unknown":
-      return { id, status: "action", code: "DRIVER_UNKNOWN", summary: "plugin/driver/cua-driver.exe has no provenance record and isn't the pinned release; bcu left it alone", evidence: [`sha256 ${s.sha}`], next: "Move it away so install can put the pinned driver there, or point BCU_CUA_DRIVER at it to keep using it." };
+      return { id, status: "action", code: "DRIVER_UNKNOWN", summary: "plugin/driver/cua-driver.exe has no provenance record and isn't the pinned release; superuse left it alone", evidence: [`sha256 ${s.sha}`], next: "Move it away so install can put the pinned driver there, or point SUPERUSE_DRIVER at it to keep using it." };
   }
 }
 

@@ -1,8 +1,8 @@
 {
-  "name": "bcu-server",
+  "name": "superuse-server",
   "private": true,
   "type": "module",
-  "description": "MCP server for the bcu plugin: one sandboxed `js` tool over the Cua Driver fork.",
+  "description": "MCP server for the superuse plugin: one sandboxed `js` tool over the Cua Driver fork.",
   "scripts": {
     "typecheck": "tsc --noEmit -p ."
   },

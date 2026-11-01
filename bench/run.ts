@@ -1,6 +1,6 @@
 // Benchmark runner: one agent and one computer-use stack ("arm") on one task per run.
 //
-//   node bench/run.ts --arms claude-bcu3,claude-cua-038 --tasks calc_mul,edge_form --reps 1 [--seed 42] [--batch name]
+//   node bench/run.ts --arms claude-superuse,claude-cua-038 --tasks calc_mul,edge_form --reps 1 [--seed 42] [--batch name]
 //
 // Every run writes bench/out/<batch>/<arm>/<task>-r<n>/ with:
 //   transcript.jsonl    raw agent event stream, each line prefixed by its receive time
@@ -8,7 +8,7 @@
 //   metrics.json        success (from the task's own checker), wall time, turns, tool calls,
 //                       tokens, cost, per-call latency, desktop disturbance, seed
 //   windows-closed.txt  what teardown closed
-//   server-trace.jsonl  claude-bcu3 arms: the server's per-call timings (BCU_TRACE; v4 servers write none)
+//   server-trace.jsonl  claude-superuse arms: the server's per-call timings (SUPERUSE_TRACE; v4 servers write none)
 //
 // Arms differ only in the CU stack; the prompt text is identical. A restarted batch skips runs
 // that already wrote metrics.json. --seed fixes the xapp_* tasks' random values (invoice lines,
@@ -55,7 +55,7 @@ const CUA_038 = path.join(REPO, "tools/cua-driver-0.38.0/cua-driver-rs-0.38.0-wi
 const AGENT_DESKTOP_BIN = path.join(REPO, "tools/agent-desktop-1.0.2/bin"); // holds `agent-desktop` -> ../agent-desktop.exe
 
 /** agent-desktop's setup tells agents to read its two bundled skills first; handing them over up front saves the turns.
- *  `headed` grants physical input, as BCU_FOREGROUND=allow does for the plugin arms: without it the
+ *  `headed` grants physical input, as SUPERUSE_FOREGROUND=allow does for the plugin arms: without it the
  *  skill tells the agent to stop and ask rather than fall back to `--headed`. */
 function agentDesktopGuide(headed: boolean): string {
   const skill = (name: string): string => {
@@ -75,20 +75,20 @@ const ARMS = {
   "claude-agent-desktop-headed": () => ({ cli: "agent-desktop", binDir: AGENT_DESKTOP_BIN, guide: agentDesktopGuide(true) }),
   "claude-codexcu": () => ({ command: "node", args: [CODEX_CU], env: { CODEX_CU_AUTO_APPROVE: "1" } }),
   // The plugin's server (QuickJS sandbox, policy) over the driver the plugin ships.
-  "claude-bcu3": (runDir: string) => pluginServer(path.join(REPO, "plugin"), runDir),
+  "claude-superuse": (runDir: string) => pluginServer(path.join(REPO, "plugin"), runDir),
 } satisfies Record<string, (runDir: string) => Stack>;
 
 /** The plugin server at `pluginDir` (server/main.ts, which finds driver/cua-driver.exe beside it).
  *  Headless runs can't show approval prompts, so the suite's apps are pre-approved and foreground
  *  input is allowed as in v2; a throwaway policy file keeps the user's own approvals out of the runs.
- *  BCU_TRACE has the server log each driver call's timing into the run folder. */
+ *  SUPERUSE_TRACE has the server log each driver call's timing into the run folder. */
 function pluginServer(pluginDir: string, runDir: string): McpServer {
   return {
     command: "node", args: [path.join(pluginDir, "server/main.ts")],
     env: {
-      BCU_APPS: SUITE_APPS, BCU_FOREGROUND: "allow",
-      BCU_POLICY: path.join(WORKDIR, "policy.json"), BCU_AUDIT: path.join(WORKDIR, "actions.jsonl"),
-      BCU_TRACE: path.join(runDir, "server-trace.jsonl"),
+      SUPERUSE_APPS: SUITE_APPS, SUPERUSE_FOREGROUND: "allow",
+      SUPERUSE_POLICY: path.join(WORKDIR, "policy.json"), SUPERUSE_AUDIT: path.join(WORKDIR, "actions.jsonl"),
+      SUPERUSE_TRACE: path.join(runDir, "server-trace.jsonl"),
     },
   };
 }
@@ -153,7 +153,7 @@ const now = () => Date.now() / 1000;
 const round = (x: number, digits: number) => Number(x.toFixed(digits));
 
 /** MCP arms get no built-in tools. CLI arms get only Bash, and only for their one command; the
- *  empty strict MCP config keeps user-level servers (bcu's own plugin) out of every arm. */
+ *  empty strict MCP config keeps user-level servers (superuse's own plugin) out of every arm. */
 function claudeArgs(prompt: string, cfg: string, stack: Stack): string[] {
   const tools = "cli" in stack
     ? ["--tools", "Bash", "--allowedTools", `Bash(${stack.cli}:*)`, "--append-system-prompt", stack.guide]
@@ -320,7 +320,7 @@ async function main() {
   const { values } = parseArgs({
     options: {
       // Not the baselines by default: claude-codexcu sends whole-desktop window titles to the model.
-      arms: { type: "string", default: "claude-bcu3" },
+      arms: { type: "string", default: "claude-superuse" },
       tasks: { type: "string", default: SUITE.join(",") },
       reps: { type: "string", default: "1" },
       timeout: { type: "string", default: "420" },

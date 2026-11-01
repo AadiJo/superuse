@@ -1,7 +1,7 @@
 // Print a compact trace of one run folder from its transcript.
 //
-//   node bench/trace.ts bench/out/v4/claude-bcu3/calc_mul-r1 [width]           every call, result and text, with times (width 300)
-//   node bench/trace.ts bench/out/v4/claude-bcu3/calc_mul-r1 --calls [width]   each tool call's duration, code and result (width 200)
+//   node bench/trace.ts bench/out/v4/claude-superuse/calc_mul-r1 [width]           every call, result and text, with times (width 300)
+//   node bench/trace.ts bench/out/v4/claude-superuse/calc_mul-r1 --calls [width]   each tool call's duration, code and result (width 200)
 
 import { readFileSync } from "node:fs";
 import path from "node:path";

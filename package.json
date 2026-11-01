@@ -1,8 +1,8 @@
 {
-  "name": "bcu-tooling",
+  "name": "superuse-tooling",
   "private": true,
   "type": "module",
-  "description": "Benchmark and acceptance scripts for the bcu plugin. Node 24 runs them directly through type stripping.",
+  "description": "Benchmark and acceptance scripts for the superuse plugin. Node 24 runs them directly through type stripping.",
   "scripts": {
     "typecheck": "tsc --noEmit -p ."
   },

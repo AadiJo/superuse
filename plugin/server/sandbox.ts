@@ -8,14 +8,14 @@ import { getQuickJS, type QuickJSContext, type QuickJSDeferredPromise, type Quic
 import { sleep } from "./driver.ts";
 
 const PRELUDE = fs.readFileSync(new URL("./prelude.js", import.meta.url), "utf8");
-// Per js call, not counting time the user spends on a prompt. BCU_CALL_TIMEOUT_MS overrides (tests).
-const CALL_TIMEOUT_MS = Number(process.env.BCU_CALL_TIMEOUT_MS) || 90_000;
+// Per js call, not counting time the user spends on a prompt. SUPERUSE_CALL_TIMEOUT_MS overrides (tests).
+const CALL_TIMEOUT_MS = Number(process.env.SUPERUSE_CALL_TIMEOUT_MS) || 90_000;
 const CPU_SLICE_MS = 5_000; // longest stretch of synchronous model code (an infinite loop) before interrupting
 const MEMORY_LIMIT = 256 * 1024 * 1024;
 
 export type Dispatch = (method: string, args: unknown[]) => Promise<unknown>;
 
-/** What the prelude's __bcu_run reports for one js call. */
+/** What the prelude's __superuse_run reports for one js call. */
 export type RunResult = { value: string | null; hasValue: boolean; error: string | null; errors: string[]; logs: string[] };
 
 export class Sandbox {
@@ -54,7 +54,7 @@ export class Sandbox {
     runtime.setMemoryLimit(MEMORY_LIMIT);
     runtime.setInterruptHandler(() => Date.now() > this.deadline);
     const ctx = runtime.newContext();
-    const host = ctx.newFunction("__bcu_host", (methodH, argsH) => {
+    const host = ctx.newFunction("__superuse_host", (methodH, argsH) => {
       const method = ctx.getString(methodH);
       const args: unknown = JSON.parse(ctx.getString(argsH));
       const deferred = ctx.newPromise();
@@ -67,7 +67,7 @@ export class Sandbox {
       deferred.settled.then(() => { this.inFlight.delete(deferred); if (gen === this.generation) this.pump(); });
       return deferred.handle;
     });
-    ctx.setProp(ctx.global, "__bcu_host", host);
+    ctx.setProp(ctx.global, "__superuse_host", host);
     host.dispose();
     this.runtime = runtime;
     this.ctx = ctx;
@@ -79,13 +79,13 @@ export class Sandbox {
   private pump() {
     this.deadline = Date.now() + CPU_SLICE_MS;
     const r = this.runtime.executePendingJobs();
-    if (r.error) r.error.dispose(); // the failing job's promise rejects inside the context, where __bcu_run sees it
+    if (r.error) r.error.dispose(); // the failing job's promise rejects inside the context, where __superuse_run sees it
   }
 
   async run(code: string): Promise<RunResult> {
     const ctx = this.ctx;
     this.deadline = Date.now() + CPU_SLICE_MS;
-    const evaluated = ctx.evalCode(`__bcu_run(async () => {\n${hoistTopLevel(code)}\n})`, "js");
+    const evaluated = ctx.evalCode(`__superuse_run(async () => {\n${hoistTopLevel(code)}\n})`, "js");
     const gen = this.generation;
     if (evaluated.error) {
       const e = ctx.dump(evaluated.error) as { name?: string; message?: string } | string;
@@ -111,7 +111,7 @@ export class Sandbox {
     if (!settled) {
       // The abandoned run may still settle later; free its result handle when it does.
       native.then((late) => { if (gen === this.generation) (late.error ?? late.value).dispose(); }, () => {});
-      const reset = ctx.getProp(ctx.global, "__bcu_reset_queue");
+      const reset = ctx.getProp(ctx.global, "__superuse_reset_queue");
       const r = ctx.callFunction(reset, ctx.undefined);
       (r.error ?? r.value).dispose();
       reset.dispose();

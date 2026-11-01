@@ -1,9 +1,9 @@
 {
-  "name": "bcu",
-  "displayName": "Better Computer Use",
-  "version": "0.5.4",
+  "name": "superuse",
+  "displayName": "Superuse",
+  "version": "0.6.0",
   "description": "Windows computer use for Claude: one sandboxed JavaScript tool over a background-input UI Automation driver, with per-app approvals.",
   "author": { "name": "Advait Johari" },
-  "repository": "https://github.com/AadiJo/better-computer-use",
+  "repository": "https://github.com/AadiJo/superuse",
   "keywords": ["computer-use", "windows", "automation", "mcp"]
 }

@@ -1,5 +1,5 @@
-// Client registration, through each client's own CLI. Setup only touches bcu's own entries: the
-// Claude marketplace "better-computer-use" with plugin bcu, Codex's MCP server "bcu", and the
+// Client registration, through each client's own CLI. Setup only touches superuse's own entries: the
+// Claude marketplace "superuse" with plugin superuse, Codex's MCP server "superuse", and the
 // skill link ~/.agents/skills/computer-use. If replacing one fails, the previous one is restored.
 //
 // Claude Code loads a directory marketplace's plugins in place (`claude plugin list --json`
@@ -15,8 +15,8 @@ import { LAUNCHER, PLUGIN, REPO, VERSION, run, sha256File, type Check } from "./
 export const CLIENTS = ["claude", "codex"] as const;
 export type Client = (typeof CLIENTS)[number];
 
-const MARKETPLACE = "better-computer-use";
-const PLUGIN_ID = `bcu@${MARKETPLACE}`;
+const MARKETPLACE = "superuse";
+const PLUGIN_ID = `superuse@${MARKETPLACE}`;
 const SKILL_SOURCE = path.join(PLUGIN, "skills", "computer-use");
 const SKILL_LINK = path.join(os.homedir(), ".agents", "skills", "computer-use");
 
@@ -43,7 +43,7 @@ const marketPath = (m: ClaudeMarketplace | undefined) => (m?.path ? path.resolve
 function claudeState() {
   const market = json<ClaudeMarketplace[]>("claude", ["plugin", "marketplace", "list", "--json"])?.find((m) => m.name === MARKETPLACE);
   const plugins = json<ClaudePlugin[]>("claude", ["plugin", "list", "--json"]) ?? [];
-  return { market, plugin: plugins.find((p) => p.id === PLUGIN_ID && p.scope === "user"), others: plugins.filter((p) => p.id.startsWith("bcu@") && p.id !== PLUGIN_ID) };
+  return { market, plugin: plugins.find((p) => p.id === PLUGIN_ID && p.scope === "user"), others: plugins.filter((p) => p.id.startsWith("superuse@") && p.id !== PLUGIN_ID) };
 }
 
 /** What Claude would run, checked as a package: version, launcher, dependencies and driver. */
@@ -61,10 +61,10 @@ function checkPackage(dir: string): string[] {
 export function checkClaude(changed = false): Check {
   const id = "client:claude";
   const { market, plugin, others } = claudeState();
-  const evidence = others.map((p) => `another bcu plugin is installed: ${p.id}`);
-  if (!market || !plugin) return { id, status: "action", code: "CLAUDE_NOT_REGISTERED", summary: "bcu isn't installed in Claude Code", evidence, next: "Run scripts/install.sh --clients=claude." };
+  const evidence = others.map((p) => `another superuse plugin is installed: ${p.id}`);
+  if (!market || !plugin) return { id, status: "action", code: "CLAUDE_NOT_REGISTERED", summary: "superuse isn't installed in Claude Code", evidence, next: "Run scripts/install.sh --clients=claude." };
   if (marketPath(market) !== REPO) return { id, status: "action", code: "CLAUDE_OTHER_CHECKOUT", summary: `Claude's marketplace points at ${market.path ?? market.source}`, evidence, next: "Run scripts/install.sh --clients=claude from this checkout to point it here." };
-  if (plugin.enabled === false) return { id, status: "action", code: "CLAUDE_DISABLED", summary: "the bcu plugin is disabled", evidence, next: `Run claude plugin enable ${PLUGIN_ID}.` };
+  if (plugin.enabled === false) return { id, status: "action", code: "CLAUDE_DISABLED", summary: "the superuse plugin is disabled", evidence, next: `Run claude plugin enable ${PLUGIN_ID}.` };
   const dir = plugin.readFromFolder ?? plugin.installPath ?? "";
   if (plugin.version !== VERSION) evidence.push(`Claude recorded version ${plugin.version}, checkout is ${VERSION}`);
   const problems = checkPackage(dir);
@@ -114,14 +114,14 @@ type CodexServer = {
   [setting: string]: unknown;
 };
 
-const BCU_SERVER = /plugin\/server\/(run\.sh|main\.ts)$/;
+const SUPERUSE_SERVER = /plugin\/server\/(run\.sh|main\.ts)$/;
 
 function codexServer(): CodexServer | null {
-  return json<CodexServer>("codex", ["mcp", "get", "bcu", "--json"]);
+  return json<CodexServer>("codex", ["mcp", "get", "superuse", "--json"]);
 }
 
-/** A "bcu" entry is ours if it's a stdio server running some checkout's bcu launcher or server. */
-const ownedByBcu = (s: CodexServer) => s.transport?.type === "stdio" && [s.transport.command, ...(s.transport.args ?? [])].some((a) => BCU_SERVER.test(a ?? ""));
+/** A "superuse" entry is ours if it's a stdio server running some checkout's superuse launcher or server. */
+const ownedBySuperuse = (s: CodexServer) => s.transport?.type === "stdio" && [s.transport.command, ...(s.transport.args ?? [])].some((a) => SUPERUSE_SERVER.test(a ?? ""));
 
 /** Settings `codex mcp add` can't recreate. An entry with any of them is changed by hand, not replaced. */
 function unportable(s: CodexServer): string[] {
@@ -135,12 +135,12 @@ function unportable(s: CodexServer): string[] {
 
 const isCurrent = (s: CodexServer | null) => s?.transport?.command === LAUNCHER && !(s.transport.args ?? []).length;
 
-/** Other Codex servers that run a bcu launcher or server: leftovers from older installs. */
+/** Other Codex servers that run a superuse launcher or server: leftovers from older installs. */
 function codexDuplicates(): string[] {
   const all = json<CodexServer[]>("codex", ["mcp", "list", "--json"]) ?? [];
   return all
-    .filter((s) => s.name !== "bcu" && [s.transport?.command, ...(s.transport?.args ?? [])].some((a) => BCU_SERVER.test(a ?? "")))
-    .map((s) => `Codex server "${s.name}" also runs bcu (${s.transport?.command}); remove it with codex mcp remove ${s.name}`);
+    .filter((s) => s.name !== "superuse" && [s.transport?.command, ...(s.transport?.args ?? [])].some((a) => SUPERUSE_SERVER.test(a ?? "")))
+    .map((s) => `Codex server "${s.name}" also runs superuse (${s.transport?.command}); remove it with codex mcp remove ${s.name}`);
 }
 
 type SkillLink = "current" | "missing" | "stale" | "conflict";
@@ -160,25 +160,25 @@ export function checkCodex(changed = false): Check {
   const server = codexServer();
   const evidence = codexDuplicates();
   const link = skillLink();
-  if (!server) return { id, status: "action", code: "CODEX_NOT_REGISTERED", summary: "bcu isn't registered in Codex", evidence, next: "Run scripts/install.sh --clients=codex." };
-  if (!ownedByBcu(server)) return { id, status: "action", code: "CODEX_NAME_TAKEN", summary: `Codex already has an MCP server named "bcu" that isn't bcu (${server.transport?.command ?? server.transport?.type}); setup left it alone`, evidence, next: "Rename or remove that entry (codex mcp remove bcu) if it's not needed, then rerun scripts/install.sh --clients=codex." };
+  if (!server) return { id, status: "action", code: "CODEX_NOT_REGISTERED", summary: "superuse isn't registered in Codex", evidence, next: "Run scripts/install.sh --clients=codex." };
+  if (!ownedBySuperuse(server)) return { id, status: "action", code: "CODEX_NAME_TAKEN", summary: `Codex already has an MCP server named "superuse" that isn't superuse (${server.transport?.command ?? server.transport?.type}); setup left it alone`, evidence, next: "Rename or remove that entry (codex mcp remove superuse) if it's not needed, then rerun scripts/install.sh --clients=codex." };
   if (!isCurrent(server)) {
     const manual = unportable(server);
-    return { id, status: "action", code: "CODEX_STALE", summary: `Codex's bcu server runs ${server.transport?.command}`, evidence,
-      next: manual.length ? `Its entry has settings setup can't carry over (${manual.join(", ")}); set command = ${JSON.stringify(LAUNCHER)} and args = [] under [mcp_servers.bcu] in Codex's config.toml by hand.` : "Run scripts/install.sh --clients=codex." };
+    return { id, status: "action", code: "CODEX_STALE", summary: `Codex's superuse server runs ${server.transport?.command}`, evidence,
+      next: manual.length ? `Its entry has settings setup can't carry over (${manual.join(", ")}); set command = ${JSON.stringify(LAUNCHER)} and args = [] under [mcp_servers.superuse] in Codex's config.toml by hand.` : "Run scripts/install.sh --clients=codex." };
   }
-  if (server.enabled === false) return { id, status: "action", code: "CODEX_DISABLED", summary: "Codex's bcu server is disabled", evidence, next: "Set enabled = true under [mcp_servers.bcu] in Codex's config.toml, if the user wants bcu on." };
+  if (server.enabled === false) return { id, status: "action", code: "CODEX_DISABLED", summary: "Codex's superuse server is disabled", evidence, next: "Set enabled = true under [mcp_servers.superuse] in Codex's config.toml, if the user wants superuse on." };
   if (link === "missing" || link === "stale") return { id, status: "action", code: "CODEX_SKILL_MISSING", summary: "the computer-use skill isn't linked for Codex", evidence, next: "Run scripts/install.sh --clients=codex." };
-  if (link === "conflict") return { id, status: "action", code: "CODEX_SKILL_CONFLICT", summary: `${SKILL_LINK} holds something else, so Codex won't load bcu's skill; bcu left it alone`, evidence, next: `Move it away if it isn't needed, then rerun scripts/install.sh --clients=codex. The MCP server works without the skill.` };
+  if (link === "conflict") return { id, status: "action", code: "CODEX_SKILL_CONFLICT", summary: `${SKILL_LINK} holds something else, so Codex won't load superuse's skill; superuse left it alone`, evidence, next: `Move it away if it isn't needed, then rerun scripts/install.sh --clients=codex. The MCP server works without the skill.` };
   evidence.push(`runs ${LAUNCHER}`, `skill ${SKILL_LINK}`);
   return changed
-    ? { id, status: "restart", code: "CODEX_RESTART", summary: "MCP server bcu registered", evidence, next: "Start a new Codex session to load it." }
-    : { id, status: "ok", code: "CODEX_CURRENT", summary: "MCP server bcu registered", evidence };
+    ? { id, status: "restart", code: "CODEX_RESTART", summary: "MCP server superuse registered", evidence, next: "Start a new Codex session to load it." }
+    : { id, status: "ok", code: "CODEX_CURRENT", summary: "MCP server superuse registered", evidence };
 }
 
 /** `codex mcp add` arguments that recreate a stdio entry with this command, keeping its env. */
 const addArgs = (command: string, args: string[], env: Record<string, string> | null | undefined) =>
-  ["mcp", "add", "bcu", ...Object.entries(env ?? {}).flatMap(([k, v]) => ["--env", `${k}=${v}`]), "--", command, ...args];
+  ["mcp", "add", "superuse", ...Object.entries(env ?? {}).flatMap(([k, v]) => ["--env", `${k}=${v}`]), "--", command, ...args];
 
 export function installCodex(): Check {
   const id = "client:codex";
@@ -186,8 +186,8 @@ export function installCodex(): Check {
   let changed = false;
   // Replace only our own entry, and only when `codex mcp add` can recreate all of it; checkCodex
   // explains anything else.
-  if (!isCurrent(before) && (!before || (ownedByBcu(before) && before.enabled !== false && !unportable(before).length))) {
-    if (before) run("codex", ["mcp", "remove", "bcu"]);
+  if (!isCurrent(before) && (!before || (ownedBySuperuse(before) && before.enabled !== false && !unportable(before).length))) {
+    if (before) run("codex", ["mcp", "remove", "superuse"]);
     const r = run("codex", addArgs(LAUNCHER, [], before?.transport?.env));
     if (r.code !== 0) {
       const t = before?.transport;

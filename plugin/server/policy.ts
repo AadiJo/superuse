@@ -4,7 +4,7 @@
 // session, "always" approvals persist in the policy file, and a client that can't show a prompt
 // gets a clear refusal that says how to approve instead of a hang.
 //
-// Policy file (BCU_POLICY, default ~/.config/bcu/policy.json), re-read whenever it changes:
+// Policy file (SUPERUSE_POLICY, default ~/.config/superuse/policy.json), re-read whenever it changes:
 //   { "allow": ["testpad", "uwp:calculator"],   apps allowed without asking; "*" allows every app
 //     "deny": ["slack"],                          apps never shown or controlled
 //     "foreground": "ask",                        "ask" | "allow" | "deny" for {foreground: true}
@@ -12,8 +12,8 @@
 //                                                 profile over DevTools (cookies, logins); default "off"
 // The built-in blocks (shells, password managers, security prompts, agents) stay in force under
 // "*"; lift one by naming its exact key in "allow", e.g. "windowsterminal".
-// Env: BCU_APPS        comma list of apps pre-approved for this process (benchmarks, headless runs); "*" for all
-//      BCU_FOREGROUND  overrides the file's "foreground"
+// Env: SUPERUSE_APPS        comma list of apps pre-approved for this process (benchmarks, headless runs); "*" for all
+//      SUPERUSE_FOREGROUND  overrides the file's "foreground"
 
 import fs from "node:fs";
 import os from "node:os";
@@ -61,7 +61,7 @@ export function appOf(w: { app_name?: string; title?: string }): App {
   return { key: lower, label: LABELS[lower] ?? exe };
 }
 
-/** Lenient match used for BCU_APPS and the file's allow/deny lists: "*" matches every app,
+/** Lenient match used for SUPERUSE_APPS and the file's allow/deny lists: "*" matches every app,
  *  "calculator" matches the key "uwp:calculator", "File Explorer" matches explorer's label. */
 function listed(list: readonly string[], app: App): boolean {
   const label = app.label.toLowerCase();
@@ -82,9 +82,9 @@ export class Policy {
 
   constructor(ask: Ask) {
     this.ask = ask;
-    this.file = process.env.BCU_POLICY ?? path.join(os.homedir(), ".config", "bcu", "policy.json");
+    this.file = process.env.SUPERUSE_POLICY ?? path.join(os.homedir(), ".config", "superuse", "policy.json");
     this.conf = this.load();
-    this.preapproved = (process.env.BCU_APPS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+    this.preapproved = (process.env.SUPERUSE_APPS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
   }
 
   /** The file's settings. A missing file is an empty policy; so is an unreadable or malformed one,
@@ -174,26 +174,26 @@ export class Policy {
    *  because the driver takes the matching grant (`--grant existing-profile`) at launch. */
   get browserAttach(): boolean {
     this.refresh();
-    return (process.env.BCU_BROWSERS ?? this.conf.browsers) === "attach";
+    return (process.env.SUPERUSE_BROWSERS ?? this.conf.browsers) === "attach";
   }
 
   /** Throws unless foreground input (real cursor and focus) is allowed for this app. */
   async requireForeground(app: App): Promise<void> {
     this.refresh();
-    const mode = (process.env.BCU_FOREGROUND as ForegroundMode | undefined) ?? this.conf.foreground ?? "ask";
+    const mode = (process.env.SUPERUSE_FOREGROUND as ForegroundMode | undefined) ?? this.conf.foreground ?? "ask";
     if (mode === "allow" || this.foregroundOk.has(app.key)) return;
     if (mode === "deny") throw new Error("foreground input is disabled by policy. Use setValue/select, or ask the user to do this step.");
     const answer = await this.ask(
       `Claude wants to briefly take the mouse and keyboard focus to act in ${app.label}, because background input was refused. Allow?`,
       `Allow for the rest of this session`);
-    if (answer === "unsupported") throw new Error(`foreground input needs approval and this client can't show prompts. Set "foreground": "allow" in ${this.file} or BCU_FOREGROUND=allow.`);
+    if (answer === "unsupported") throw new Error(`foreground input needs approval and this client can't show prompts. Set "foreground": "allow" in ${this.file} or SUPERUSE_FOREGROUND=allow.`);
     if (answer === "no") throw new Error(`the client declined foreground input (${DECLINED}). Use setValue/select, or ask the user to do this step.`);
     if (answer === "always") this.foregroundOk.add(app.key);
   }
 
   private settle(app: App, answer: Awaited<ReturnType<Ask>>) {
     if (answer === "unsupported") {
-      throw new Error(`${app.label} isn't approved and this client can't show an approval prompt. Add "${app.key}" to "allow" in ${this.file}, or set BCU_APPS.`);
+      throw new Error(`${app.label} isn't approved and this client can't show an approval prompt. Add "${app.key}" to "allow" in ${this.file}, or set SUPERUSE_APPS.`);
     }
     if (answer === "no") {
       this.declined.add(app.key);
@@ -210,7 +210,7 @@ export class Policy {
   private persistAllow(key: string) {
     this.conf = this.load(); // another session may have written since we started
     if (this.confError) {
-      throw new Error(`approved for this session only: ${this.file} isn't valid JSON or can't be read (${this.confError}), so "always" wasn't saved. Fix the file by hand; bcu won't overwrite it.`);
+      throw new Error(`approved for this session only: ${this.file} isn't valid JSON or can't be read (${this.confError}), so "always" wasn't saved. Fix the file by hand; superuse won't overwrite it.`);
     }
     const allow = new Set(this.conf.allow ?? []);
     allow.add(key);

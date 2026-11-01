@@ -1,4 +1,4 @@
-// End-to-end checks of the bcu MCP server's sandbox and policy, through the real server and driver.
+// End-to-end checks of the superuse MCP server's sandbox and policy, through the real server and driver.
 //
 //   node bench/server-check.ts      writes bench/out/server-check-<time>.json, exits 1 on any failure
 //
@@ -33,13 +33,13 @@ async function js(c: McpClient, code: string, timeoutMs = 60_000): Promise<{ tex
 /** A row of cua.windows(): approved apps carry an id and title, others only the app name. */
 type WindowRow = { app?: string; approved?: boolean; id?: number; title?: string };
 
-const policy = path.join(mkdtempSync(path.join(tmpdir(), "bcu-")), "policy.json"); // empty policy: nothing pre-approved
-const base = { BCU_POLICY: policy, BCU_AUDIT: "off" };
+const policy = path.join(mkdtempSync(path.join(tmpdir(), "superuse-")), "policy.json"); // empty policy: nothing pre-approved
+const base = { SUPERUSE_POLICY: policy, SUPERUSE_AUDIT: "off" };
 let other: string | undefined; // an app on screen that isn't approved
 
 {
   await using c = await server(base, "unsupported");
-  let r = await js(c, "return [typeof process, typeof require, typeof fetch, typeof __bcu_host, (async()=>1)().constructor.constructor('return typeof process')()]");
+  let r = await js(c, "return [typeof process, typeof require, typeof fetch, typeof __superuse_host, (async()=>1)().constructor.constructor('return typeof process')()]");
   check("no Node capabilities in the sandbox", r.text === '["undefined","undefined","undefined","undefined","undefined"]', r.text);
   r = await js(c, 'try { return typeof log.constructor.constructor("return process")() } catch (e) { return "blocked" }');
   check("API functions don't lead to the host's Function", r.text === "blocked", r.text);
@@ -100,7 +100,7 @@ let other: string | undefined; // an app on screen that isn't approved
 // Timeouts, with a 3 s limit: calls queued by the timed-out js call must not run afterwards, and
 // js_reset right after a timeout (live host calls) must not crash the server.
 {
-  await using c = await server({ ...base, BCU_CALL_TIMEOUT_MS: "3000" }, "unsupported");
+  await using c = await server({ ...base, SUPERUSE_CALL_TIMEOUT_MS: "3000" }, "unsupported");
   let r = await js(c, "globalThis.ran = 0; for (let i = 0; i < 20; i++) cua.sleep(300).then(() => ran++); await new Promise(() => {})");
   check("stuck js call times out", r.error && r.text.includes("timed out"), r.text);
   r = await js(c, "for (let i = 0; i < 5; i++) await cua.sleep(300); return ran");

@@ -27,7 +27,7 @@ const fp = fingerprint();
 const repository = readJson<{ repository: string }>(path.join(PLUGIN, ".claude-plugin", "plugin.json")).repository;
 const base = { repo: repository.replace(/^https:\/\/github\.com\//, ""), tag: `driver-${fp.slice(0, 12)}`, target: "x86_64-pc-windows-gnu", asset: "cua-driver-x86_64-pc-windows-gnu.exe", fingerprint: fp };
 const manifestFile = path.join(REPO, "driver", "release.json");
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bcu-release-"));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "superuse-release-"));
 const write = (m: ReleaseManifest) => {
   writeAtomic(manifestFile, JSON.stringify(m, null, 2) + "\n");
   console.log(`wrote driver/release.json for ${m.tag} (sha256 ${m.sha256}); commit it`);
@@ -56,7 +56,7 @@ async function main() {
   const manifest: ReleaseManifest = { ...base, sha256: sha256File(exe)! };
 
   // The release candidate must work before anyone downloads it.
-  process.env.BCU_NODE ??= process.execPath;
+  process.env.SUPERUSE_NODE ??= process.execPath;
   const server = await checkServer(exe);
   if (server.status !== "ok") die(`the built driver failed the server check: ${server.summary}\n${(server.evidence ?? []).join("\n")}`);
   console.log(`server check: ${server.summary}`);

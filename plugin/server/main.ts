@@ -1,4 +1,4 @@
-// bcu: Windows computer use for Claude, as an MCP server with one sandboxed code-mode tool.
+// superuse: Windows computer use for Claude, as an MCP server with one sandboxed code-mode tool.
 //
 //   plugin/server/run.sh                (picks Node 24+, then runs this file; TypeScript runs through type stripping)
 //
@@ -7,10 +7,10 @@
 // elicitation when the client supports it (policy.ts). research/08-experiments.md explains the
 // design; the plugin README covers setup.
 //
-// Env: BCU_CUA_DRIVER  path to cua-driver.exe (default: ../driver/cua-driver.exe)
-//      BCU_CURSOR      "fast" (default: visible agent cursor, short glide), "animated" or "off"
-//      BCU_APPS, BCU_FOREGROUND, BCU_POLICY  see policy.ts;  BCU_AUDIT  action log path or "off"
-//      BCU_TRACE       file for per-call timings (benchmarks; off by default)
+// Env: SUPERUSE_DRIVER  path to cua-driver.exe (default: ../driver/cua-driver.exe)
+//      SUPERUSE_CURSOR      "fast" (default: visible agent cursor, short glide), "animated" or "off"
+//      SUPERUSE_APPS, SUPERUSE_FOREGROUND, SUPERUSE_POLICY  see policy.ts;  SUPERUSE_AUDIT  action log path or "off"
+//      SUPERUSE_TRACE       file for per-call timings (benchmarks; off by default)
 
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -23,8 +23,8 @@ import { VERSION } from "./version.ts";
 
 const TEXT_LIMIT = 20_000;
 const here = path.dirname(fileURLToPath(import.meta.url));
-const DRIVER = process.env.BCU_CUA_DRIVER ?? path.join(here, "..", "driver", "cua-driver.exe");
-const CURSOR = (process.env.BCU_CURSOR ?? "fast") as CursorMode;
+const DRIVER = process.env.SUPERUSE_DRIVER ?? path.join(here, "..", "driver", "cua-driver.exe");
+const CURSOR = (process.env.SUPERUSE_CURSOR ?? "fast") as CursorMode;
 
 const API = `Control Windows apps with JavaScript. The code runs in an async function with a persistent \`cua\` object; top-level let/const persist between calls. Return a value or call log(...) to see output.
 
@@ -85,7 +85,7 @@ let promptOpenSince: number | null = null; // a prompt the user is looking at ri
 const userWait = () => userWaitMs + (promptOpenSince === null ? 0 : Date.now() - promptOpenSince);
 
 function requestClient(method: string, params: object): Promise<Message> {
-  const id = `bcu-${nextOwnId++}`;
+  const id = `superuse-${nextOwnId++}`;
   send({ jsonrpc: "2.0", id, method, params });
   return new Promise((resolve) => outstanding.set(id, resolve));
 }
@@ -146,7 +146,7 @@ async function handle(msg: Message) {
       const caps = (msg.params?.capabilities ?? {}) as { elicitation?: unknown };
       clientCanElicit = !!caps.elicitation;
       const version = typeof msg.params?.protocolVersion === "string" ? msg.params.protocolVersion : "2025-06-18";
-      return reply({ protocolVersion: version, capabilities: { tools: {} }, serverInfo: { name: "bcu", version: VERSION }, instructions: INSTRUCTIONS });
+      return reply({ protocolVersion: version, capabilities: { tools: {} }, serverInfo: { name: "superuse", version: VERSION }, instructions: INSTRUCTIONS });
     }
     case "tools/list":
       return reply({ tools: TOOLS });

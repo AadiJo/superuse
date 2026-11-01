@@ -25,7 +25,7 @@ function check(name: string, ok: boolean, detail: string) {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}: ${detail.slice(0, 160)}`);
 }
 
-const policy = path.join(mkdtempSync(path.join(tmpdir(), "bcu-")), "policy.json");
+const policy = path.join(mkdtempSync(path.join(tmpdir(), "superuse-")), "policy.json");
 writeFileSync(policy, JSON.stringify({ allow: ["msedge", "TestPad"], foreground: "deny" }));
 
 async function js(c: McpClient, code: string): Promise<{ text: string; error: boolean }> {
@@ -61,7 +61,7 @@ async function formTitle(): Promise<string> {
   return (await listWindows(true)).find((w) => w.proc === "msedge" && w.title.startsWith("Shift form"))?.title ?? "";
 }
 
-const server = () => McpClient.start(SERVER, { env: { BCU_POLICY: policy, BCU_AUDIT: "off" }, elicit: "unsupported" });
+const server = () => McpClient.start(SERVER, { env: { SUPERUSE_POLICY: policy, SUPERUSE_AUDIT: "off" }, elicit: "unsupported" });
 
 const CASES: Record<string, () => Promise<void>> = {
   // The driver numbers rows anew in each snapshot. A number read before the tree grew used to land

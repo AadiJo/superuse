@@ -1,4 +1,4 @@
-// End-to-end check that bcu's driver client recovers when the driver ends its session, through the
+// End-to-end check that superuse's driver client recovers when the driver ends its session, through the
 // real Driver class (plugin/server/driver.ts) and the real cua-driver.exe.
 //
 //   node bench/session-check.ts          ends the session with end_session, then calls again
@@ -15,13 +15,13 @@ import path from "node:path";
 import { timestamp } from "./win.ts";
 
 const REPO = path.dirname(import.meta.dirname);
-const EXE = process.env.BCU_CUA_DRIVER ?? path.join(REPO, "plugin/driver/cua-driver.exe");
+const EXE = process.env.SUPERUSE_DRIVER ?? path.join(REPO, "plugin/driver/cua-driver.exe");
 const IDLE = process.argv.includes("--idle");
 const IDLE_WAIT_MS = 5 * 60_000 + 20_000; // the driver's DEFAULT_SESSION_IDLE_TTL, plus its sweep
 
-// driver.ts reads BCU_TRACE when it loads, so set it before the import.
-const tracePath = path.join(mkdtempSync(path.join(tmpdir(), "bcu-session-")), "trace.jsonl");
-process.env.BCU_TRACE = tracePath;
+// driver.ts reads SUPERUSE_TRACE when it loads, so set it before the import.
+const tracePath = path.join(mkdtempSync(path.join(tmpdir(), "superuse-session-")), "trace.jsonl");
+process.env.SUPERUSE_TRACE = tracePath;
 const { Driver } = await import("../plugin/server/driver.ts");
 
 type Result = { case: string; ok: boolean; detail: string };

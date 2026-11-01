@@ -8,9 +8,9 @@ import fs from "node:fs";
 import { createInterface } from "node:readline";
 import { VERSION } from "./version.ts";
 
-const TRACE = process.env.BCU_TRACE;
+const TRACE = process.env.SUPERUSE_TRACE;
 
-/** BCU_TRACE=<file>: append one JSON line per driver and API call with its timing, for the
+/** SUPERUSE_TRACE=<file>: append one JSON line per driver and API call with its timing, for the
  *  benchmark. Off by default. Entries carry tool and method names only, never arguments. */
 export function trace(entry: Record<string, unknown>) {
   if (!TRACE) return;
@@ -65,7 +65,7 @@ type ToolResult = {
 };
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
-const SESSION = "bcu"; // one driver session label, so cursor settings apply to every action
+const SESSION = "superuse"; // one driver session label, so cursor settings apply to every action
 const TIMEOUT_MS = 20_000;
 
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -119,7 +119,7 @@ export class Driver {
   }
 
   private async handshake() {
-    await this.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "bcu", version: VERSION } });
+    await this.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "superuse", version: VERSION } });
     this.send({ jsonrpc: "2.0", method: "notifications/initialized" });
     const list = (await this.request("tools/list", {})) as { tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }> };
     for (const t of list.tools ?? []) {

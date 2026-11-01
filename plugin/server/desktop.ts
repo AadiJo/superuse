@@ -17,7 +17,7 @@ const SETTLE_AFTER_ACTION_MS = 2_000; // reads this soon after an action wait fo
 const SETTLE_CAP_MS = 1_500;
 const SETTLE_POLL_MS = 100;
 const SLEEP_CAP_MS = 300;
-const AUDIT = process.env.BCU_AUDIT ?? path.join(os.homedir(), ".local", "state", "bcu", "actions.jsonl");
+const AUDIT = process.env.SUPERUSE_AUDIT ?? path.join(os.homedir(), ".local", "state", "superuse", "actions.jsonl");
 
 type StateOpts = { query?: string; max?: number; diff?: boolean; screenshot?: boolean };
 type InputOpts = { foreground?: boolean };

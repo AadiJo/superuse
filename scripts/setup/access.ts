@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { windowsDir, writeAtomic, type Check } from "./lib.ts";
 
-export const POLICY = process.env.BCU_POLICY ?? path.join(os.homedir(), ".config", "bcu", "policy.json");
+export const POLICY = process.env.SUPERUSE_POLICY ?? path.join(os.homedir(), ".config", "superuse", "policy.json");
 
 type Foreground = "ask" | "allow" | "deny";
 type Browsers = "attach" | "off";
@@ -34,7 +34,7 @@ function readPolicy(): Read {
   }
 }
 
-/** Whether the policy file turns browser attach on. BCU_BROWSERS in this shell doesn't count:
+/** Whether the policy file turns browser attach on. SUPERUSE_BROWSERS in this shell doesn't count:
  *  clients don't see it, and verification removes it. */
 export function browsersEnabled(): boolean {
   const r = readPolicy();
@@ -44,9 +44,9 @@ export function browsersEnabled(): boolean {
 export function checkPolicy(): Check {
   const id = "policy";
   const r = readPolicy();
-  const env = ["BCU_APPS", "BCU_FOREGROUND", "BCU_BROWSERS", "BCU_POLICY"].filter((k) => process.env[k]).map((k) => `${k}=${process.env[k]} is set in this shell; clients only see it if their server environment sets it too`);
+  const env = ["SUPERUSE_APPS", "SUPERUSE_FOREGROUND", "SUPERUSE_BROWSERS", "SUPERUSE_POLICY"].filter((k) => process.env[k]).map((k) => `${k}=${process.env[k]} is set in this shell; clients only see it if their server environment sets it too`);
   if (r.kind === "malformed") {
-    return { id, status: "fail", code: "POLICY_MALFORMED", summary: `${POLICY} isn't usable: ${r.error}`, evidence: env, next: "Fix the file by hand. bcu treats it as empty until then and won't overwrite it." };
+    return { id, status: "fail", code: "POLICY_MALFORMED", summary: `${POLICY} isn't usable: ${r.error}`, evidence: env, next: "Fix the file by hand. superuse treats it as empty until then and won't overwrite it." };
   }
   const p = r.kind === "ok" ? r.policy : {};
   const allow = p.allow?.length ? p.allow.join(", ") : "none";
@@ -72,7 +72,7 @@ export function applyChoices(c: AccessChoices): Check | null {
   return checkPolicy();
 }
 
-/** Chromium browsers bcu can attach to, by their user-data folder under %LOCALAPPDATA%. */
+/** Chromium browsers superuse can attach to, by their user-data folder under %LOCALAPPDATA%. */
 const BROWSERS: Array<[name: string, dir: string]> = [
   ["Google Chrome", "Google/Chrome/User Data"],
   ["Microsoft Edge", "Microsoft/Edge/User Data"],

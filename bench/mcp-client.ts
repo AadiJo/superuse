@@ -90,7 +90,7 @@ export class McpClient {
       const init = await c.request("initialize", {
         protocolVersion: "2025-06-18",
         capabilities: c.elicit === "unsupported" ? {} : { elicitation: {} },
-        clientInfo: { name: "bcu-bench", version: "0.1" },
+        clientInfo: { name: "superuse-bench", version: "0.1" },
       }) as { serverInfo?: McpClient["serverInfo"] };
       c.serverInfo = init.serverInfo ?? {};
     } catch (e) {

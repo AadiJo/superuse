@@ -25,7 +25,7 @@ export type Check = {
 export const REPO = path.resolve(import.meta.dirname, "..", "..");
 export const PLUGIN = path.join(REPO, "plugin");
 export const LAUNCHER = path.join(PLUGIN, "server", "run.sh");
-export const CONFIG_DIR = path.join(os.homedir(), ".config", "bcu");
+export const CONFIG_DIR = path.join(os.homedir(), ".config", "superuse");
 export const NODE_RECORD = path.join(CONFIG_DIR, "node-path");
 
 export const VERSION: string = readJson<{ version: string }>(path.join(PLUGIN, ".claude-plugin", "plugin.json")).version;

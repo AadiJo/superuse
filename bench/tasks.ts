@@ -1,6 +1,6 @@
 // The Windows desktop task suite, used by run.ts, codex-app.ts, latency.ts and acceptance.ts.
 //
-// Each task prepares its own files under %TEMP%\bcu\<task id>, optionally opens the app, and
+// Each task prepares its own files under %TEMP%\superuse\<task id>, optionally opens the app, and
 // returns a checker that reads real Windows state (file contents, Calculator's display through
 // UIA, Edge's window title), never trusting the agent's claim. The runner closes the apps the
 // agent touched afterwards (win.ts).
@@ -114,7 +114,7 @@ async function checkCalc(): Promise<Check> {
 const TESTPAD_SRC = path.join(import.meta.dirname, "apps", "TestPad.cs");
 const TESTPAD_EXE = `${WIN_TEMP}\\TestPad.exe`;
 
-/** Compile apps/TestPad.cs into %TEMP%\bcu\TestPad.exe with the C# compiler built into Windows
+/** Compile apps/TestPad.cs into %TEMP%\superuse\TestPad.exe with the C# compiler built into Windows
  * PowerShell. It must be its own exe: Codex's computer use hides terminal hosts such as
  * powershell.exe, so a script-hosted window would be invisible to that stack. */
 async function buildTestpad(): Promise<void> {
@@ -170,14 +170,14 @@ export async function explorerMoveSetup(): Promise<Checker> {
   const dir = taskDir("explorer_move");
   // Unknown extension on purpose: a stray double-click must not open Notepad, which would restore
   // the user's own session tabs.
-  writeFileSync(path.join(dir.wsl, "a.bcu"), "a");
-  writeFileSync(path.join(dir.wsl, "b.bcu"), "b");
+  writeFileSync(path.join(dir.wsl, "a.superuse"), "a");
+  writeFileSync(path.join(dir.wsl, "b.superuse"), "b");
   await start("explorer.exe", dir.win);
   await sleep(2000);
   return async () => {
     const at = (...parts: string[]) => existsSync(path.join(dir.wsl, ...parts));
     const contents = readdirSync(dir.wsl, { recursive: true, encoding: "utf8" }).toSorted();
-    return { passed: at("archive", "a.bcu") && !at("a.bcu") && at("b.bcu"), detail: `contents=${show(contents)}` };
+    return { passed: at("archive", "a.superuse") && !at("a.superuse") && at("b.superuse"), detail: `contents=${show(contents)}` };
   };
 }
 
@@ -203,7 +203,7 @@ document.getElementById('f').addEventListener('submit', e => {
 });
 </script></body></html>`;
 
-/** Edge in a throwaway profile under %TEMP%\bcu. Chromium hides a page's accessibility tree while
+/** Edge in a throwaway profile under %TEMP%\superuse. Chromium hides a page's accessibility tree while
  * its window is covered by another one (occlusion tracking), so without these flags a task
  * depended on what the user had on top. Teardown kills this Edge, so the profile is marked as
  * cleanly exited first; otherwise Edge opens a "Restore pages" bubble as an extra window.
@@ -265,7 +265,7 @@ async function xappInvoiceSetup(rng: Rng): Promise<Checker> {
 }
 
 const CSV_FILES = ["budget_2026.csv", "contacts.csv", "q3_sales.csv", "zones.csv", "inventory.csv"];
-const OTHER_FILES = ["budget_2026.bcu", "notes.log", "readme.bcu", "contacts_old.bcu"];
+const OTHER_FILES = ["budget_2026.superuse", "notes.log", "readme.superuse", "contacts_old.superuse"];
 
 async function xappCsvListSetup(rng: Rng): Promise<Checker> {
   const dir = taskDir("xapp_csv_list");
@@ -327,7 +327,7 @@ export const TASKS = {
     setup: editReplaceSetup,
   },
   explorer_move: {
-    prompt: `A File Explorer window is open at ${p("explorer_move")}. Using File Explorer, create a new folder named archive in that folder and move a.bcu into archive.`,
+    prompt: `A File Explorer window is open at ${p("explorer_move")}. Using File Explorer, create a new folder named archive in that folder and move a.superuse into archive.`,
     setup: explorerMoveSetup,
   },
   sysdm_name: {

@@ -2,8 +2,10 @@
 //!
 //! The default artwork is authored as a checked-in dotLottie archive and
 //! compiled into the bounded artifact embedded by [`crate::theme_artifact`].
-//! This module owns transport-neutral state, session colors, and the shared
+//! This module owns transport-neutral state, cursor colors, and the shared
 //! runtime float transform. It does not parse Lottie at runtime.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,60 +23,34 @@ const FLOAT_DURATION_SECS: f32 = 4.0;
 
 pub const DEFAULT_CURSOR_FILL: [u8; 4] = [94, 192, 232, 255];
 
-const SESSION_CURSOR_FILLS: &[[u8; 4]] = &[
-    [178, 132, 255, 255],
-    [247, 132, 170, 255],
-    [96, 218, 174, 255],
-    [244, 178, 66, 255],
-    [76, 204, 224, 255],
-    [221, 113, 236, 255],
-    [232, 82, 98, 255],
-    [184, 220, 54, 255],
-    [80, 126, 236, 255],
+/// Cursor fills by color slot, most distinct first. Each driver process
+/// claims one slot for every cursor it draws (on Windows, the overlay claims
+/// the first slot no other live driver holds), so agents running side by side
+/// get different colors. Slot 0 is the original Cua blue, which a lone agent
+/// keeps.
+pub const CURSOR_FILLS: [[u8; 4]; 8] = [
+    DEFAULT_CURSOR_FILL,
+    [244, 178, 66, 255],  // amber
+    [221, 113, 236, 255], // magenta
+    [96, 218, 174, 255],  // green
+    [232, 82, 98, 255],   // red
+    [178, 132, 255, 255], // violet
+    [184, 220, 54, 255],  // lime
+    [247, 132, 170, 255], // pink
 ];
 
-/// Return the stable fill color for one session-owned cursor.
-///
-/// The anonymous/default cursor keeps the original Cua blue. Named sessions
-/// hash into the former multi-cursor palette so concurrent runs are visually
-/// distinct without accepting an agent-controlled styling argument.
-pub fn session_fill_rgba(session_id: &str) -> [u8; 4] {
-    if session_id.is_empty() || session_id == "default" {
-        return DEFAULT_CURSOR_FILL;
-    }
+static CURSOR_FILL_SLOT: AtomicUsize = AtomicUsize::new(0);
 
-    SESSION_CURSOR_FILLS[stable_session_index(session_id, SESSION_CURSOR_FILLS.len())]
+/// Pick this process's cursor color from [`CURSOR_FILLS`]. Platform overlays
+/// call it once, before their first frame. Out-of-range slots wrap.
+pub fn set_cursor_fill_slot(slot: usize) {
+    CURSOR_FILL_SLOT.store(slot % CURSOR_FILLS.len(), Ordering::Relaxed);
 }
 
-pub fn session_fill_hex(session_id: &str) -> String {
-    let [r, g, b, _] = session_fill_rgba(session_id);
-    format!("#{r:02X}{g:02X}{b:02X}")
-}
-
-fn stable_session_index(id: &str, count: usize) -> usize {
-    let suffix = id
-        .rfind(['-', '_', '.'])
-        .map(|index| &id[index + 1..])
-        .unwrap_or(id);
-    if let Ok(number) = suffix.parse::<usize>() {
-        if number > 0 {
-            return (number - 1) % count;
-        }
-    }
-    if suffix.len() == 1 {
-        if let Some(character) = suffix.chars().next() {
-            if character.is_ascii_alphabetic() {
-                return (character.to_ascii_lowercase() as usize - b'a' as usize) % count;
-            }
-        }
-    }
-
-    let mut hash: u32 = 2_166_136_261;
-    for character in id.chars() {
-        hash ^= character as u32;
-        hash = hash.wrapping_mul(16_777_619);
-    }
-    hash as usize % count
+/// The fill every cursor in this process is drawn with: the embedded theme's
+/// body, its glow, click effects and the session badge accent.
+pub fn cursor_fill_rgba() -> [u8; 4] {
+    CURSOR_FILLS[CURSOR_FILL_SLOT.load(Ordering::Relaxed)]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -255,15 +231,8 @@ mod tests {
 
     #[test]
     fn default_cursor_keeps_original_blue_fill() {
-        assert_eq!(session_fill_rgba("default"), DEFAULT_CURSOR_FILL);
-        assert_eq!(session_fill_hex("default"), "#5EC0E8");
-    }
-
-    #[test]
-    fn named_session_colors_are_stable_and_distinct() {
-        assert_eq!(session_fill_rgba("agent-1"), session_fill_rgba("agent-1"));
-        assert_ne!(session_fill_rgba("agent-1"), session_fill_rgba("agent-2"));
-        assert_ne!(session_fill_rgba("agent-2"), DEFAULT_CURSOR_FILL);
+        assert_eq!(CURSOR_FILLS[0], DEFAULT_CURSOR_FILL);
+        assert_eq!(cursor_fill_rgba(), DEFAULT_CURSOR_FILL);
     }
 
     #[test]

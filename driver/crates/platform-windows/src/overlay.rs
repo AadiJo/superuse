@@ -568,9 +568,13 @@ fn run_overlay_thread(cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
         }
     }
 
-    // Register window class. Class + title use the `Cua.` namespace.
+    let slot = claim_cursor_fill_slot();
+    cursor_overlay::set_cursor_fill_slot(slot);
+
+    // Register window class. Class + title use the `Cua.` namespace. The
+    // title ends in the color slot so a capture can tell the drivers apart.
     let class_name_w: Vec<u16> = "Cua.AgentCursorOverlay\0".encode_utf16().collect();
-    let title_w: Vec<u16> = format!("Cua.AgentCursorOverlay.{}\0", cfg.cursor_id)
+    let title_w: Vec<u16> = format!("Cua.AgentCursorOverlay.{}.slot{slot}\0", cfg.cursor_id)
         .encode_utf16()
         .collect();
 
@@ -652,6 +656,38 @@ fn run_overlay_thread(cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
     // Message loop ended (WM_DESTROY): release the raised timer resolution
     // if the loop went down while still at the ACTIVE cadence.
     set_timer_resolution_raised(false);
+}
+
+/// Claim the first cursor color slot ([`cursor_overlay::CURSOR_FILLS`]) that
+/// no other live driver holds, so concurrent agents draw different colors.
+///
+/// Each slot is a named mutex in this logon session. Creating a named object
+/// is atomic, so two drivers starting together can't both get a slot as new.
+/// The claiming handle stays open for the life of the process, and Windows
+/// deletes the mutex when its last handle closes, so a driver that exits or
+/// crashes frees its slot. With every slot taken, the pid picks one.
+#[cfg(target_os = "windows")]
+fn claim_cursor_fill_slot() -> usize {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let slots = cursor_overlay::CURSOR_FILLS.len();
+    (0..slots)
+        .find(|slot| {
+            let name = HSTRING::from(format!("Local\\superuse-driver-cursor-slot-{slot}"));
+            let Ok(handle) = (unsafe { CreateMutexW(None, false, &name) }) else {
+                return false; // e.g. held by another user's process: treat as taken
+            };
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                return false;
+            }
+            true // the handle is never closed: that is the claim
+        })
+        .unwrap_or(std::process::id() as usize % slots)
 }
 
 #[cfg(not(target_os = "windows"))]

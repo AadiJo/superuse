@@ -26,7 +26,8 @@ ZIP metadata and entry ordering. A Rust test verifies that the source hash
 inside the compiled artifact matches the checked-in `.lottie` bytes.
 
 The source uses Cua blue as a palette key and white for outlines. At runtime,
-only the embedded default is recolored to the stable session fill. Installed
+only the embedded default is recolored to the driver's cursor fill (one of
+`CURSOR_FILLS` in `src/theme.rs`, Cua blue unless another driver holds it). Installed
 custom themes retain their authored colors. The shared floating motion is
 applied to the selected action animation. Delivery and target context is
 painted by the host-owned session badge and is not part of theme artifacts.

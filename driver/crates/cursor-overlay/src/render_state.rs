@@ -1087,15 +1087,14 @@ pub fn paint_cursor(
     }
 
     let effects = core.effect_frame();
-    let effect_rgb = effect_rgb(crate::session_fill_rgba(&core.cfg.cursor_id));
+    let effect_rgb = effect_rgb(crate::cursor_fill_rgba());
     let to_px = |x: f64, y: f64| (((x - origin_x) * s) as f32, ((y - origin_y) * s) as f32);
     paint_effects_under(pm, &effects, effect_rgb, f64::from(alpha_scale), &to_px, sf);
     // Click squish scales the artwork about its hotspot.
     let art_scale = backing_scale.max(1.0) * (1.0 - effects.squish as f32);
 
     if let Some(theme) = core.theme.as_deref() {
-        let tint = (theme.id == crate::DEFAULT_THEME_ID)
-            .then(|| crate::session_fill_rgba(&core.cfg.cursor_id));
+        let tint = (theme.id == crate::DEFAULT_THEME_ID).then(crate::cursor_fill_rgba);
         crate::paint_compiled_theme_with_tint(
             pm,
             theme,
@@ -1119,7 +1118,7 @@ pub fn paint_cursor(
             heading as f32,
             art_scale,
             alpha_scale,
-            crate::session_fill_rgba(&core.cfg.cursor_id),
+            crate::cursor_fill_rgba(),
         );
     }
     paint_effects_over(pm, &effects, effect_rgb, f64::from(alpha_scale), &to_px, sf);
@@ -1135,12 +1134,7 @@ pub fn paint_cursor(
         chip_alpha: core.session_badge_chip_alpha(),
         clip: Some((pm.width() as f32, pm.height() as f32)),
     }) {
-        crate::paint_session_badge(
-            pm,
-            &layout,
-            crate::session_fill_rgba(&core.cfg.cursor_id),
-            alpha_scale,
-        );
+        crate::paint_session_badge(pm, &layout, crate::cursor_fill_rgba(), alpha_scale);
     }
 }
 

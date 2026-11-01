@@ -5,8 +5,9 @@ bench/.codex-home/
 fork/acceptance-runs/
 
 # Downloads, clones and builds (fork/build.sh recreates them).
-tools/
-plugin/driver/
+/tools/
+/plugin/driver/
 
 node_modules/
 *.log
+driver/target/

@@ -15,6 +15,8 @@ The scripts run on Node 24+ through type stripping, with no build step. `npm ins
 
 `node agent-labels.ts` starts two plugin servers at once, has each click in its own MenuPad window, and captures both windows to `out/agent-labels-<time>/labels.png`, where both cursors must show different labels. It sends input, so run it on an idle desktop.
 
+`node input-locks.ts [fgclicks] [sametype] [samehotkey] [held] [abandoned]` runs two drivers as two agents acting at once on MenuPad windows, and checks the cross-agent input locks (`driver/NOTES.md`, "Input locks across agents"). It writes `out/input-locks-runs/input-locks-<time>.json`. `SUPERUSE_DRIVER` picks the driver.
+
 `node helium-check.ts [--direct | --claude]` checks the plugin's page API in your own Helium. It fills a test form in a tab it opens and closes again, and writes `out/helium-check-<time>.json`.
 
 `node cursor-colors.ts [--baseline <exe>]` checks that drivers running side by side draw different cursor colors, and that a driver which exits frees its color. It sends input to three MenuPads it opens, and writes `out/cursor-colors/<time>.json` with PNGs.

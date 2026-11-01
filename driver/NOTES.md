@@ -385,3 +385,55 @@ Several agents can run Superuse at once, each with its own driver and overlay. B
 
 - The color belongs to the driver process, not the session. Several sessions in one driver share a color, and only their badges tell them apart. The plugin runs one session per driver. One exception: when a history preview admission file exists, `mcp` proxies every agent into one shared `serve` daemon (`superuse-driver/src/main.rs`), so all of them draw one color. The plugin never sets that file up.
 - Drivers from builds before this one claim no slot, so one of them can match a new driver's color.
+
+## Input locks across agents
+
+Each agent runs its own driver, and nothing stopped two of them from acting at once. Two foreground actions fought over the one cursor and the foreground: one driver's restore handed the foreground to the other's target, and clicks landed in the other agent's window. Two agents typing into one window interleaved their keys, and a Ctrl+Home from one agent moved the caret in the middle of the other's text.
+
+`input/lock.rs` adds two kinds of lock, both named mutexes in the session's `Local\` namespace:
+
+- The foreground lock (`Local\superuse-input-foreground`) covers an action that activates a window or uses the real cursor, from activation through input to the foreground restore.
+- A window lock covers every input action on a top-level window, background or foreground. It is named after the window's UI thread (`Local\superuse-input-thread-<thread id>`), because the attached modifier hold sets that thread's key state: an owned dialog like Save As usually runs on its owner's thread, so the two share a lock. Windows on separate threads, like two apps, don't.
+
+Who takes them:
+
+- `InputLockedTool` in `tools/impl_.rs` wraps every input tool: `click`, `double_click`, `right_click`, `drag`, `type_text`, `press_key`, `hotkey`, `set_value`, `scroll`, `bring_to_front`, `invoke_menu` and `move_cursor`. It sits inside the pid guards, so it sees the `window_id` they fill in, or else the element token's window. It takes the window lock, then the foreground lock when the call has `delivery_mode:"foreground"`, is `bring_to_front`, or has `scope:"desktop"` with no `window_id` (or is a desktop `move_cursor`, which moves the real pointer). A desktop-scope call that names a window takes the background path, so it doesn't take the foreground lock. Both are held for the whole call. That includes the post-click window watch, so a dialog the other agent opens isn't reported as this action's.
+- Background actuators that still touch the shared pointer or foreground take the foreground lock themselves: pen injection (`inject_click_screen`, `inject_drag_screen`, which re-assert the user's foreground afterwards) and the MSAA click without activation (`send_click_synthesized_mods`, which moves the real cursor). They run only on background paths, and the wrapper never takes the foreground lock for a call that reaches one, so they never wait on a lock their own call holds.
+- The order is always window, then foreground.
+
+A wait past 5 s returns `input_busy` (`effect: "refused"`, `lock: "foreground"` or `"window"`, `window_id`, `waited_ms`) and sends no input. The message says another agent is using the cursor or the window, and to retry. Busy pen injection reports `input_busy`, not `background_unavailable`, so the model doesn't escalate to foreground over it.
+
+Why a mutex: Windows abandons a mutex whose owner dies, and the next waiter gets `WAIT_ABANDONED` and owns it. The lock counts that as acquired, so a crashed driver can't wedge the others. A semaphore's count would stay taken. A mutex belongs to the thread that took it, and a tool call is a tokio task that moves between threads, so each held lock gets its own thread that waits for the mutex, owns it, and releases it when the guard drops. If the mutex can't be created (one an elevated driver created can refuse a non-elevated driver), the action goes ahead unlocked and the driver logs a warning.
+
+The foreground restore moved inside the lock. Foreground clicks, double and right clicks and drags used to spawn the 3 s restore poller and return, so the user's foreground came back after the call, when another agent could already have captured our target as its "previous foreground". `restore_foreground_after_input` now hands it back before the call returns. The poller still runs afterwards to undo a late self-activation, but it only restores while it can take the foreground lock without waiting. During another agent's foreground action it skips that tick, because the app may hold the foreground for that action. Background calls that reach a click restore (the MSAA click, the Chromium short-circuit) keep the spawned poller, since they don't hold the lock.
+
+### Results
+
+`bench/input-locks.ts` runs agents A and B as two `superuse-driver mcp` processes, plus a third that only reads window state. Ordering comes from observation: B's call starts once A's window has taken the foreground (sampled every 5 ms) or A's first characters show in the text box, so B always lands while A holds its locks. `held` holds the locks from a PowerShell process past the 5 s wait. `abandoned` has a process take the foreground lock and exit without releasing it while a click waits. MenuPad gained `--log-clicks`, which appends "click " to its text on every mouse press, so the check can see which window a click reached.
+
+Release driver `driver-130d6b189ad7` (origin/main's source) in `input-locks-runs/input-locks-20261101-144926.json`, this build in `input-locks-20261101-145612.json`:
+
+| Check | Release driver | This build |
+| --- | --- | --- |
+| fgclicks: two foreground triple-clicks on two windows, B sent 13 to 14 ms after A | fail. A's call failed with `foreground_unavailable`. A's window logged 2 clicks and B's 4, so one of A's went to B. Foreground went A, B, A, B, A, B, A and stayed on A | pass. Foreground Home, A, Home, B, Home. 3 clicks each. A 365 ms, B 647 ms, waiting out A |
+| sametype: A and B type 150 characters each into one window | fail. 194 runs of a's and b's | pass. 150 a's, then 150 b's. B 1255 ms, A 673 ms |
+| samehotkey: A types `000 001 ... 037`, B presses Ctrl+Home | fail. The caret jumped mid-text: `03 004 005 ...` | pass. Text in order, B 719 ms |
+| held: foreground lock, then the window's lock, held for 8 s | fail. No lock: the click went through and moved the cursor 420 px | pass. Both refused as `input_busy` after 4.5 s, 0 foreground changes, 0 px, nothing typed |
+| abandoned | fail. No lock, so nothing waited | pass. The click waited 1489 ms and went through when the holder died |
+
+WSL's clock ran about 10% slow against Windows' on this machine (4540 ms for a 5040 ms Windows sleep), which is why 5 s waits read as 4.5 s.
+
+Single-agent acceptance on both builds (`acceptance-20261101-144944.json` and `-145213.json` for this build, `-145055.json` and `-145307.json` for the release): `saveas`, `closedmenu`, `replace`, `win32menu`, `win32menu_bypos`, `menubg`, `ownership`, `fgpoint`, `calc`, `explorer`, `edge` and `edge_alert` all pass, with 0 px of cursor movement. Median call times, this build against the release: `click` 329 and 325 ms (25 calls each), `hotkey` 482 and 481 ms, `invoke_menu` 221 and 232 ms, `set_value` 287 and 284 ms, `type_text` 85 and 83 ms. The differences are within run-to-run noise. One `launch_app` took 4040 ms on the first Calculator start of the session. Three reruns took 926, 873 and 846 ms, and the packaged-app launch path doesn't use the poller.
+
+### Limits
+
+- Only drivers with this change take the locks. A release driver, the user's own input, or another tool can still act at the same moment.
+- Desktop-scope input without a window (`scope:"desktop"` and no `window_id`) takes only the foreground lock. It can still interleave with another agent's background input on the foreground window. The plugin doesn't send desktop scope.
+- Two windows of one app that run on separate UI threads don't share a lock. That's fine for the modifier hold, which is per thread.
+- Several windows on one UI thread (Chromium's windows, for one) serialize, even when two agents use different windows. The cost is waiting, not wrong input.
+- `browser_prepare`'s one-time remote-debugging setup activates the browser and sends Enter and Ctrl+W through SendInput without the foreground lock. It runs once per browser session with `"browsers": "attach"`.
+- A tool call the runtime aborts drops its locks while a blocking actuator may still be sending input. The plugin never cancels calls.
+- Two restores still run without the lock: posted clicks and background scrolls hand the foreground back when a WebView host took it during the action. Both act only when the target itself took the foreground.
+- `launch_app` takes no lock. An app that takes the foreground as it starts can still fail another agent's foreground action, which then reports `foreground_unavailable` as before.
+- A non-elevated driver that can't open an elevated driver's mutex acts unlocked.
+- Installs need `--build` until a maintainer publishes a driver release with this change.

@@ -23,13 +23,18 @@
 use std::process::{Command, ExitStatus};
 
 pub(crate) const PACMAN_UPDATE_GUIDANCE: &str =
-    "This executable is managed by pacman. Update with `sudo pacman -Syu`; \
-     release selection and availability are controlled by your package repository. \
-     The upstream installer and stable/nightly channel switching are disabled.";
+    "This driver ships with its superuse checkout. Update it with scripts/install.sh there; \
+     the upstream Cua installer and stable/nightly channel switching are disabled.";
 
-/// Only positive package ownership disables the upstream updater. Missing
-/// pacman, failed queries, and unresolved paths retain unmanaged behavior.
+/// Always true in this fork: the checkout's installer owns the driver, so every update check,
+/// channel switch and installer run takes the "managed by a package manager" refusal and never
+/// reaches Cua's releases or install scripts.
 pub(crate) fn is_pacman_managed() -> bool {
+    true
+}
+
+#[allow(dead_code)]
+fn upstream_is_pacman_managed() -> bool {
     #[cfg(target_os = "linux")]
     {
         std::env::current_exe()

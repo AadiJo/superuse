@@ -44,9 +44,6 @@ zune-core = "=0.5.1"
 uniffi = "=0.31.0"
 postcard = { version = "1", features = ["alloc"] }
 sha2 = "0.10"
-hex = "0.4"
-rand = "0.9"
-tempfile = "3"
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "load-dynamic"] }
 serde_yaml = "0.9"
 libloading = "0.8"

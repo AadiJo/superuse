@@ -650,6 +650,11 @@ fn make_dir_symlink(target: &Path, link: &Path) -> Result<()> {
 // ── fetch ──────────────────────────────────────────────────────────────────
 
 fn fetch_into(dest: &Path, from_main: bool, all_platforms: bool) -> Result<()> {
+    // This fork's agent skill ships in the superuse plugin. Never download Cua's skill pack
+    // (outside tests, which feed the fetch path canned data).
+    if !cfg!(test) {
+        bail!("skill-pack downloads are disabled in this build; the superuse plugin ships its own skill");
+    }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }

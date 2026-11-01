@@ -22,7 +22,7 @@ let number: Promise<number> | undefined;
 /** Listen on the lowest free slot socket and keep it for the life of this process. */
 async function claimNumber(): Promise<number> {
   for (let n = 1; ; n++) {
-    const server = net.createServer();
+    const server = net.createServer((socket) => socket.destroy()); // only listening matters
     const ok = await new Promise<boolean>((resolve, reject) => {
       server.once("error", (e: NodeJS.ErrnoException) => (e.code === "EADDRINUSE" ? resolve(false) : reject(e)));
       server.listen(slotSocket(n), () => resolve(true));
@@ -36,7 +36,8 @@ async function claimNumber(): Promise<number> {
 }
 
 /** The cursor label for the client that sent `initialize` (its display title, else its name).
- *  The number is claimed on the first call and kept for the life of this process. */
+ *  The number is claimed on the first call, when the driver first starts, and kept for the life of
+ *  this process, so sessions that never use the desktop don't hold one. */
 export async function agentLabel(client: { name?: unknown; title?: unknown } = {}): Promise<string> {
   const custom = process.env.SUPERUSE_AGENT?.trim();
   if (custom) return custom;

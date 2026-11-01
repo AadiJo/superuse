@@ -5,7 +5,8 @@
 //   flock /tmp/superuse-desktop.lock node bench/agent-labels.ts
 //
 // Both servers get the same clientInfo, as two sessions of one client would, so the labels differ
-// only by what the server adds per process. Sends input to two MenuPad windows it opens and closes
+// only by what the server adds per process. A third server initializes and stays idle; it must hold
+// no number. Sends input to two MenuPad windows it opens and closes
 // itself. Writes bench/out/agent-labels-<time>/ with labels.png (both cursors, just after the
 // clicks), later frames as the badges fade, and result.json with the labels each server should show.
 
@@ -92,7 +93,18 @@ try {
   windows.push(await openMenupad(160, 160, titles[0]), await openMenupad(655, 160, titles[1]));
   // Both servers start together, as two sessions of the same client would.
   const clients = await Promise.all(titles.map(() => McpClient.start(server, { env, elicit: "unsupported" })));
+  // A third session that initializes but never touches the desktop, so it must not hold a number.
+  const idle = await McpClient.start(server, { env, elicit: "unsupported" });
   try {
+    const js = async (c: McpClient, code: string) => {
+      const { result } = await c.call("js", { code }, 60_000);
+      const text = textOf(result);
+      if (result.isError) throw new Error(text);
+      return text;
+    };
+    // Bind each window first, so the drivers are up (and their numbers claimed) before the timed part.
+    await Promise.all(clients.map((c, i) => js(c, `globalThis.w = await desktop.window({title: "${titles[i]}"}); globalThis.ed = await w.find("Text editor"); return w.title`)));
+
     // run.sh execs Node, so each server is a child of this process. Its label ends in the number
     // of the slot socket it listens on (plugin/server/agent-label.ts), found through /proc.
     const pids = execFileSync("ps", ["--ppid", String(process.pid), "-o", "pid=,args="], { encoding: "utf8" })
@@ -101,19 +113,14 @@ try {
       const m = l.match(/ (\d+) @superuse-agent-\d+-(\d+)$/); // inode, then the socket name
       return m ? [[m[1], m[2]] as const] : [];
     }));
-    const numbers = pids.map((pid) => readdirSync(`/proc/${pid}/fd`)
+    const numbers = pids.flatMap((pid) => readdirSync(`/proc/${pid}/fd`)
       .map((fd) => { try { return readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { return ""; } })
-      .map((link) => slotOf.get(link.match(/^socket:\[(\d+)\]$/)?.[1] ?? "")).find(Boolean));
+      .map((link) => slotOf.get(link.match(/^socket:\[(\d+)\]$/)?.[1] ?? "")).find(Boolean) ?? []);
+    // Three servers, two of them active: exactly two numbers, and they differ.
+    if (pids.length !== 3 || numbers.length !== 2 || numbers[0] === numbers[1]) {
+      throw new Error(`expected 3 servers holding 2 distinct numbers, got ${pids.length} servers holding ${JSON.stringify(numbers)}`);
+    }
     const expected = numbers.map((n) => `superuse-bench ${n}`);
-
-    const js = async (c: McpClient, code: string) => {
-      const { result } = await c.call("js", { code }, 60_000);
-      const text = textOf(result);
-      if (result.isError) throw new Error(text);
-      return text;
-    };
-    // Bind each window first, so the drivers are up before the timed part.
-    await Promise.all(clients.map((c, i) => js(c, `globalThis.w = await desktop.window({title: "${titles[i]}"}); globalThis.ed = await w.find("Text editor"); return w.title`)));
 
     const dirWsl = path.join(WSL_TEMP, `agent-labels-${process.pid}`);
     const dirWin = `${WIN_TEMP}\\agent-labels-${process.pid}`;
@@ -138,7 +145,7 @@ try {
     writeFileSync(path.join(OUT, "result.json"), JSON.stringify(result, null, 2));
     console.log(JSON.stringify(result, null, 2));
   } finally {
-    await Promise.all(clients.map((c) => c.close()));
+    await Promise.all([...clients, idle].map((c) => c.close()));
   }
 } finally {
   // Only the windows this run opened: other sessions may be using MenuPad on this desktop.

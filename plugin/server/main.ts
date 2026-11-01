@@ -30,7 +30,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const DRIVER = process.env.SUPERUSE_DRIVER ?? path.join(here, "..", "driver", "superuse-driver.exe");
 const CURSOR = (process.env.SUPERUSE_CURSOR ?? "fast") as CursorMode;
 
-let label = "superuse"; // the client's initialize sets it (agent-label.ts)
+let clientInfo: { name?: unknown; title?: unknown } = {}; // from the client's initialize, for its cursor label
 
 const API = `Control Windows apps with JavaScript. The code runs in an async function with a persistent \`desktop\` object; top-level let/const persist between calls. Return a value or call log(...) to see output.
 
@@ -116,7 +116,7 @@ const ask: Ask = async (message, rememberLabel) => {
 };
 
 const policy = new Policy(ask);
-const desktop = new Desktop(new Driver(DRIVER, CURSOR, () => (policy.browserAttach ? ["--grant", "existing-profile"] : []), () => label), policy);
+const desktop = new Desktop(new Driver(DRIVER, CURSOR, () => (policy.browserAttach ? ["--grant", "existing-profile"] : []), () => agentLabel(clientInfo)), policy);
 const sandbox = await Sandbox.create((method, args) => desktop.dispatch(method, args), userWait);
 process.on("unhandledRejection", () => {}); // every API promise is tracked by the sandbox; nothing should land here
 
@@ -151,7 +151,7 @@ async function handle(msg: Message) {
     case "initialize": {
       const caps = (msg.params?.capabilities ?? {}) as { elicitation?: unknown };
       clientCanElicit = !!caps.elicitation;
-      label = await agentLabel((msg.params?.clientInfo ?? {}) as { name?: unknown; title?: unknown });
+      clientInfo = (msg.params?.clientInfo ?? {}) as typeof clientInfo;
       const version = typeof msg.params?.protocolVersion === "string" ? msg.params.protocolVersion : "2025-06-18";
       return reply({ protocolVersion: version, capabilities: { tools: {} }, serverInfo: { name: "superuse", version: VERSION }, instructions: INSTRUCTIONS });
     }

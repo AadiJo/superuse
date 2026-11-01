@@ -88,14 +88,15 @@ export class Driver {
   private readonly exe: string;
   private readonly cursor: CursorMode;
   private readonly launchArgs: () => string[];
-  private readonly sessionLabel: () => string;
+  private readonly sessionLabel: () => Promise<string>;
   // Every call carries one session label, so cursor settings apply to every action. The driver
   // draws it in the badge under the agent cursor; it's fixed for the life of the driver process.
   private session = "superuse";
 
   /** `launchArgs` and `sessionLabel` are read each time the driver process starts (e.g. the
-   *  existing-profile grant, and a label that names the MCP client once it has initialized). */
-  constructor(exe: string, cursor: CursorMode, launchArgs: () => string[] = () => [], sessionLabel: () => string = () => "superuse") {
+   *  existing-profile grant, and a label that names the MCP client). The driver starts on the first
+   *  desktop call, so a session that never uses the desktop never asks for a label. */
+  constructor(exe: string, cursor: CursorMode, launchArgs: () => string[] = () => [], sessionLabel: () => Promise<string> = async () => "superuse") {
     this.exe = exe;
     this.cursor = cursor;
     this.launchArgs = launchArgs;
@@ -107,7 +108,6 @@ export class Driver {
 
   private start() {
     const wslenv = ["DO_NOT_TRACK", process.env.WSLENV].filter(Boolean).join(":");
-    this.session = this.sessionLabel();
     const proc = spawn(this.exe, ["mcp", ...this.launchArgs()], { env: { ...process.env, DO_NOT_TRACK: "1", WSLENV: wslenv } });
     this.proc = proc;
     createInterface({ input: proc.stdout }).on("line", (line) => this.onLine(line));
@@ -125,6 +125,7 @@ export class Driver {
   }
 
   private async handshake() {
+    this.session = await this.sessionLabel();
     await this.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "superuse", version: VERSION } });
     this.send({ jsonrpc: "2.0", method: "notifications/initialized" });
     const list = (await this.request("tools/list", {})) as { tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }> };

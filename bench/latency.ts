@@ -88,7 +88,7 @@ async function benchCodex(w: Win): Promise<Ops> {
 }
 
 const stacks: Record<string, (w: Win) => Promise<Ops>> = {
-  "cua-driver main": (w) => benchCua(path.join(ROOT, "..", "tools/cua-driver-main/cua-driver.exe"), w),
+  "driver": (w) => benchCua(path.join(ROOT, "..", "plugin/driver/cua-driver.exe"), w),
   "codex runtime": benchCodex,
 };
 

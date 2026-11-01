@@ -1,6 +1,6 @@
 // Benchmark runner: one agent and one computer-use stack ("arm") on one task per run.
 //
-//   node bench/run.ts --arms claude-bcu3-v4,claude-bcu3 --tasks calc_mul,edge_form --reps 1 [--seed 42] [--batch name]
+//   node bench/run.ts --arms claude-bcu3,claude-cua-038 --tasks calc_mul,edge_form --reps 1 [--seed 42] [--batch name]
 //
 // Every run writes bench/out/<batch>/<arm>/<task>-r<n>/ with:
 //   transcript.jsonl    raw agent event stream, each line prefixed by its receive time
@@ -29,8 +29,6 @@ const ROOT = import.meta.dirname;
 const REPO = path.dirname(ROOT);
 export const OUT = path.join(ROOT, "out");
 const WORKDIR = path.join(ROOT, "workdir"); // empty cwd so no project instructions leak in
-const CUA_RELEASE = path.join(REPO, "tools/cua-driver/cua-driver-rs-0.34.1-windows-x86_64/cua-driver.exe");
-const CUA_MAIN = path.join(REPO, "tools/cua-driver-main/cua-driver.exe");
 // Benchmark copy of ~/.local/bin/codex-cu-mcp: browser backends off, tab records redacted.
 const CODEX_CU = path.join(ROOT, "codex-cu-bridge.ts");
 const CUA_ENV = { DO_NOT_TRACK: "1", WSLENV: "DO_NOT_TRACK" };
@@ -76,24 +74,8 @@ const ARMS = {
   "claude-agent-desktop": () => ({ cli: "agent-desktop", binDir: AGENT_DESKTOP_BIN, guide: agentDesktopGuide(false) }),
   "claude-agent-desktop-headed": () => ({ cli: "agent-desktop", binDir: AGENT_DESKTOP_BIN, guide: agentDesktopGuide(true) }),
   "claude-codexcu": () => ({ command: "node", args: [CODEX_CU], env: { CODEX_CU_AUTO_APPROVE: "1" } }),
-  "claude-cua": () => ({ command: CUA_RELEASE, args: ["mcp"], env: CUA_ENV }),
-  "claude-cua-main": () => ({ command: CUA_MAIN, args: ["mcp"], env: CUA_ENV }),
-  "claude-bcu": () => ({ command: "node", args: [path.join(REPO, "proto/v1/bcu-mcp.ts")] }),
-  "claude-bcu-fork": () => ({
-    command: "node", args: [path.join(REPO, "proto/v1/bcu-mcp.ts")],
-    env: { BCU_CUA_DRIVER: path.join(REPO, "tools/cua-driver-fork/cua-driver.exe") },
-  }),
-  // v2 prototype over the v2 fork. BCU_APPS scopes window lists to the suite's apps (apps it
-  // launches are always in scope); everything else on the desktop stays hidden from the model.
-  "claude-bcu2": () => ({
-    command: "node", args: [path.join(REPO, "proto/v2/bcu-mcp.ts")],
-    env: { BCU_CUA_DRIVER: path.join(REPO, "tools/cua-driver-fork/v2/cua-driver.exe"), BCU_APPS: SUITE_APPS },
-  }),
-  // v3 and later: the plugin's server (QuickJS sandbox, policy) over the driver the plugin ships.
+  // The plugin's server (QuickJS sandbox, policy) over the driver the plugin ships.
   "claude-bcu3": (runDir: string) => pluginServer(path.join(REPO, "plugin"), runDir),
-  // Round 4 baseline: the v4 server and driver, frozen by `git archive` of the round 3 commit into
-  // tools/baseline/v4/plugin (gitignored), with the v4 cua-driver.exe in its driver/ folder.
-  "claude-bcu3-v4": (runDir: string) => pluginServer(path.join(REPO, "tools/baseline/v4/plugin"), runDir),
 } satisfies Record<string, (runDir: string) => Stack>;
 
 /** The plugin server at `pluginDir` (server/main.ts, which finds driver/cua-driver.exe beside it).

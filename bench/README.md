@@ -3,10 +3,10 @@
 End-to-end comparison of computer-use stacks on the real Windows desktop, driven from WSL. Each run is one agent, one CU stack ("arm"), one task. Success comes from each task's own checker, which reads real Windows state (file contents, Calculator's display through UIA, Edge's window title). The agent's claim doesn't count.
 
 ```bash
-node run.ts --arms claude-codexcu,claude-cua-main,claude-bcu --tasks calc_mul,edge_form --reps 2 --batch mybatch
+node run.ts --arms claude-bcu3,claude-cua-038,claude-agent-desktop-headed --tasks calc_mul,edge_form --reps 2 --batch mybatch
 node report.ts mybatch          # out/mybatch/report.md; a path to a batch folder works too
-node trace.ts out/mybatch/claude-bcu/calc_mul-r1           # step-by-step trace of one run
-node trace.ts out/mybatch/claude-bcu/calc_mul-r1 --calls   # each tool call: duration, code, result
+node trace.ts out/mybatch/claude-bcu3/calc_mul-r1          # step-by-step trace of one run
+node trace.ts out/mybatch/claude-bcu3/calc_mul-r1 --calls  # each tool call: duration, code, result
 ```
 
 The scripts run on Node 24+ through type stripping, with no build step. `npm install` and `npm run typecheck` at the repo root check them.
@@ -17,25 +17,19 @@ The scripts run on Node 24+ through type stripping, with no build step. `npm ins
 
 ## Results
 
-The write-up is [research/08-experiments.md](../research/08-experiments.md). Round 4 numbers come from `out/v5` (the round 3 code frozen as `claude-bcu3-v4` against the round 4 code, 54 runs, seed 4471). Round 3 numbers come from `out/v3` (Codex runtime, the round 2 stack and the plugin on fork v3, 81 runs over 9 tasks) and `out/v4` (the plugin on fork v4 after the review fixes, 27 runs). Round 2 numbers come from `out/v2` (Codex runtime, Cua Driver and the v2 front end, 54 runs) and `out/v2.1` through `out/v2.3` (the v2 front end after each fix, 18 runs each). Round 1 numbers come from `out/final` (48 runs), `out/final-findfix` (2 runs after the prototype's `find()` fix), `out/latency-*.json`, and `out/matrix2` for the Cua Driver release arm. `out/final-contaminated` holds six runs that executed while a stray Open With picker held the foreground; they were rerun. Earlier batches were shake-outs or were contaminated, and aren't used.
+The write-up is [research/08-experiments.md](../research/08-experiments.md). The competitor comparison comes from `out/v6-competitors` (this plugin, Cua Driver 0.38.0 and agent-desktop 1.0.2 with and without `--headed`, 72 runs, seed 412487). Earlier rounds used arms that are retired now, along with the `proto/` front ends they ran. Round 4 numbers come from `out/v5` (the round 3 code frozen as `claude-bcu3-v4` against the round 4 code, 54 runs, seed 4471). Round 3 numbers come from `out/v3` (Codex runtime, the round 2 stack and the plugin on fork v3, 81 runs over 9 tasks) and `out/v4` (the plugin on fork v4 after the review fixes, 27 runs). Round 2 numbers come from `out/v2` (Codex runtime, Cua Driver and the v2 front end, 54 runs) and `out/v2.1` through `out/v2.3` (the v2 front end after each fix, 18 runs each). Round 1 numbers come from `out/final` (48 runs), `out/final-findfix` (2 runs after the prototype's `find()` fix), `out/latency-*.json`, and `out/matrix2` for the Cua Driver release arm. `out/final-contaminated` holds six runs that executed while a stray Open With picker held the foreground; they were rerun. Earlier batches were shake-outs or were contaminated, and aren't used.
 
 ## Arms
 
 | Arm | Agent | CU stack |
 | --- | --- | --- |
 | `claude-codexcu` | Claude Code, Opus | Codex's own CU runtime (`cua_repl`, `js` tool) via `codex-cu-bridge.ts` |
-| `claude-cua` | Claude Code, Opus | Cua Driver v0.34.1 release, all 59 tools |
-| `claude-cua-main` | Claude Code, Opus | Cua Driver `main` build (adds `run_steps`, `run_script`), 61 tools |
-| `claude-bcu` | Claude Code, Opus | `proto/v1/bcu-mcp.ts`: one `js` tool over Cua Driver `main` |
-| `claude-bcu-fork` | Claude Code, Opus | Same, over the local Cua Driver fork with modal-safe Invoke (`tools/cua-driver-fork/`) |
 | `claude-bcu3` | Claude Code, Opus | `plugin/server/main.ts` (QuickJS sandbox, per-app policy) over `plugin/driver/cua-driver.exe`, whatever this checkout holds (fork v6 after round 4) |
-| `claude-bcu3-v4` | Claude Code, Opus | The round 3 server and fork v4, frozen in `tools/baseline/v4/plugin` (`git archive` of the round 3 commit plus its `cua-driver.exe`; not in git) |
-| `claude-bcu2` | Claude Code, Opus | `proto/v2/bcu-mcp.ts` (v2: settling reads, `select`, explicit foreground, app scoping) over fork v2 (`tools/cua-driver-fork/v2/`) |
 | `claude-cua-038` | Claude Code, Opus | Cua Driver 0.38.0 release (`tools/cua-driver-0.38.0/`), all 63 tools |
 | `claude-agent-desktop` | Claude Code, Opus | agent-desktop 1.0.2 CLI (`tools/agent-desktop-1.0.2/`) through Bash limited to `agent-desktop`, with its bundled skills in the system prompt |
 | `claude-agent-desktop-headed` | Claude Code, Opus | Same, with physical input (`--headed`) allowed, as `BCU_FOREGROUND=allow` does for the plugin arms |
 
-All arms get the same prompt text and effort level (`medium`). Claude runs use `--tools ""` (no built-in tools), `--strict-mcp-config` and `--setting-sources user`. No config file is changed.
+All arms get the same prompt text and effort level (`medium`). MCP arms run Claude with `--tools ""` (no built-in tools); CLI arms get only Bash, allowed for their one command. Every arm uses `--strict-mcp-config` and `--setting-sources user`. No config file is changed.
 
 ## Tasks
 

@@ -1,6 +1,6 @@
-<img src="assets/icon.png" alt="Superuse icon" width="96" align="right">
+<p align="center"><img src="assets/icon.png" alt="Superuse icon" width="128"></p>
 
-# Superuse
+<h1 align="center">Superuse</h1>
 
 Windows computer use for Claude Code. Claude gets one MCP tool, `js`, and writes short JavaScript programs against a `desktop` API: bind a window, read its accessibility tree, click, type, set values, walk menus, and check the result, several steps per call. Input goes to the target window in the background, so your mouse and focus stay yours.
 

@@ -18,6 +18,8 @@ The installer finds Node 24+ or downloads one for Superuse, installs the server'
 
 Claude Code loads the plugin in place from `plugin/`, so edits apply after `/reload-plugins`. Other MCP clients run `plugin/server/run.sh` as a stdio server with no arguments; the report prints the full path.
 
+Several sessions can work at once. Each one's agent cursor carries a label, the client's name and the lowest free number (`Claude Code 2`), so you can tell them apart. Set `SUPERUSE_AGENT` in a session's environment to pick the label yourself.
+
 Requirements: Windows 11 with WSL2 (x64). Rust only for `--build`.
 
 ## Approvals and privacy

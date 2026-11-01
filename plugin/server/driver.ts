@@ -65,7 +65,6 @@ type ToolResult = {
 };
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
-const SESSION = "superuse"; // one driver session label, so cursor settings apply to every action
 const TIMEOUT_MS = 20_000;
 
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -89,12 +88,18 @@ export class Driver {
   private readonly exe: string;
   private readonly cursor: CursorMode;
   private readonly launchArgs: () => string[];
+  private readonly sessionLabel: () => string;
+  // Every call carries one session label, so cursor settings apply to every action. The driver
+  // draws it in the badge under the agent cursor; it's fixed for the life of the driver process.
+  private session = "superuse";
 
-  /** `launchArgs` is read each time the driver process starts (e.g. the existing-profile grant). */
-  constructor(exe: string, cursor: CursorMode, launchArgs: () => string[] = () => []) {
+  /** `launchArgs` and `sessionLabel` are read each time the driver process starts (e.g. the
+   *  existing-profile grant, and a label that names the MCP client once it has initialized). */
+  constructor(exe: string, cursor: CursorMode, launchArgs: () => string[] = () => [], sessionLabel: () => string = () => "superuse") {
     this.exe = exe;
     this.cursor = cursor;
     this.launchArgs = launchArgs;
+    this.sessionLabel = sessionLabel;
   }
 
   /** Whether the running driver offers a tool. Valid once a call has completed the handshake. */
@@ -102,6 +107,7 @@ export class Driver {
 
   private start() {
     const wslenv = ["DO_NOT_TRACK", process.env.WSLENV].filter(Boolean).join(":");
+    this.session = this.sessionLabel();
     const proc = spawn(this.exe, ["mcp", ...this.launchArgs()], { env: { ...process.env, DO_NOT_TRACK: "1", WSLENV: wslenv } });
     this.proc = proc;
     createInterface({ input: proc.stdout }).on("line", (line) => this.onLine(line));
@@ -133,8 +139,8 @@ export class Driver {
   private async configureCursor() {
     // The agent cursor glides to every click target before acting: about 430 ms per click when
     // animated, 65 ms with an 80 ms fixed glide, 7 ms hidden (measured on Calculator).
-    if (this.cursor === "off") await this.timedCall("set_agent_cursor_enabled", { session: SESSION, enabled: false });
-    else if (this.cursor === "fast") await this.timedCall("set_agent_cursor_motion", { session: SESSION, timing: "fixed", glide_duration_ms: 80, dwell_after_click_ms: 0 });
+    if (this.cursor === "off") await this.timedCall("set_agent_cursor_enabled", { session: this.session, enabled: false });
+    else if (this.cursor === "fast") await this.timedCall("set_agent_cursor_motion", { session: this.session, timing: "fixed", glide_duration_ms: 80, dwell_after_click_ms: 0 });
   }
 
   private send(msg: object) {
@@ -179,12 +185,12 @@ export class Driver {
       throw e;
     }
     const clean: Args = Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== null));
-    if (this.sessionTools.has(name)) clean.session = SESSION;
+    if (this.sessionTools.has(name)) clean.session = this.session;
     let res = await this.timedCall(name, clean);
     // The driver ends a session after 5 idle minutes and then refuses every call on it, before
     // dispatch, so nothing was sent. Start the session again and retry once.
     if (res.isError && res.structuredContent?.refusal?.code === "session_ended") {
-      await this.timedCall("start_session", { session: SESSION });
+      await this.timedCall("start_session", { session: this.session });
       await this.configureCursor();
       res = await this.timedCall(name, clean);
     }

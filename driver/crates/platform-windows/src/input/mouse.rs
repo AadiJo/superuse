@@ -646,6 +646,17 @@ fn send_click_synthesized_mods_impl(
     }
     // SendInput goes to whatever is under the point, not to `target`.
     point_within_target(target, sx, sy)?;
+    // Without activation this is a background caller's click, which still
+    // moves the real cursor: take the foreground lock here. An activating
+    // caller is a foreground tool call, which already holds it.
+    let _foreground = if activate {
+        None
+    } else {
+        Some(crate::input::lock::InputLock::acquire_blocking(
+            crate::input::lock::Lock::Foreground,
+            crate::input::lock::WAIT,
+        )?)
+    };
 
     let (down_flag, up_flag) = match button {
         "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),

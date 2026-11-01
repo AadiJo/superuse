@@ -561,11 +561,86 @@ fn pid_window_guarded<T: Tool + 'static>(
 ) -> Box<dyn Tool> {
     Box::new(ExactPidWindowTargetGuard {
         inner: Box::new(
-            PidOnlyWindowTargetGuard::new(Box::new(tool), candidates.clone())
+            PidOnlyWindowTargetGuard::new(input_locked(tool, token_window), candidates.clone())
                 .with_token_pid_resolver(token_pid_resolver.clone()),
         ),
         token_window: token_window.clone(),
     })
+}
+
+/// Runs each call of an input tool under the cross-agent input locks
+/// (`crate::input::lock`): the target window's lock, then the foreground lock
+/// when the call takes the real cursor or the foreground. It sits inside the
+/// pid guards, so it sees the `window_id` they fill in. Another agent holding
+/// a lock past the wait returns an `input_busy` refusal and sends nothing.
+struct InputLockedTool {
+    inner: Box<dyn Tool>,
+    token_window: TokenWindowResolver,
+}
+
+fn input_locked<T: Tool + 'static>(tool: T, token_window: &TokenWindowResolver) -> Box<dyn Tool> {
+    Box::new(InputLockedTool {
+        inner: Box::new(tool),
+        token_window: token_window.clone(),
+    })
+}
+
+/// Whether a call activates a window or uses the real cursor: foreground
+/// delivery, desktop scope (SendInput at a screen point, or the real pointer
+/// for `move_cursor`), and `bring_to_front`, which activates by definition.
+fn takes_foreground(tool: &str, args: &Value) -> bool {
+    crate::input::delivery::DeliveryMode::from_args(args).is_foreground()
+        || args.get("scope").and_then(Value::as_str) == Some("desktop")
+        || tool == "bring_to_front"
+}
+
+#[async_trait]
+impl Tool for InputLockedTool {
+    fn def(&self) -> &ToolDef {
+        self.inner.def()
+    }
+
+    async fn protected_resource_ownership(
+        &self,
+        adapter_id: &str,
+        args: &Value,
+    ) -> superuse_core::tool::ProtectedResourceOwnership {
+        self.inner
+            .protected_resource_ownership(adapter_id, args)
+            .await
+    }
+
+    async fn protected_resource_scope(
+        &self,
+        adapter_id: &str,
+        args: &Value,
+    ) -> Result<Option<Value>, String> {
+        self.inner.protected_resource_scope(adapter_id, args).await
+    }
+
+    async fn validate_protected_resource_scope(
+        &self,
+        adapter_id: &str,
+        args: &Value,
+        approved_scope: &Value,
+    ) -> Result<(), String> {
+        self.inner
+            .validate_protected_resource_scope(adapter_id, args, approved_scope)
+            .await
+    }
+
+    async fn invoke(&self, args: Value) -> ToolResult {
+        let window = args
+            .get("window_id")
+            .and_then(Value::as_u64)
+            .or_else(|| (self.token_window)(&args).map(|(_, window_id)| window_id));
+        let foreground = takes_foreground(&self.def().name, &args);
+        let _locks = match crate::input::lock::for_action(window, foreground).await {
+            Ok(locks) => locks,
+            Err(busy) => return busy.refusal(),
+        };
+        self.inner.invoke(args).await
+    }
 }
 
 /// The pid an `element_token` was minted for, so a token-only action (no
@@ -711,8 +786,12 @@ fn screenshot_scale(
 
 /// Tool result for a failed `SendInput` click or drag. The hit-test refusal
 /// (`PointNotOnTarget`: the point is over another window) carries the code
-/// `target_not_at_point` in structured content.
+/// `target_not_at_point` in structured content, and another agent holding
+/// the foreground lock gives `input_busy`.
 fn pointer_input_error(error: anyhow::Error) -> ToolResult {
+    if let Some(refusal) = crate::input::lock::InputBusy::refusal_in(&error) {
+        return refusal;
+    }
     let text = error.to_string();
     match error.downcast_ref::<crate::input::mouse::PointNotOnTarget>() {
         Some(refusal) => ToolResult::error(text).with_structured(json!({
@@ -726,6 +805,23 @@ fn pointer_input_error(error: anyhow::Error) -> ToolResult {
         })),
         None => ToolResult::error(text),
     }
+}
+
+/// `background_unavailable` for a background actuator (pen injection) that
+/// failed, or `input_busy` when it never ran because another agent held the
+/// foreground lock.
+fn background_actuator_error(
+    hwnd: u64,
+    kind: crate::input::delivery::EventKind,
+    error: anyhow::Error,
+) -> ToolResult {
+    crate::input::lock::InputBusy::refusal_in(&error).unwrap_or_else(|| {
+        crate::input::delivery::background_unavailable_error_with_cause(
+            hwnd,
+            kind,
+            error.to_string(),
+        )
+    })
 }
 
 fn capture_admission_refusal(error: anyhow::Error) -> ToolResult {
@@ -2119,12 +2215,9 @@ fn should_restore_foreground_after_launch(shape: LaunchTargetShape) -> bool {
 /// `!Send` and would prevent this future from being scheduled on the
 /// multi-threaded tokio runtime.
 async fn restore_foreground_polling_best_effort(prior_foreground_addr: usize, spawned_pid: u32) {
-    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, WaitForInputIdle, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
     };
 
     if prior_foreground_addr == 0 {
@@ -2195,54 +2288,104 @@ async fn restore_foreground_polling_best_effort(prior_foreground_addr: usize, sp
         // Only restore when the current foreground window is owned by
         // the spawned pid — otherwise the user may have legitimately
         // Alt-Tabbed during the polling window and we'd be yanking
-        // focus away from them. Resolves fg_now's owning PID via
-        // GetWindowThreadProcessId and compares against spawned_pid.
-        let activated_then_restored: Option<bool> = {
-            let prior = HWND(prior_foreground_addr as *mut _);
-            let fg_now = unsafe { GetForegroundWindow() };
-            if fg_now == prior {
-                None
-            } else {
-                let mut fg_pid: u32 = 0;
-                let _ = unsafe { GetWindowThreadProcessId(fg_now, Some(&mut fg_pid)) };
-                if fg_pid != spawned_pid {
-                    // Foreground changed but to something we didn't
-                    // spawn (e.g. user Alt-Tabbed). Don't touch it.
-                    None
-                } else if !unsafe { IsWindow(prior) }.as_bool() {
-                    tracing::trace!(
-                        target: "launch_app.focus_restore",
-                        "prior foreground HWND no longer valid — skipping restore (spawned pid {} owns fg)",
-                        spawned_pid
-                    );
-                    Some(true)
-                } else {
-                    let ok = unsafe { SetForegroundWindow(prior) }.as_bool();
-                    if !ok {
-                        tracing::trace!(
-                            target: "launch_app.focus_restore",
-                            "SetForegroundWindow returned FALSE — likely foreground-lock denial; \
-                             prior HWND 0x{:x}, spawned pid {}",
-                            prior_foreground_addr,
-                            spawned_pid
-                        );
-                    } else {
-                        tracing::debug!(
-                            target: "launch_app.focus_restore",
-                            "restored prior foreground HWND 0x{:x} after spawned pid {} activated",
-                            prior_foreground_addr,
-                            spawned_pid
-                        );
-                    }
-                    Some(ok)
+        // focus away from them. And only under the foreground lock, taken
+        // without waiting: while another agent's foreground action holds it,
+        // the pid may hold the foreground for that action, which restores it.
+        let activated_then_restored = if pid_holds_foreground(prior_foreground_addr, spawned_pid) {
+            match crate::input::lock::InputLock::acquire(
+                crate::input::lock::Lock::Foreground,
+                std::time::Duration::ZERO,
+            )
+            .await
+            {
+                Ok(_foreground) => {
+                    restore_if_pid_holds_foreground(prior_foreground_addr, spawned_pid)
                 }
+                Err(_) => None,
             }
+        } else {
+            None
         };
         if activated_then_restored.is_some() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+}
+
+/// Whether `pid` holds the foreground where `prior` (an HWND as `usize`) had it.
+fn pid_holds_foreground(prior: usize, pid: u32) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let fg_now = unsafe { GetForegroundWindow() };
+    let mut fg_pid: u32 = 0;
+    let _ = unsafe { GetWindowThreadProcessId(fg_now, Some(&mut fg_pid)) };
+    fg_now.0 as usize != prior && fg_pid == pid
+}
+
+/// One restore step: when `spawned_pid` holds the foreground instead of the
+/// prior window, hand it back. `None` when it doesn't, `Some(ok)` once acted.
+fn restore_if_pid_holds_foreground(prior_foreground_addr: usize, spawned_pid: u32) -> Option<bool> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
+    };
+    let prior = HWND(prior_foreground_addr as *mut _);
+    let fg_now = unsafe { GetForegroundWindow() };
+    if fg_now == prior {
+        None
+    } else {
+        let mut fg_pid: u32 = 0;
+        let _ = unsafe { GetWindowThreadProcessId(fg_now, Some(&mut fg_pid)) };
+        if fg_pid != spawned_pid {
+            // Foreground changed but to something we didn't
+            // spawn (e.g. user Alt-Tabbed). Don't touch it.
+            None
+        } else if !unsafe { IsWindow(prior) }.as_bool() {
+            tracing::trace!(
+                target: "launch_app.focus_restore",
+                "prior foreground HWND no longer valid — skipping restore (spawned pid {} owns fg)",
+                spawned_pid
+            );
+            Some(true)
+        } else {
+            let ok = unsafe { SetForegroundWindow(prior) }.as_bool();
+            if !ok {
+                tracing::trace!(
+                    target: "launch_app.focus_restore",
+                    "SetForegroundWindow returned FALSE — likely foreground-lock denial; \
+                     prior HWND 0x{:x}, spawned pid {}",
+                    prior_foreground_addr,
+                    spawned_pid
+                );
+            } else {
+                tracing::debug!(
+                    target: "launch_app.focus_restore",
+                    "restored prior foreground HWND 0x{:x} after spawned pid {} activated",
+                    prior_foreground_addr,
+                    spawned_pid
+                );
+            }
+            Some(ok)
+        }
+    }
+}
+
+/// Hands the foreground back after a foreground input action on `pid`'s
+/// window. The caller still holds the foreground lock, so the next agent's
+/// action starts from the user's foreground, not this target. A late
+/// self-activation by the target is left to the polling restore, which
+/// runs after the lock is released.
+async fn restore_foreground_after_input(prior_foreground_addr: usize, pid: u32) {
+    if prior_foreground_addr != 0 && pid != 0 {
+        let _ = tokio::task::spawn_blocking(move || {
+            restore_if_pid_holds_foreground(prior_foreground_addr, pid)
+        })
+        .await;
+    }
+    tokio::spawn(restore_foreground_polling_best_effort(
+        prior_foreground_addr,
+        pid,
+    ));
 }
 
 /// Bound on one standard-user shell launch helper. It stays inside the 15 s
@@ -3862,7 +4005,14 @@ impl Tool for ClickTool {
                     }
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                // Only a foreground call holds the foreground lock the immediate
+                // restore needs; a background click leaves it to the poller,
+                // which takes the lock itself.
+                if activate {
+                    restore_foreground_after_input(prev_fg_addr, pid).await;
+                } else {
+                    tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                }
                 let half = if want_expand { "dropdown" } else { "press" };
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
@@ -4026,7 +4176,7 @@ impl Tool for ClickTool {
                     }
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                restore_foreground_after_input(prev_fg_addr, pid).await;
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Performed SendInput click on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -4398,11 +4548,7 @@ impl Tool for ClickTool {
                     background_element_click_result(message, transport, failed_calls)
                 }
                 Ok(Err(error)) if inject => {
-                    crate::input::delivery::background_unavailable_error_with_cause(
-                        hwnd,
-                        EventKind::MouseClick,
-                        error.to_string(),
-                    )
+                    background_actuator_error(hwnd, EventKind::MouseClick, error)
                 }
                 Ok(Err(error)) => ToolResult::error(error.to_string()),
                 Err(error) => ToolResult::error(format!("Task error: {error}")),
@@ -4496,7 +4642,7 @@ impl Tool for ClickTool {
                     }
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                restore_foreground_after_input(prev_fg_addr, pid).await;
                 return match send_result {
                     Ok(Ok(())) => {
                         let click_word = match count {
@@ -4577,11 +4723,7 @@ impl Tool for ClickTool {
                         "✅ Injected click to pid {pid} at ({sx},{sy}) (background, no foreground swap)."
                     ))
                     .with_structured(json!({ "path": "pixel", "verified": false, "effect": "unverifiable" })),
-                    Ok(Err(error)) => crate::input::delivery::background_unavailable_error_with_cause(
-                        hwnd,
-                        EventKind::MouseClick,
-                        error.to_string(),
-                    ),
+                    Ok(Err(error)) => background_actuator_error(hwnd, EventKind::MouseClick, error),
                     Err(error) => ToolResult::error(format!("Task error: {error}")),
                 };
             }
@@ -4635,11 +4777,7 @@ impl Tool for ClickTool {
                         "✅ Injected click to pid {pid} at ({sx},{sy}) (background, no foreground swap)."
                     ))
                     .with_structured(json!({ "path": "pixel", "verified": false, "effect": "unverifiable" })),
-                    Ok(Err(error)) => crate::input::delivery::background_unavailable_error_with_cause(
-                        hwnd,
-                        EventKind::MouseClick,
-                        error.to_string(),
-                    ),
+                    Ok(Err(error)) => background_actuator_error(hwnd, EventKind::MouseClick, error),
                     Err(error) => ToolResult::error(format!("Task error: {error}")),
                 };
             }
@@ -7103,6 +7241,8 @@ async fn chromium_click_short_circuit(
         crate::input::send_click_synthesized(hwnd, sx, sy, count, &button_owned)
     })
     .await;
+    // Background calls reach this, without the foreground lock: the poller
+    // takes the lock for its restore.
     tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
     Some(match send_result {
         Ok(Ok(())) => ToolResult::text(format!(
@@ -7430,11 +7570,7 @@ impl Tool for DoubleClickTool {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Injected double-click to [{idx}] at screen ({cx},{cy}) (background, no foreground swap)."
                     )),
-                    Ok(Err(e)) => crate::input::delivery::background_unavailable_error_with_cause(
-                        hwnd,
-                        EventKind::MouseClick,
-                        e.to_string(),
-                    ),
+                    Ok(Err(e)) => background_actuator_error(hwnd, EventKind::MouseClick, e),
                     Err(e) => ToolResult::error(format!("Task error: {e}")),
                 };
             }
@@ -7458,7 +7594,7 @@ impl Tool for DoubleClickTool {
                     }
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                restore_foreground_after_input(prev_fg_addr, pid).await;
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent double-click via SendInput on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -7551,11 +7687,7 @@ impl Tool for DoubleClickTool {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Injected double-click to pid {pid} at screen ({sx_i},{sy_i}) (background, no foreground swap)."
                     )),
-                    Ok(Err(e)) => crate::input::delivery::background_unavailable_error_with_cause(
-                        hwnd,
-                        EventKind::MouseClick,
-                        e.to_string(),
-                    ),
+                    Ok(Err(e)) => background_actuator_error(hwnd, EventKind::MouseClick, e),
                     Err(e) => ToolResult::error(format!("Task error: {e}")),
                 };
             }
@@ -7579,7 +7711,7 @@ impl Tool for DoubleClickTool {
                     }
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                restore_foreground_after_input(prev_fg_addr, pid).await;
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent double-click via SendInput to pid {pid} at screen ({sx_i},{sy_i}) (delivery_mode:foreground)."
@@ -7792,11 +7924,7 @@ impl Tool for RightClickTool {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Injected right-click to [{idx}] at screen ({cx},{cy}) (background, no foreground swap)."
                     )),
-                    Ok(Err(e)) => crate::input::delivery::background_unavailable_error_with_cause(
-                        hwnd,
-                        EventKind::MouseClick,
-                        e.to_string(),
-                    ),
+                    Ok(Err(e)) => background_actuator_error(hwnd, EventKind::MouseClick, e),
                     Err(e) => ToolResult::error(format!("Task error: {e}")),
                 };
             }
@@ -7819,7 +7947,7 @@ impl Tool for RightClickTool {
                     }
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                restore_foreground_after_input(prev_fg_addr, pid).await;
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent right-click via SendInput on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -7910,11 +8038,7 @@ impl Tool for RightClickTool {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Injected right-click to pid {pid} at screen ({sx_i},{sy_i}) (background, no foreground swap)."
                     )),
-                    Ok(Err(e)) => crate::input::delivery::background_unavailable_error_with_cause(
-                        hwnd,
-                        EventKind::MouseClick,
-                        e.to_string(),
-                    ),
+                    Ok(Err(e)) => background_actuator_error(hwnd, EventKind::MouseClick, e),
                     Err(e) => ToolResult::error(format!("Task error: {e}")),
                 };
             }
@@ -7937,7 +8061,7 @@ impl Tool for RightClickTool {
                     }
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                restore_foreground_after_input(prev_fg_addr, pid).await;
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent right-click via SendInput to pid {pid} at screen ({sx_i},{sy_i}) (delivery_mode:foreground)."
@@ -8210,11 +8334,7 @@ impl Tool for DragTool {
                          from screen ({sx_from},{sy_from}) → ({sx_to},{sy_to}) \
                          (delivery_mode:background, PostMessage would have been dropped)."
                 )),
-                Ok(Err(e)) => crate::input::delivery::background_unavailable_error_with_cause(
-                    hwnd,
-                    EventKind::MouseMove,
-                    e.to_string(),
-                ),
+                Ok(Err(e)) => background_actuator_error(hwnd, EventKind::MouseMove, e),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
         }
@@ -8250,7 +8370,7 @@ impl Tool for DragTool {
                 steps,
             );
             let (send_result, ()) = tokio::join!(send_result, visual_drag);
-            tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+            restore_foreground_after_input(prev_fg_addr, pid).await;
             let button_suffix = if button == "left" {
                 String::new()
             } else {
@@ -10848,7 +10968,7 @@ pub fn build_registry_with_provider(
     );
     r.register(pid_window_guarded(BringToFrontTool, &pid_window_candidates));
     r.register(Box::new(SetWindowFrameTool));
-    r.register(Box::new(InvokeMenuTool));
+    r.register(input_locked(InvokeMenuTool, &pid_window_candidates.2));
     r.register(Box::new(DebugWindowInfoTool));
     r.register(pid_window_guarded(
         ClickTool {
@@ -10931,9 +11051,12 @@ pub fn build_registry_with_provider(
         state: state.clone(),
     }));
     r.register(Box::new(GetCursorPositionTool));
-    r.register(Box::new(MoveCursorTool {
-        state: state.clone(),
-    }));
+    r.register(input_locked(
+        MoveCursorTool {
+            state: state.clone(),
+        },
+        &pid_window_candidates.2,
+    ));
     r.register(Box::new(SetAgentCursorEnabledV2Tool {
         state: state.clone(),
     }));

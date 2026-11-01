@@ -2,13 +2,14 @@
 // WinForms' legacy MainMenu is a genuine HMENU and its items run on WM_COMMAND,
 // unlike TestPad's MenuStrip, which UIA sees as a drawn ToolStrip.
 //
-//   MenuPad.exe [--bypos] [--topmost] [--at X Y] [--title TEXT]
+//   MenuPad.exe [--bypos] [--topmost] [--at X Y] [--title TEXT] [--log-clicks]
 //
 // --bypos gives the menu bar the MNS_NOTIFYBYPOS style. Windows then reports a
 // pick as WM_MENUCOMMAND (item position, menu handle) instead of WM_COMMAND, and
 // MenuPad acts on WM_MENUCOMMAND only, like a native app with that style.
 // --topmost, --at and --title place a second MenuPad over the first for the
-// foreground hit-test checks.
+// foreground hit-test checks. --log-clicks appends "click " to the text on
+// every mouse press in the text box, so a check can see where a click landed.
 using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -47,6 +48,7 @@ public class MenuPad : Form {
             if (args[i] == "--bypos") byPosition = true;
             else if (args[i] == "--topmost") topMost = true;
             else if (args[i] == "--title" && i + 1 < args.Length) Text = args[++i];
+            else if (args[i] == "--log-clicks") text.MouseDown += (s, e) => text.AppendText("click ");
             else if (args[i] == "--at" && i + 2 < args.Length) {
                 StartPosition = FormStartPosition.Manual;
                 Location = new Point(int.Parse(args[i + 1]), int.Parse(args[i + 2]));

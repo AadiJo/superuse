@@ -12,6 +12,7 @@
 pub mod delivery;
 pub mod inject;
 pub mod keyboard;
+pub mod lock;
 pub mod mouse;
 
 pub(crate) use inject::{force_foreground_assisted, force_foreground_attached};

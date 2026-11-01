@@ -330,6 +330,12 @@ pub fn inject_click_screen(
         "right" => true,
         other => bail!("background injection supports left/right buttons only (got {other:?})"),
     };
+    // Pen input routes by screen point and the foreground is re-asserted
+    // below, so another agent's foreground action must not run meanwhile.
+    let _foreground = crate::input::lock::InputLock::acquire_blocking(
+        crate::input::lock::Lock::Foreground,
+        crate::input::lock::WAIT,
+    )?;
 
     // macOS-aligned contract: a `background` actuation NEVER fronts or raises
     // (mirrors macOS CGEvent-to-pid, which never touches z-order/focus). Synthetic
@@ -720,6 +726,12 @@ pub fn inject_drag_screen(
         "right" => true,
         other => bail!("background injection supports left/right buttons only (got {other:?})"),
     };
+    // Routed by screen point, with the foreground re-asserted: see
+    // `inject_click_screen`.
+    let _foreground = crate::input::lock::InputLock::acquire_blocking(
+        crate::input::lock::Lock::Foreground,
+        crate::input::lock::WAIT,
+    )?;
     // macOS-aligned contract: a `background` drag NEVER fronts/raises. WPF's
     // Wisp stylus stack only PROCESSES injected input while the window is the
     // ACTIVE foreground (verified by RE) — and background is not allowed to

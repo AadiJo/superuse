@@ -1,0 +1,32 @@
+# Builds superuse-driver.exe the way releases are built (scripts/build-driver.sh: zig cross-build
+# from Linux) whenever the driver's sources change, and keeps the exe as a run artifact.
+# Releases are still published with `node scripts/release-driver.ts --publish`.
+name: driver
+
+on:
+  push:
+    branches: [main]
+    paths: [driver/**, scripts/build-driver.sh, .github/workflows/driver.yml]
+  pull_request:
+    paths: [driver/**, scripts/build-driver.sh, .github/workflows/driver.yml]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: tools/zig-0.15.2
+          key: zig-0.15.2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: driver -> ../tools/target
+      - run: scripts/build-driver.sh --no-install
+      - uses: actions/upload-artifact@v4
+        with:
+          name: superuse-driver
+          path: |
+            tools/out/superuse-driver.exe
+            tools/out/rustc.txt

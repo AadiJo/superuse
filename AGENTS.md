@@ -15,7 +15,7 @@ Use this when the user asks you to install, configure, update or repair Superuse
    - whether `w.page()` may use their running, logged-in browser.
 
    Rerun install with exactly the approved answers: `--allow-apps=TestPad,Calculator`, `--foreground=allow|ask|deny`, `--browsers=attach|off`. Wildcards (`--allow-apps=*`) and attach come only from the user's own words. Done when every choice is either answered or left at its default by the user.
-5. **Prove it.** With `restart_required`, tell the user to start a new session of that client (or run `/reload-plugins` in Claude Code). In a session that has Superuse loaded, call the `js` tool with `return (await cua.windows()).length`. If the user turned the browser on, also run `scripts/doctor.sh --verify` with the browser open. Done when the client the user named returns a number from that call, and `browser` reads `BROWSER_VERIFIED` or `BROWSER_DISABLED`.
+5. **Prove it.** With `restart_required`, tell the user to start a new session of that client (or run `/reload-plugins` in Claude Code). In a session that has Superuse loaded, call the `js` tool with `return (await desktop.windows()).length`. If the user turned the browser on, also run `scripts/doctor.sh --verify` with the browser open. Done when the client the user named returns a number from that call, and `browser` reads `BROWSER_VERIFIED` or `BROWSER_DISABLED`.
 
 Finish by telling the user the outcome, what you verified, and anything still waiting on them. `scripts/doctor.sh` rechecks everything later without changing anything.
 

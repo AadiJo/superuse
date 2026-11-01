@@ -1,5 +1,5 @@
 // The `js` tool's runtime: model code runs in a QuickJS context (WebAssembly), with no access to
-// Node, the filesystem, the network or processes. Its only capability is the `cua` API built by
+// Node, the filesystem, the network or processes. Its only capability is the `desktop` API built by
 // prelude.js, which calls back into the host through one function. The context persists across
 // js calls (top-level let/const become globals, like a REPL) until reset().
 

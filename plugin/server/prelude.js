@@ -1,4 +1,4 @@
-// Runs inside the QuickJS sandbox before any model code. Model code sees `cua`, `log`, `console`
+// Runs inside the QuickJS sandbox before any model code. Model code sees `desktop`, `log`, `console`
 // and `setTimeout`. Its only way out of the sandbox is `host(method, argsJson)`, captured below and
 // removed from the global object; the host validates every call (desktop.ts).
 //
@@ -48,7 +48,7 @@
     };
   }
 
-  /** Resolve promises the model returned without awaiting, e.g. `return [cua.windows(), w.state()]`. */
+  /** Resolve promises the model returned without awaiting, e.g. `return [desktop.windows(), w.state()]`. */
   async function settle(v) {
     if (isThenable(v)) v = await v;
     if (Array.isArray(v)) return Promise.all(v);
@@ -82,7 +82,7 @@
     return Object.freeze({ ...methods, then: (ok, err) => binding.then(bound).then(ok, err) });
   }
 
-  /** `cua.window(...)` and `cua.open(...)` work with or without `await`: methods queue behind the
+  /** `desktop.window(...)` and `desktop.open(...)` work with or without `await`: methods queue behind the
    *  binding, and awaiting yields the same methods plus {pid, id, app, title}. */
   function bindWindow(method, args) {
     const handle = ++nextHandle;
@@ -92,11 +92,11 @@
     return Object.freeze({ ...methods, then: (ok, err) => binding.then(bound).then(ok, err) });
   }
 
-  const cua = Object.freeze({
-    windows: (filter) => call("cua.windows", [filter]),
-    window: (query) => bindWindow("cua.window", [query]),
-    open: (name, opts) => bindWindow("cua.open", [name, opts]),
-    sleep: (ms) => call("cua.sleep", [ms]),
+  const desktop = Object.freeze({
+    windows: (filter) => call("desktop.windows", [filter]),
+    window: (query) => bindWindow("desktop.window", [query]),
+    open: (name, opts) => bindWindow("desktop.open", [name, opts]),
+    sleep: (ms) => call("desktop.sleep", [ms]),
   });
 
   function log(...args) {
@@ -107,11 +107,11 @@
   }
 
   const fixed = (name, value) => Object.defineProperty(globalThis, name, { value, writable: false, configurable: false });
-  fixed("cua", cua);
+  fixed("desktop", desktop);
   fixed("log", log);
   fixed("console", Object.freeze({ log, info: log, warn: log, error: log }));
   // Delays are capped host-side: reads already wait for the UI to settle.
-  fixed("setTimeout", (fn, ms) => { call("cua.sleep", [ms]).then(() => fn()); });
+  fixed("setTimeout", (fn, ms) => { call("desktop.sleep", [ms]).then(() => fn()); });
 
   /** Called by the host once per js call with the model's code wrapped in an async function. */
   fixed("__superuse_run", async (fn) => {

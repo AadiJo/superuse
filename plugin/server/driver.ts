@@ -203,7 +203,7 @@ export class Driver {
     let ok = false;
     try {
       const res = (await withTimeout(this.request("tools/call", { name, arguments: args }), name,
-        "the app is probably blocked by a modal dialog. Check cua.windows() for a new window.")) as ToolResult;
+        "the app is probably blocked by a modal dialog. Check desktop.windows() for a new window.")) as ToolResult;
       ok = !res.isError;
       return res;
     } finally {

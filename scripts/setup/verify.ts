@@ -38,8 +38,8 @@ export async function checkServer(driver?: string): Promise<Check> {
     if (c.serverInfo.version !== VERSION) return { id, status: "fail", code: "SERVER_VERSION", summary: `the launcher ran server ${c.serverInfo.version}, expected ${VERSION}` };
     const tools = (await c.request("tools/list", {}, 30_000)) as { tools?: Array<{ name: string }> };
     if (!tools.tools?.some((t) => t.name === "js")) return { id, status: "fail", code: "SERVER_NO_TOOL", summary: "the server doesn't list the js tool" };
-    const r = await js(c, "return (await cua.windows()).length", 30_000);
-    if (r.error || !/^\d+$/.test(r.text)) return { id, status: "fail", code: "SERVER_CALL_FAILED", summary: "cua.windows() failed through the server", evidence: [r.text] };
+    const r = await js(c, "return (await desktop.windows()).length", 30_000);
+    if (r.error || !/^\d+$/.test(r.text)) return { id, status: "fail", code: "SERVER_CALL_FAILED", summary: "desktop.windows() failed through the server", evidence: [r.text] };
     return { id, status: "ok", code: "SERVER_VERIFIED", summary: `launcher, MCP handshake, QuickJS and driver work (${r.text} windows listed)`, evidence: [`server ${VERSION} via ${LAUNCHER} with PATH=/usr/bin:/bin`] };
   } catch (e) {
     return { id, status: "fail", code: "SERVER_START_FAILED", summary: "the server didn't start through its launcher", evidence: [message(e)], next: "Run scripts/install.sh; it records the Node the launcher needs." };
@@ -77,14 +77,14 @@ export async function verifyApp(): Promise<Check> {
     return await withTestPad(async ({ pid, file }): Promise<Check> => {
       await using c = await McpClient.start([LAUNCHER], { env: serverEnv({ SUPERUSE_APPS: "TestPad" }), elicit: "unsupported" });
       const r = await js(c, `let w;
-for (let i = 0; i < 40 && !w; i++) { try { w = await cua.window({ pid: ${pid} }) } catch { await cua.sleep(250) } }
+for (let i = 0; i < 40 && !w; i++) { try { w = await desktop.window({ pid: ${pid} }) } catch { await desktop.sleep(250) } }
 if (!w) throw new Error("TestPad never showed a window");
 await w.setValue(await w.find("Text editor"), ${JSON.stringify(expected)});
 await w.key("ctrl+s");
 for (let i = 0; i < 20; i++) {
   const title = (await w.state({ query: "Text editor" })).split("\\n")[0];
   if (!title.includes("*")) return title;
-  await cua.sleep(250);
+  await desktop.sleep(250);
 }
 throw new Error("TestPad still shows unsaved changes");`);
       const saved = fs.readFileSync(file, "utf8");
@@ -113,12 +113,12 @@ export async function verifyBrowser(): Promise<Check> {
     // One window per browser, in hint order; the first that attaches runs the exercise.
     const order = browsersByHint();
     const r = await js(c, `const order = ${JSON.stringify(order)};
-const rows = (await cua.windows()).filter((r) => r.id !== undefined);
+const rows = (await desktop.windows()).filter((r) => r.id !== undefined);
 const tried = [];
 for (const app of order) {
   const row = rows.find((r) => r.app.toLowerCase() === app.toLowerCase());
   if (!row) continue;
-  const w = await cua.window({ pid: row.pid, id: row.id });
+  const w = await desktop.window({ pid: row.pid, id: row.id });
   let p;
   try { p = await (await w.page()).newTab(${JSON.stringify(url)}); } catch (e) { tried.push(app + ": " + e.message); continue; }
   try {

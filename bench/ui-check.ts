@@ -69,7 +69,7 @@ const CASES: Record<string, () => Promise<void>> = {
   async shifted_tree() {
     const hwnd = await edgePage("Shift form", SHIFTING_FORM);
     await using c = await server();
-    const r = await js(c, `const w = await cua.window({id: ${hwnd}});
+    const r = await js(c, `const w = await desktop.window({id: ${hwnd}});
 const email = await w.find("Email", "Edit");
 await w.click(await w.find("Add note", "Button"));
 await w.state();
@@ -82,7 +82,7 @@ return email;`);
   async removed_element() {
     const hwnd = await edgePage("Shift form", SHIFTING_FORM);
     await using c = await server();
-    const r = await js(c, `const w = await cua.window({id: ${hwnd}});
+    const r = await js(c, `const w = await desktop.window({id: ${hwnd}});
 const email = await w.find("Email", "Edit");
 await w.click(await w.find("Remove email", "Button"));
 await w.state();
@@ -94,8 +94,8 @@ await w.setValue(email, "x@example.com");`);
   async rebound_window() {
     const hwnd = await edgePage("Shift form", SHIFTING_FORM);
     await using c = await server();
-    await js(c, `globalThis.name = await (await cua.window({id: ${hwnd}})).find("Name", "Edit")`);
-    const r = await js(c, `await (await cua.window({id: ${hwnd}})).setValue(name, "Ada")`);
+    await js(c, `globalThis.name = await (await desktop.window({id: ${hwnd}})).find("Name", "Edit")`);
+    const r = await js(c, `await (await desktop.window({id: ${hwnd}})).setValue(name, "Ada")`);
     const title = await formTitle();
     check("numbers survive rebinding the window", !r.error && title.includes("name=Ada|"), `${r.text} | ${title}`);
   },
@@ -105,7 +105,7 @@ await w.setValue(email, "x@example.com");`);
     await killTestPad();
     await editAppendSetup();
     await using c = await server();
-    const r = await js(c, `const w = await cua.window("TestPad");
+    const r = await js(c, `const w = await desktop.window("TestPad");
 const ed = await w.find("Text editor", "Edit");
 await w.setValue(ed, "replaced");
 return await w.state({query: "Text editor"});`);
@@ -116,7 +116,7 @@ return await w.state({query: "Text editor"});`);
   async diff_read() {
     const hwnd = await edgePage("Shift form", SHIFTING_FORM);
     await using c = await server();
-    const r = await js(c, `const w = await cua.window({id: ${hwnd}});
+    const r = await js(c, `const w = await desktop.window({id: ${hwnd}});
 const before = await w.state();
 await w.click(await w.find("Add note", "Button"));
 return [before, await w.state({diff: true})];`);
@@ -130,7 +130,7 @@ return [before, await w.state({diff: true})];`);
     const buttons = Array.from({ length: 400 }, (_, i) => `<button type="button">Filler ${i}</button>`).join("");
     const hwnd = await edgePage("Deep form", `<!doctype html><title>Deep form</title><form>${buttons}<label>Needle <input id="needle"></label></form>`);
     await using c = await server();
-    const r = await js(c, `const w = await cua.window({id: ${hwnd}});
+    const r = await js(c, `const w = await desktop.window({id: ${hwnd}});
 const n = await w.find("Needle", "Edit");
 const t0 = Date.now();
 await w.setValue(n, "found");
@@ -145,7 +145,7 @@ return {n, rows, ms: Date.now() - t0};`);
     const fields = Array.from({ length: 40 }, (_, i) => `<label>Field ${i} <input></label>`).join("");
     const hwnd = await edgePage("Cold page", `<!doctype html><title>Cold page</title><form>${fields}</form>`, false);
     await using c = await server();
-    const r = await js(c, `return await (await cua.window({id: ${hwnd}})).state({max: 1000})`);
+    const r = await js(c, `return await (await desktop.window({id: ${hwnd}})).state({max: 1000})`);
     check("a window's first read shows a page Chromium hadn't built yet", !r.error && r.text.includes('Edit "Field 39"'), r.text);
   },
 };

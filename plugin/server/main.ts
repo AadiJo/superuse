@@ -2,7 +2,7 @@
 //
 //   plugin/server/run.sh                (picks Node 24+, then runs this file; TypeScript runs through type stripping)
 //
-// Tools: `js` runs model-written JavaScript against the `cua` API (sandbox.ts, desktop.ts);
+// Tools: `js` runs model-written JavaScript against the `desktop` API (sandbox.ts, desktop.ts);
 // `js_reset` clears its variables. Approvals for apps and foreground input are asked through MCP
 // elicitation when the client supports it (policy.ts). research/08-experiments.md explains the
 // design; the plugin README covers setup.
@@ -26,11 +26,11 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const DRIVER = process.env.SUPERUSE_DRIVER ?? path.join(here, "..", "driver", "superuse-driver.exe");
 const CURSOR = (process.env.SUPERUSE_CURSOR ?? "fast") as CursorMode;
 
-const API = `Control Windows apps with JavaScript. The code runs in an async function with a persistent \`cua\` object; top-level let/const persist between calls. Return a value or call log(...) to see output.
+const API = `Control Windows apps with JavaScript. The code runs in an async function with a persistent \`desktop\` object; top-level let/const persist between calls. Return a value or call log(...) to see output.
 
-cua.windows(filter?)            -> approved windows as {id, pid, app, title, minimized?}; other apps as {app, approved: false}
-cua.window("TestPad" | {pid,id,title,app}) -> Window  (binding an app that isn't approved asks the user)
-cua.open("Calculator" | "C:\\\\path\\\\app.exe") -> Window  (launch in the background)
+desktop.windows(filter?)            -> approved windows as {id, pid, app, title, minimized?}; other apps as {app, approved: false}
+desktop.window("TestPad" | {pid,id,title,app}) -> Window  (binding an app that isn't approved asks the user)
+desktop.open("Calculator" | "C:\\\\path\\\\app.exe") -> Window  (launch in the background)
 
 w.state({query?, diff?, max?, screenshot?}) -> string  accessibility tree; rows tagged [N] are actionable; query "a|b" matches either; diff lists rows added (+), changed (~) and removed (-) since the last state()
 w.find("Save", role?)                        -> N | null  best match by element name (exact first); role like "Button"
@@ -56,11 +56,11 @@ Input goes to the target window in the background: the user's mouse and focus ar
 If an action is refused in the background, click/type/key/drag/menu accept {foreground: true}, which briefly takes focus and the real cursor; the user may be asked first. Use it only when setValue/select can't do the job.
 Don't sleep: state(), find() and waitFor() already wait for the UI to settle after actions.
 An element keeps its number across reads of its window, in later calls too. A number whose element has left the window is refused; read state() again and use the numbers it shows.
-If an action opens a dialog, the result notes the new window; bind it with cua.window({pid: w.pid, title: "..."}).
+If an action opens a dialog, the result notes the new window; bind it with desktop.window({pid: w.pid, title: "..."}).
 Terminals, password managers and security prompts are off limits. Never type secrets you see on screen into other apps.
 
 Work in few calls: batch several actions and the verifying read into one call. Example:
-  const w = await cua.window("TestPad");
+  const w = await desktop.window("TestPad");
   const ed = await w.find("Text editor");
   await w.setValue(ed, "alpha\\r\\nbeta"); await w.key("ctrl+s");
   return (await w.state({query: "Text editor"})).split("\\n")[0];  // header shows the title; a leading * means unsaved`;

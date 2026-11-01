@@ -9,7 +9,7 @@ The `js` tool's description is the API reference. This file is how to use it wel
 
 ## Loop
 
-1. **Bind** the window: `cua.window("App")`, or `cua.open("App")` to launch it. Binding an app that isn't approved asks the user; if they refuse, report that and stop.
+1. **Bind** the window: `desktop.window("App")`, or `desktop.open("App")` to launch it. Binding an app that isn't approved asks the user; if they refuse, report that and stop.
 2. **Read narrow.** `w.find("Save", "Button")` or `w.state({query: "Save|Cancel"})` returns a few rows; a full `w.state()` is for the first look at an unfamiliar window.
 3. **Batch** the actions you already know plus the read that proves them into one `js` call. Each round trip costs seconds of model time; the actions cost milliseconds.
 4. **Check the postcondition** in the app's own state before moving on: the title lost its `*`, the file appears in the list, the display reads the expected value. A call that returned without an error proves nothing by itself.
@@ -19,7 +19,7 @@ The task is done when the postcondition is observed, not when the last action re
 ## Recipes
 
 - **Text boxes and combo boxes.** `setValue` and `select` write the value directly and work in the background in every app type. Prefer them to `type`.
-- **Menus and modal dialogs** (Save As, Replace, Options). `w.menu("File > Save As...")`. The result notes the new window; bind it with `cua.window({pid: w.pid, title: "Save As"})`, set its fields, click its button, then check the parent window's state.
+- **Menus and modal dialogs** (Save As, Replace, Options). `w.menu("File > Save As...")`. The result notes the new window; bind it with `desktop.window({pid: w.pid, title: "Save As"})`, set its fields, click its button, then check the parent window's state.
 - **Web pages** (Chrome, Edge, Helium). Use the page API, not the window's tree: `const p = await w.page()` for the tab the user means, or `await w.page().newTab(url)` for your own work. Read with `p.read({query})`, act with refs from that read, and check the result with another read. Typing, keys and clicks go through DevTools in the background. `p.screenshot()` only works on the tab the user has selected: background tabs aren't painted, so read them instead. `p.select` fires script events; if a site ignores the change, set the same list with `w.select` on the window's tree. If `w.page()` is refused (the browser's DevTools are off), fall back to the window: `setValue`, `select` and `click` work on page fields, but typing and keys don't.
 - **UWP apps** (Calculator, Settings). Element clicks work; `w.type("1234*5678=")` into the window works for Calculator.
 - **File Explorer.** Shortcuts work in the background while focus is in the file list: `ctrl+shift+n` then `type("archive")` and `key("enter")` makes a folder; `click(N)` on a file selects it (`{double: true}` opens it); `ctrl+x`, open the target folder, `ctrl+v` moves it. If a key is refused because focus is in the address or search box, click a file first or use the command bar buttons. Check the result in the folder's item list.

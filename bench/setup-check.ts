@@ -159,7 +159,7 @@ const cloneA = clone("clone A");
       // Overrides from this shell would hide a broken recorded Node or installed driver.
       const clean = { SUPERUSE_NODE: undefined, SUPERUSE_DRIVER: undefined, SUPERUSE_APPS: undefined, SUPERUSE_POLICY: undefined };
       await using c = await McpClient.start([cmd], { env: { ...clean, HOME: homeA, PATH: "/usr/bin:/bin", SUPERUSE_AUDIT: "off" }, elicit: "unsupported" });
-      const { result } = await c.call("js", { code: "return (await cua.windows()).length" }, 30_000);
+      const { result } = await c.call("js", { code: "return (await desktop.windows()).length" }, 30_000);
       check(`clients: ${client}'s registered command answers with PATH=/usr/bin:/bin`, /^\d+$/.test(textOf(result)), textOf(result));
     } catch (e) {
       check(`clients: ${client}'s registered command answers with PATH=/usr/bin:/bin`, false, String(e));

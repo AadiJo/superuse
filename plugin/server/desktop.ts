@@ -1,4 +1,4 @@
-// Host side of the `cua` API. Model code runs in the QuickJS sandbox (sandbox.ts); every API call
+// Host side of the `desktop` API. Model code runs in the QuickJS sandbox (sandbox.ts); every API call
 // there reaches Desktop.dispatch as a method name plus JSON arguments. Nothing in here is reachable
 // from model code except through dispatch, which validates every argument.
 //
@@ -92,7 +92,7 @@ function windowQuery(x: unknown): WindowQuery {
 
 /** Driver refusals the model can recover from, and what to do next. Nothing was sent in any of them. */
 const HINTS: Array<[RegExp, string]> = [
-  [/window_target_mismatch|window_target_not_found/, "This window closed or changed. Bind it again with cua.window(...) and read state() before acting."],
+  [/window_target_mismatch|window_target_not_found/, "This window closed or changed. Bind it again with desktop.window(...) and read state() before acting."],
   [/target_not_at_point/, "Another window covers that point, so nothing was sent. Act by element number instead, or ask the user to uncover the window."],
   [/background_unavailable[\s\S]*Chrome_WidgetWin|Chrome_WidgetWin[\s\S]*background_unavailable|Background delivery is not available for target window class 'Chrome_WidgetWin/, "This is a browser window. For the web page, use `const p = await w.page()`: p.type() and p.key() work in the background. setValue()/select() also work on page fields."],
   [/background_unavailable|delivery_mode:"foreground"/, "setValue()/select() work in the background for text boxes and combo boxes. Otherwise retry this one action with {foreground: true}, which briefly takes focus and the real cursor (the user may be asked first)."],
@@ -267,7 +267,7 @@ export class Desktop {
     return t;
   }
 
-  /** Entry point for every sandbox call: `cua.*` and `w.*` methods with JSON arguments. */
+  /** Entry point for every sandbox call: `desktop.*` and `w.*` methods with JSON arguments. */
   async dispatch(method: string, args: unknown[]): Promise<unknown> {
     const started = performance.now();
     try {
@@ -279,10 +279,10 @@ export class Desktop {
 
   private async route(method: string, args: unknown[]): Promise<unknown> {
     switch (method) {
-      case "cua.windows": return this.windows(args[0] == null ? undefined : windowQuery(args[0]));
-      case "cua.window": return this.bind(args[0], () => this.findWindow(windowQuery(args[1])));
-      case "cua.open": return this.bind(args[0], () => this.open(str(args[1], "open")));
-      case "cua.sleep": return this.cappedSleep(optNum(args[0], "sleep") ?? 0);
+      case "desktop.windows": return this.windows(args[0] == null ? undefined : windowQuery(args[0]));
+      case "desktop.window": return this.bind(args[0], () => this.findWindow(windowQuery(args[1])));
+      case "desktop.open": return this.bind(args[0], () => this.open(str(args[1], "open")));
+      case "desktop.sleep": return this.cappedSleep(optNum(args[0], "sleep") ?? 0);
     }
     if (method.startsWith("p.")) return this.dispatchPage(method.slice(2), args);
     if (!method.startsWith("w.")) throw new Error(`unknown API method ${method}`);
@@ -478,7 +478,7 @@ export class Desktop {
       const all = await this.listAllWindows();
       win = all.find((w) => ids.has(w.window_id)) ?? all.find((w) => w.pid === pid);
     }
-    if (!win) throw new Error(`launched ${name} (pid ${pid}) but no window appeared yet; try cua.window("${name}")`);
+    if (!win) throw new Error(`launched ${name} (pid ${pid}) but no window appeared yet; try desktop.window("${name}")`);
     const app = appOf(win);
     if (this.policy.status(app) === "denied") throw new Error(`${name} opened ${app.label}, which is blocked by policy.`);
     this.policy.launched(win.pid, app, remember);
@@ -488,7 +488,7 @@ export class Desktop {
   }
 
   private async cappedSleep(ms: number) {
-    if (ms > SLEEP_CAP_MS) this.note(`cua.sleep is capped at ${SLEEP_CAP_MS} ms: state(), find() and waitFor() already wait for the UI to settle`);
+    if (ms > SLEEP_CAP_MS) this.note(`desktop.sleep is capped at ${SLEEP_CAP_MS} ms: state(), find() and waitFor() already wait for the UI to settle`);
     await sleep(Math.min(Math.max(ms, 0), SLEEP_CAP_MS));
   }
 }

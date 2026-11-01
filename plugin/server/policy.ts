@@ -76,7 +76,7 @@ export class Policy {
   private readonly preapproved: string[];
   private readonly approved = new Set<string>(); // app keys approved this session
   private readonly declined = new Set<string>(); // asked this session and refused: don't nag
-  private readonly launchedPids = new Set<number>(); // apps Claude opened through cua.open
+  private readonly launchedPids = new Set<number>(); // apps Claude opened through desktop.open
   private readonly foregroundOk = new Set<string>();
   private readonly ask: Ask;
 

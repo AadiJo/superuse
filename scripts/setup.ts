@@ -235,7 +235,7 @@ if (opts.json) {
     if (c.next && c.status !== "ok") lines.push(`${" ".repeat(25)}next: ${c.next}`);
   }
   if (outcome === "server_verified" || outcome === "restart_required") {
-    lines.push("", "A client counts as verified once it calls superuse's js tool itself, e.g. `return (await cua.windows()).length`.");
+    lines.push("", "A client counts as verified once it calls superuse's js tool itself, e.g. `return (await desktop.windows()).length`.");
   }
   lines.push("", `Other MCP clients: stdio command ${JSON.stringify(manual.command)} with no arguments; skill folder ${manual.skill}.`);
   console.log(lines.join("\n"));

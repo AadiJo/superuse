@@ -813,8 +813,8 @@ async function checkCursoroverlay(run: Run) {
     };
     // Screenshot pixels map to screen as frame origin + 1; MenuPad's screenshot isn't downscaled.
     // A click right after a read can come back "busy" with nothing sent, so each retries.
-    const clickCode = (target: string) => `{ const w = await cua.window({title: "MenuPad-A"}); let err;
-      for (let i = 0; i < 5; i++) { try { await w.click(${target}); return "ok" } catch (e) { err = String(e); if (!err.includes("busy")) break; await cua.sleep(300) } }
+    const clickCode = (target: string) => `{ const w = await desktop.window({title: "MenuPad-A"}); let err;
+      for (let i = 0; i < 5; i++) { try { await w.click(${target}); return "ok" } catch (e) { err = String(e); if (!err.includes("busy")) break; await desktop.sleep(300) } }
       throw new Error(err) }`;
     const clickAt = ([sx, sy]: readonly [number, number]) => js(clickCode(`[${sx - ax - 1}, ${sy - ay - 1}]`));
     const clickEditor = () => js(clickCode(`await w.find("Text editor")`));

@@ -112,7 +112,7 @@ async function js(c: McpClient, code: string): Promise<{ text: string; error: bo
 
 // The page API by hand: open a background tab, fill the form, submit with Enter, close the tab.
 const STEPS: Array<[label: string, code: string]> = [
-  ["bind Helium + open tab", `const w = await cua.window({app: "chrome", title: "Helium"}); globalThis.p = await w.page().newTab(${JSON.stringify(FORM_URL)}); return p.title`],
+  ["bind Helium + open tab", `const w = await desktop.window({app: "chrome", title: "Helium"}); globalThis.p = await w.page().newTab(${JSON.stringify(FORM_URL)}); return p.title`],
   ["read", "return await p.read()"],
   ["type name", String.raw`const r = await p.read({query: "Name"}); await p.type(r.match(/\[(p\d+:\d+)\] textbox "Name"/)[1], "Ada Lovelace", {replace: true}); return "ok"`],
   ["type email", String.raw`const r = await p.read({query: "Email"}); await p.type("ada@example.com", r.match(/\[(p\d+:\d+)\] textbox "Email"/)[1], {replace: true}); return "ok"`],

@@ -1,3 +1,5 @@
+<img src="assets/icon.png" alt="Superuse icon" width="96" align="right">
+
 # Superuse
 
 Windows computer use for Claude Code. Claude gets one MCP tool, `js`, and writes short JavaScript programs against a `desktop` API: bind a window, read its accessibility tree, click, type, set values, walk menus, and check the result, several steps per call. Input goes to the target window in the background, so your mouse and focus stay yours.
@@ -42,5 +44,6 @@ Headless runs (`claude -p`) can't show prompts. Pre-approve apps there with `SUP
 | `scripts/` | `install.sh`, `doctor.sh` and the setup they run; `release-driver.ts` publishes a driver build |
 | `bench/` | End-to-end benchmark on the real desktop, plus `server-check.ts` for the sandbox and policy and `ui-check.ts` for the window API |
 | `research/` | Research reports (`00-synthesis.md` first) and experiment results (`08-experiments.md`) |
+| `assets/` | Project icon |
 
 Server checks: `node bench/server-check.ts` (sandbox and policy, read-only on the desktop) and `node bench/ui-check.ts` (the window API on fixture windows; sends input, so keep the desktop idle). Setup checks: `node bench/setup-check.ts` (fresh clones in isolated client config). Driver checks: `node bench/acceptance.ts`. Codex app baseline: `bench/codex_app_wizard.sh`. Type check: `npm run typecheck` in `plugin/server`, and at the repo root for the `bench/` and `fork/` scripts.

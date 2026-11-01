@@ -1,8 +1,8 @@
 {
-  "repo": "AadiJo/better-computer-use",
-  "tag": "driver-c126b2ed4c38",
+  "repo": "AadiJo/superuse",
+  "tag": "driver-130d6b189ad7",
   "target": "x86_64-pc-windows-gnu",
-  "asset": "cua-driver-x86_64-pc-windows-gnu.exe",
-  "fingerprint": "c126b2ed4c38786e01c4cacf5928def61cf217868f40777666b23adb4515fce6",
-  "sha256": "fe165fcf9baff564fd0bccae7202cf6f9858717c420be52ebdcbb2121a52fa50"
+  "asset": "superuse-driver-x86_64-pc-windows-gnu.exe",
+  "fingerprint": "130d6b189ad7beec058a4d44cb9d5ac9ecc354364195d2df179e7f1034d4ecc8",
+  "sha256": "5ffd3b34b7694b2463f7c41a5f8560dc1db869ecc9adae4494fd0c354242024b"
 }

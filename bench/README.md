@@ -31,6 +31,9 @@ The write-up is [research/08-experiments.md](../research/08-experiments.md). Rou
 | `claude-bcu3` | Claude Code, Opus | `plugin/server/main.ts` (QuickJS sandbox, per-app policy) over `plugin/driver/cua-driver.exe`, whatever this checkout holds (fork v6 after round 4) |
 | `claude-bcu3-v4` | Claude Code, Opus | The round 3 server and fork v4, frozen in `tools/baseline/v4/plugin` (`git archive` of the round 3 commit plus its `cua-driver.exe`; not in git) |
 | `claude-bcu2` | Claude Code, Opus | `proto/v2/bcu-mcp.ts` (v2: settling reads, `select`, explicit foreground, app scoping) over fork v2 (`tools/cua-driver-fork/v2/`) |
+| `claude-cua-038` | Claude Code, Opus | Cua Driver 0.38.0 release (`tools/cua-driver-0.38.0/`), all 63 tools |
+| `claude-agent-desktop` | Claude Code, Opus | agent-desktop 1.0.2 CLI (`tools/agent-desktop-1.0.2/`) through Bash limited to `agent-desktop`, with its bundled skills in the system prompt |
+| `claude-agent-desktop-headed` | Claude Code, Opus | Same, with physical input (`--headed`) allowed, as `BCU_FOREGROUND=allow` does for the plugin arms |
 
 All arms get the same prompt text and effort level (`medium`). Claude runs use `--tools ""` (no built-in tools), `--strict-mcp-config` and `--setting-sources user`. No config file is changed.
 

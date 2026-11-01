@@ -15,7 +15,7 @@
 // files, contact) so runs can be replayed; without it a batch reuses the seed it started with, or
 // picks one and prints it.
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomInt } from "node:crypto";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -47,8 +47,34 @@ export const PREAMBLE =
 /** MCP server config for an arm's CU stack, registered under the name "cu". */
 type McpServer = { command: string; args?: string[]; env?: Record<string, string> };
 
-/** Every arm is Claude Code; they differ in the "cu" server, which may depend on the run folder. */
+/** A CLI stack with no MCP server: Claude gets Bash, allowed to run only `command` (found on PATH
+ *  in `binDir`), with the tool's own guide appended to its system prompt. */
+type CliStack = { cli: string; binDir: string; guide: string };
+type Stack = McpServer | CliStack;
+
+/** Competitor releases, downloaded into tools/ (gitignored) and checked against their published SHA-256. */
+const CUA_038 = path.join(REPO, "tools/cua-driver-0.38.0/cua-driver-rs-0.38.0-windows-x86_64/cua-driver.exe");
+const AGENT_DESKTOP_BIN = path.join(REPO, "tools/agent-desktop-1.0.2/bin"); // holds `agent-desktop` -> ../agent-desktop.exe
+
+/** agent-desktop's setup tells agents to read its two bundled skills first; handing them over up front saves the turns.
+ *  `headed` grants physical input, as BCU_FOREGROUND=allow does for the plugin arms: without it the
+ *  skill tells the agent to stop and ask rather than fall back to `--headed`. */
+function agentDesktopGuide(headed: boolean): string {
+  const skill = (name: string): string => {
+    const out = execFileSync(path.join(AGENT_DESKTOP_BIN, "agent-desktop"), ["skills", "get", name], { encoding: "utf8" });
+    const { data }: { data: { content: string } } = JSON.parse(out);
+    return data.content.replaceAll("\r\n", "\n");
+  };
+  const grant = headed ? "The user allows physical input: use `--headed` when headless input fails or is refused.\n\n" : "";
+  return "Your computer-use tool is the agent-desktop CLI, run through Bash (`agent-desktop <command>`). Its guides follow.\n\n"
+    + grant + `${skill("desktop")}\n\n${skill("platform")}`;
+}
+
+/** Every arm is Claude Code; they differ in the "cu" stack, which may depend on the run folder. */
 const ARMS = {
+  "claude-cua-038": () => ({ command: CUA_038, args: ["mcp"], env: CUA_ENV }),
+  "claude-agent-desktop": () => ({ cli: "agent-desktop", binDir: AGENT_DESKTOP_BIN, guide: agentDesktopGuide(false) }),
+  "claude-agent-desktop-headed": () => ({ cli: "agent-desktop", binDir: AGENT_DESKTOP_BIN, guide: agentDesktopGuide(true) }),
   "claude-codexcu": () => ({ command: "node", args: [CODEX_CU], env: { CODEX_CU_AUTO_APPROVE: "1" } }),
   "claude-cua": () => ({ command: CUA_RELEASE, args: ["mcp"], env: CUA_ENV }),
   "claude-cua-main": () => ({ command: CUA_MAIN, args: ["mcp"], env: CUA_ENV }),
@@ -68,7 +94,7 @@ const ARMS = {
   // Round 4 baseline: the v4 server and driver, frozen by `git archive` of the round 3 commit into
   // tools/baseline/v4/plugin (gitignored), with the v4 cua-driver.exe in its driver/ folder.
   "claude-bcu3-v4": (runDir: string) => pluginServer(path.join(REPO, "tools/baseline/v4/plugin"), runDir),
-} satisfies Record<string, (runDir: string) => McpServer>;
+} satisfies Record<string, (runDir: string) => Stack>;
 
 /** The plugin server at `pluginDir` (server/main.ts, which finds driver/cua-driver.exe beside it).
  *  Headless runs can't show approval prompts, so the suite's apps are pre-approved and foreground
@@ -144,21 +170,27 @@ type TimedEvent = [ts: number, event: ClaudeEvent];
 const now = () => Date.now() / 1000;
 const round = (x: number, digits: number) => Number(x.toFixed(digits));
 
-function claudeArgs(prompt: string, cfg: string): string[] {
-  return ["-p", prompt, "--tools", "", "--strict-mcp-config", "--mcp-config", cfg,
-    "--allowedTools", "mcp__cu", "--model", MODEL, "--effort", EFFORT,
+/** MCP arms get no built-in tools. CLI arms get only Bash, and only for their one command; the
+ *  empty strict MCP config keeps user-level servers (bcu's own plugin) out of every arm. */
+function claudeArgs(prompt: string, cfg: string, stack: Stack): string[] {
+  const tools = "cli" in stack
+    ? ["--tools", "Bash", "--allowedTools", `Bash(${stack.cli}:*)`, "--append-system-prompt", stack.guide]
+    : ["--tools", "", "--allowedTools", "mcp__cu"];
+  return ["-p", prompt, ...tools, "--strict-mcp-config", "--mcp-config", cfg,
+    "--model", MODEL, "--effort", EFFORT,
     "--output-format", "stream-json", "--verbose", "--no-session-persistence",
     // Skip project/local settings: the parent folder sets an output style that adds prose to every run.
     "--setting-sources", "user"];
 }
 
 /** Launch the agent and timestamp every JSON event as it arrives. Past the deadline it's killed. */
-async function runAgent(server: McpServer, prompt: string, runDir: string, timeoutS: number): Promise<{ events: TimedEvent[]; timedOut: boolean }> {
+async function runAgent(stack: Stack, prompt: string, runDir: string, timeoutS: number): Promise<{ events: TimedEvent[]; timedOut: boolean }> {
   const cfg = path.join(runDir, "mcp.json");
-  writeFileSync(cfg, JSON.stringify({ mcpServers: { cu: server } }, null, 2));
-  const proc = spawn("claude", claudeArgs(prompt, cfg), {
+  writeFileSync(cfg, JSON.stringify({ mcpServers: "cli" in stack ? {} : { cu: stack } }, null, 2));
+  const pathEnv = "cli" in stack ? `${stack.binDir}:${process.env.PATH}` : process.env.PATH;
+  const proc = spawn("claude", claudeArgs(prompt, cfg, stack), {
     cwd: WORKDIR,
-    env: { ...process.env, MCP_TIMEOUT: "120000", MCP_TOOL_TIMEOUT: "180000" },
+    env: { ...process.env, PATH: pathEnv, MCP_TIMEOUT: "120000", MCP_TOOL_TIMEOUT: "180000" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   proc.stderr.pipe(createWriteStream(path.join(runDir, "stderr.txt")));

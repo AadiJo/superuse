@@ -78,7 +78,7 @@ const ARMS = {
   "claude-superuse": (runDir: string) => pluginServer(path.join(REPO, "plugin"), runDir),
 } satisfies Record<string, (runDir: string) => Stack>;
 
-/** The plugin server at `pluginDir` (server/main.ts, which finds driver/cua-driver.exe beside it).
+/** The plugin server at `pluginDir` (server/main.ts, which finds driver/superuse-driver.exe beside it).
  *  Headless runs can't show approval prompts, so the suite's apps are pre-approved and foreground
  *  input is allowed as in v2; a throwaway policy file keeps the user's own approvals out of the runs.
  *  SUPERUSE_TRACE has the server log each driver call's timing into the run folder. */

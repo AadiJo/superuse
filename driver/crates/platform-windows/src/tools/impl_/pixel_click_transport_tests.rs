@@ -1,13 +1,13 @@
 use super::{finish_pixel_uia_attempt, posted_pixel_click_result};
 use crate::uia::windows_enum::PointInvokeOutcome;
-use cua_driver_core::action_record::{
+use superuse_core::action_record::{
     ActionExecutionRecord, ActionTransport, ActualDelivery, RequestedDelivery,
 };
 
 #[test]
 fn uia_unavailable_errors_advertise_foreground_escalation() {
-    use cua_driver_core::action_record::EscalationKind;
-    use cua_driver_core::protocol::Content;
+    use superuse_core::action_record::EscalationKind;
+    use superuse_core::protocol::Content;
     for (outcome, status) in [
         (PointInvokeOutcome::Busy, "busy"),
         (PointInvokeOutcome::Timeout, "timeout"),

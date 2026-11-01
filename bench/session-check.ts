@@ -1,5 +1,5 @@
 // End-to-end check that superuse's driver client recovers when the driver ends its session, through the
-// real Driver class (plugin/server/driver.ts) and the real cua-driver.exe.
+// real Driver class (plugin/server/driver.ts) and the real superuse-driver.exe.
 //
 //   node bench/session-check.ts          ends the session with end_session, then calls again
 //   node bench/session-check.ts --idle   waits out the driver's own 5-minute idle timeout instead
@@ -15,7 +15,7 @@ import path from "node:path";
 import { timestamp } from "./win.ts";
 
 const REPO = path.dirname(import.meta.dirname);
-const EXE = process.env.SUPERUSE_DRIVER ?? path.join(REPO, "plugin/driver/cua-driver.exe");
+const EXE = process.env.SUPERUSE_DRIVER ?? path.join(REPO, "plugin/driver/superuse-driver.exe");
 const IDLE = process.argv.includes("--idle");
 const IDLE_WAIT_MS = 5 * 60_000 + 20_000; // the driver's DEFAULT_SESSION_IDLE_TTL, plus its sweep
 

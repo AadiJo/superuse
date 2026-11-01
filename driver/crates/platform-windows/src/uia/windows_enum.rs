@@ -23,7 +23,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use cua_driver_core::single_flight::SingleFlight;
+use superuse_core::single_flight::SingleFlight;
 
 use anyhow::{bail, Context};
 use windows::core::{Interface, BSTR};

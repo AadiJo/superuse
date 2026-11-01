@@ -85,8 +85,8 @@ fn allowed_styles() -> String {
 }
 
 pub(crate) fn effect_flag(key: &str, value: &Value) -> Result<Option<bool>, String> {
-    cua_driver_contract::CursorEffectSetting::from_json(value)
-        .map(cua_driver_contract::CursorEffectSetting::override_value)
+    superuse_contract::CursorEffectSetting::from_json(value)
+        .map(superuse_contract::CursorEffectSetting::override_value)
         .ok_or_else(|| format!("{key} must be on, off or default, got {value}"))
 }
 
@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn typed_effect_roundtrip_preserves_reset_and_omission_when_applied() {
-        use cua_driver_contract::{SetAgentCursorMotionInput, StartSessionInput};
+        use superuse_contract::{SetAgentCursorMotionInput, StartSessionInput};
 
         let base = MotionConfig::default()
             .with_style_args(&json!({"effects": {

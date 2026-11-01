@@ -20,7 +20,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use cua_driver_core::single_flight::SingleFlight;
+use superuse_core::single_flight::SingleFlight;
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::MAX_PATH;
 use windows::Win32::System::Com::{
@@ -176,7 +176,7 @@ fn resolve_lnk(lnk_path: &Path) -> Option<InstalledApp> {
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|d| cua_driver_core::timestamp::unix_secs_to_rfc3339(d.as_secs() as i64));
+        .and_then(|d| superuse_core::timestamp::unix_secs_to_rfc3339(d.as_secs() as i64));
 
     let launch_path = if args.trim().is_empty() {
         target.clone()
@@ -578,7 +578,7 @@ fn read_install_mtime(pkg: &windows::ApplicationModel::Package) -> Option<String
     let meta = std::fs::metadata(&path).ok()?;
     let modified = meta.modified().ok()?;
     let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
-    cua_driver_core::timestamp::unix_secs_to_rfc3339(duration.as_secs() as i64)
+    superuse_core::timestamp::unix_secs_to_rfc3339(duration.as_secs() as i64)
 }
 
 #[cfg(test)]

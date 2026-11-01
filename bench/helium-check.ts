@@ -82,7 +82,7 @@ async function cleanup(): Promise<string[]> {
     await ps(WIN_TYPES + prompts.map((w) => `[void][SuperuseW]::PostMessage([IntPtr]${w.hwnd},0x0010,[IntPtr]::Zero,[IntPtr]::Zero)\n`).join(""));
     done.push(`denied ${prompts.length} prompt(s)`);
   }
-  await using c = await McpClient.start([path.join(REPO, "plugin/driver/cua-driver.exe"), "mcp"], { env: { DO_NOT_TRACK: "1", WSLENV: "DO_NOT_TRACK" } });
+  await using c = await McpClient.start([path.join(REPO, "plugin/driver/superuse-driver.exe"), "mcp"], { env: { DO_NOT_TRACK: "1", WSLENV: "DO_NOT_TRACK" } });
   const indent = (line: string) => line.length - line.trimStart().length;
   for (const w of await heliumWindows()) {
     for (let i = 0; i < 5; i++) {

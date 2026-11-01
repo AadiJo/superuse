@@ -1,0 +1,5 @@
+[bindings.python]
+cdylib_name = "superuse_sdk"
+
+[bindings.python.external_packages]
+superuse_contract = "cua_driver._native_contract"

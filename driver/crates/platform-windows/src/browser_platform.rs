@@ -10,19 +10,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cua_driver_core::browser::platform::{
+use superuse_core::browser::platform::{
     BrowserConsentOutcome, BrowserConsentRequest, BrowserPlatform, BrowserVisualAction,
     BrowserVisualActionKind, DesktopState, ExistingProfileSetupOutcome,
     ExistingProfileSetupRequest, IsolatedBrowserProcess, PrepareAction, PrepareOutcome,
     PrepareRequest,
 };
-use cua_driver_core::browser::refusal::{BrowserRefusal, BrowserRefusalCode};
-use cua_driver_core::browser::types::{
+use superuse_core::browser::refusal::{BrowserRefusal, BrowserRefusalCode};
+use superuse_core::browser::types::{
     BrowserClassification, BrowserEngineFamily, BrowserProcessRole, BrowserProduct,
     EndpointOwnershipMethod, EndpointOwnershipProof, EndpointTransport, NativeOwnershipMethod,
     NativeOwnershipProof, NativeWindowInfo, OwnedEndpoint, ProcessFingerprint, Rect,
 };
-use cua_driver_core::browser::{
+use superuse_core::browser::{
     existing_profile_setup_descriptor, is_firefox, parse_devtools_active_port, BrowserCursorTracker,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2215,7 +2215,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
     async fn visualize_browser_action(&self, action: BrowserVisualAction) {
         if action.session.is_empty()
             || action.cdp_target_id.is_empty()
-            || cua_driver_core::session::is_session_ended(&action.session)
+            || superuse_core::session::is_session_ended(&action.session)
         {
             return;
         }
@@ -2998,7 +2998,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_executable_grant_matches_without_installed_app_identity() {
-        use cua_driver_core::session_manifest::load_manifest;
+        use superuse_core::session_manifest::load_manifest;
         use std::io::Write;
 
         let pid = i64::from(std::process::id());

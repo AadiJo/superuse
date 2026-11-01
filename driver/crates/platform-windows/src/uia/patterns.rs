@@ -46,8 +46,8 @@ impl PatternAction {
         }
     }
 
-    pub(crate) fn transport(self) -> cua_driver_core::action_record::ActionTransport {
-        use cua_driver_core::action_record::ActionTransport;
+    pub(crate) fn transport(self) -> superuse_core::action_record::ActionTransport {
+        use superuse_core::action_record::ActionTransport;
         match self {
             Self::Invoke => ActionTransport::WindowsUiaInvoke,
             Self::Toggle => ActionTransport::WindowsUiaToggle,

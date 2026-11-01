@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use cua_driver_contract::{
+pub use superuse_contract::{
     CursorAction, CursorDelivery as DeliveryModifier, CursorPlayback as PlaybackKind,
     CursorReducedMotion as ReducedMotion, CursorTarget as TargetModifier,
 };

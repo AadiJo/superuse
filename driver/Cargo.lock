@@ -840,142 +840,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "cua-cursor-motion"
+name = "cursor-motion"
 version = "0.34.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "cua-driver"
-version = "0.34.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "cap-fs-ext",
- "cap-std",
- "cua-driver-contract",
- "cua-driver-core",
- "cua-driver-sdk",
- "cua-driver-testkit",
- "cursor-overlay",
- "embed-manifest",
- "embed-resource",
- "flate2",
- "fs2",
- "httparse",
- "image",
- "jsonschema",
- "libc",
- "pip-preview",
- "platform-windows",
- "ring",
- "rustix",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "uuid",
- "windows 0.61.3",
- "zeroize",
-]
-
-[[package]]
-name = "cua-driver-contract"
-version = "0.34.0"
-dependencies = [
- "schemars",
- "serde",
- "serde_json",
- "uniffi",
-]
-
-[[package]]
-name = "cua-driver-core"
-version = "0.34.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "chacha20poly1305",
- "ciborium",
- "coset",
- "cua-driver-contract",
- "fs2",
- "futures-util",
- "getrandom 0.4.2",
- "hkdf",
- "hmac",
- "image",
- "jsonschema",
- "libc",
- "regex",
- "regorus",
- "rquickjs",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2",
- "tempfile",
- "thiserror 1.0.69",
- "time",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "url",
- "uuid",
- "windows 0.58.0",
- "zeroize",
- "zune-core",
-]
-
-[[package]]
-name = "cua-driver-sdk"
-version = "0.34.0"
-dependencies = [
- "async-trait",
- "cua-cursor-motion",
- "cua-driver-contract",
- "cua-driver-core",
- "cursor-overlay",
- "platform-windows",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uniffi",
- "uuid",
-]
-
-[[package]]
-name = "cua-driver-testkit"
-version = "0.34.0"
-dependencies = [
- "arbitrary",
- "async-trait",
- "core-foundation",
- "cua-driver-contract",
- "cua-driver-core",
- "image",
- "jsonschema",
- "libc",
- "objc2-app-kit 0.2.2",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "windows 0.61.3",
- "x11rb",
 ]
 
 [[package]]
@@ -983,9 +852,7 @@ name = "cursor-overlay"
 version = "0.34.0"
 dependencies = [
  "anyhow",
- "cua-cursor-motion",
- "cua-driver-contract",
- "cua-driver-core",
+ "cursor-motion",
  "fontdue",
  "image",
  "indexmap",
@@ -993,6 +860,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "superuse-contract",
+ "superuse-core",
  "tiny-skia",
  "tracing",
  "zstd",
@@ -2527,8 +2396,6 @@ dependencies = [
  "async-trait",
  "base64",
  "clipboard-rs",
- "cua-driver-contract",
- "cua-driver-core",
  "cursor-overlay",
  "getrandom 0.4.2",
  "image",
@@ -2536,6 +2403,8 @@ dependencies = [
  "pip-preview",
  "serde",
  "serde_json",
+ "superuse-contract",
+ "superuse-core",
  "tempfile",
  "thiserror 1.0.69",
  "tiny-skia",
@@ -3310,6 +3179,137 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "superuse-contract"
+version = "0.34.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "uniffi",
+]
+
+[[package]]
+name = "superuse-core"
+version = "0.34.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chacha20poly1305",
+ "ciborium",
+ "coset",
+ "fs2",
+ "futures-util",
+ "getrandom 0.4.2",
+ "hkdf",
+ "hmac",
+ "image",
+ "jsonschema",
+ "libc",
+ "regex",
+ "regorus",
+ "rquickjs",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "superuse-contract",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
+ "uuid",
+ "windows 0.58.0",
+ "zeroize",
+ "zune-core",
+]
+
+[[package]]
+name = "superuse-driver"
+version = "0.34.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "cap-fs-ext",
+ "cap-std",
+ "cursor-overlay",
+ "embed-manifest",
+ "embed-resource",
+ "flate2",
+ "fs2",
+ "httparse",
+ "image",
+ "jsonschema",
+ "libc",
+ "pip-preview",
+ "platform-windows",
+ "ring",
+ "rustix",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "superuse-contract",
+ "superuse-core",
+ "superuse-sdk",
+ "superuse-testkit",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "uuid",
+ "windows 0.61.3",
+ "zeroize",
+]
+
+[[package]]
+name = "superuse-sdk"
+version = "0.34.0"
+dependencies = [
+ "async-trait",
+ "cursor-motion",
+ "cursor-overlay",
+ "platform-windows",
+ "serde",
+ "serde_json",
+ "superuse-contract",
+ "superuse-core",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uniffi",
+ "uuid",
+]
+
+[[package]]
+name = "superuse-testkit"
+version = "0.34.0"
+dependencies = [
+ "arbitrary",
+ "async-trait",
+ "core-foundation",
+ "image",
+ "jsonschema",
+ "libc",
+ "objc2-app-kit 0.2.2",
+ "serde",
+ "serde_json",
+ "superuse-contract",
+ "superuse-core",
+ "tempfile",
+ "tokio",
+ "windows 0.61.3",
+ "x11rb",
+]
 
 [[package]]
 name = "syn"

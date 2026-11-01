@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the driver in driver/ for Windows from WSL/Linux, without sudo.
 #
-#   scripts/build-driver.sh              # build, then install into plugin/driver/cua-driver.exe
-#   scripts/build-driver.sh --no-install # build only: tools/out/cua-driver.exe and tools/out/rustc.txt
+#   scripts/build-driver.sh              # build, then install into plugin/driver/superuse-driver.exe
+#   scripts/build-driver.sh --no-install # build only: tools/out/superuse-driver.exe and tools/out/rustc.txt
 #
 # The installed build carries no provenance record, so scripts/setup.ts treats it as a local driver.
 # scripts/setup.ts --build and scripts/release-driver.ts run --no-install and record the result.
@@ -51,17 +51,17 @@ fi
 src="$root/driver"
 export CARGO_TARGET_DIR="$root/tools/target"
 (cd "$src" && rustup target add "$target" >/dev/null)
-(cd "$src" && PATH="$zig:$PATH" cargo zigbuild --locked --release --target "$target" -p cua-driver)
-exe="$CARGO_TARGET_DIR/$target/release/cua-driver.exe"
+(cd "$src" && PATH="$zig:$PATH" cargo zigbuild --locked --release --target "$target" -p superuse-driver)
+exe="$CARGO_TARGET_DIR/$target/release/superuse-driver.exe"
 echo "built $exe"
 
 out="$root/tools/out"
 mkdir -p "$out"
-install -m 755 "$exe" "$out/cua-driver.exe"
+install -m 755 "$exe" "$out/superuse-driver.exe"
 (cd "$src" && rustc -V) > "$out/rustc.txt"
 if [[ "$mode" == install ]]; then
   mkdir -p "$root/plugin/driver"
-  install -m 755 "$exe" "$root/plugin/driver/cua-driver.exe"
-  rm -f "$root/plugin/driver/cua-driver.json"
-  echo "installed plugin/driver/cua-driver.exe (local build: no provenance record)"
+  install -m 755 "$exe" "$root/plugin/driver/superuse-driver.exe"
+  rm -f "$root/plugin/driver/superuse-driver.json"
+  echo "installed plugin/driver/superuse-driver.exe (local build: no provenance record)"
 fi

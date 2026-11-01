@@ -3,7 +3,7 @@
 //   node bench/acceptance.ts [saveas] [closedmenu] [replace] [edge] [edge_alert] [calc] [explorer]
 //       [win32menu] [win32menu_bypos] [menubg] [ownership] [fgpoint] [cursorclip] [cursoroverlay] [helium]
 //
-// Drives the driver (SUPERUSE_DRIVER, default plugin/driver/cua-driver.exe) over MCP stdio against
+// Drives the driver (SUPERUSE_DRIVER, default plugin/driver/superuse-driver.exe) over MCP stdio against
 // windows this script opens itself (TestPad, MenuPad from bench/apps, an Explorer window on
 // %TEMP%\superuse\explorer_move, the throwaway-profile Edge form, Calculator), records every tool call
 // with its time, samples the real cursor and foreground window, and writes
@@ -31,7 +31,7 @@ import { closeNewWindows, killBenchEdge, killTestPad, listWindows, ps, Sampler, 
 
 const HERE = import.meta.dirname;
 // The driver under test: SUPERUSE_DRIVER, else the one the plugin ships.
-const EXE = process.env.SUPERUSE_DRIVER ?? path.join(HERE, "..", "plugin/driver/cua-driver.exe");
+const EXE = process.env.SUPERUSE_DRIVER ?? path.join(HERE, "..", "plugin/driver/superuse-driver.exe");
 const OUT = path.join(HERE, "out", "acceptance-runs");
 const STAMP = timestamp(); // names this run's JSON and the images checks save beside it
 const ENV = { DO_NOT_TRACK: "1", WSLENV: "DO_NOT_TRACK" };
@@ -1175,7 +1175,7 @@ const CHECKS = {
 } satisfies Record<string, (run: Run) => Promise<Outcome>>;
 type CheckName = keyof typeof CHECKS;
 
-// Extra `cua-driver mcp` arguments per check.
+// Extra `superuse-driver mcp` arguments per check.
 const CHECK_ARGS: Partial<Record<CheckName, string[]>> = { helium: ["--grant", "existing-profile"] };
 // Checks that open no task windows and clean up after themselves skip the shared teardown, which
 // closes new task windows and kills TestPad.

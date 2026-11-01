@@ -230,7 +230,7 @@ class WindowTree {
  *  value with Windows line breaks leaves a \r on the row's first line, which `.` won't match. */
 const ROW = /^(\s*)- \[(\d+)\] (.*)$/s;
 
-/** The driver's row identity (cua-driver-core window_state_view.rs identity_of): depth, role, and
+/** The driver's row identity (superuse-core window_state_view.rs identity_of): depth, role, and
  *  automation id or else the quoted label right after the role. Values change, so they're left out. */
 function identityOf(indent: number, rest: string): string {
   const role = rest.split(/\s/, 1)[0];

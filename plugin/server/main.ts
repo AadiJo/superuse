@@ -7,7 +7,7 @@
 // elicitation when the client supports it (policy.ts). research/08-experiments.md explains the
 // design; the plugin README covers setup.
 //
-// Env: SUPERUSE_DRIVER  path to cua-driver.exe (default: ../driver/cua-driver.exe)
+// Env: SUPERUSE_DRIVER  path to superuse-driver.exe (default: ../driver/superuse-driver.exe)
 //      SUPERUSE_CURSOR      "fast" (default: visible agent cursor, short glide), "animated" or "off"
 //      SUPERUSE_APPS, SUPERUSE_FOREGROUND, SUPERUSE_POLICY  see policy.ts;  SUPERUSE_AUDIT  action log path or "off"
 //      SUPERUSE_TRACE       file for per-call timings (benchmarks; off by default)
@@ -23,7 +23,7 @@ import { VERSION } from "./version.ts";
 
 const TEXT_LIMIT = 20_000;
 const here = path.dirname(fileURLToPath(import.meta.url));
-const DRIVER = process.env.SUPERUSE_DRIVER ?? path.join(here, "..", "driver", "cua-driver.exe");
+const DRIVER = process.env.SUPERUSE_DRIVER ?? path.join(here, "..", "driver", "superuse-driver.exe");
 const CURSOR = (process.env.SUPERUSE_CURSOR ?? "fast") as CursorMode;
 
 const API = `Control Windows apps with JavaScript. The code runs in an async function with a persistent \`cua\` object; top-level let/const persist between calls. Return a value or call log(...) to see output.

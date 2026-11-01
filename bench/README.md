@@ -24,7 +24,7 @@ The write-up is [research/08-experiments.md](../research/08-experiments.md). The
 | Arm | Agent | CU stack |
 | --- | --- | --- |
 | `claude-codexcu` | Claude Code, Opus | Codex's own CU runtime (`cua_repl`, `js` tool) via `codex-cu-bridge.ts` |
-| `claude-superuse` | Claude Code, Opus | `plugin/server/main.ts` (QuickJS sandbox, per-app policy) over `plugin/driver/cua-driver.exe`, whatever this checkout holds (fork v6 after round 4) |
+| `claude-superuse` | Claude Code, Opus | `plugin/server/main.ts` (QuickJS sandbox, per-app policy) over `plugin/driver/superuse-driver.exe`, whatever this checkout holds (fork v6 after round 4) |
 | `claude-cua-038` | Claude Code, Opus | Cua Driver 0.38.0 release (`tools/cua-driver-0.38.0/`), all 63 tools |
 | `claude-agent-desktop` | Claude Code, Opus | agent-desktop 1.0.2 CLI (`tools/agent-desktop-1.0.2/`) through Bash limited to `agent-desktop`, with its bundled skills in the system prompt |
 | `claude-agent-desktop-headed` | Claude Code, Opus | Same, with physical input (`--headed`) allowed, as `SUPERUSE_FOREGROUND=allow` does for the plugin arms |

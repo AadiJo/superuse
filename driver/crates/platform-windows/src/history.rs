@@ -1,6 +1,6 @@
 //! Windows adapters for encrypted Computer History.
 
-use cua_driver_core::history::{
+use superuse_core::history::{
     ApplicationIdentity, ApplicationIdentityProvider, HistoryError, HistoryHealthCategory,
     HistoryKey, KeyProvider,
 };

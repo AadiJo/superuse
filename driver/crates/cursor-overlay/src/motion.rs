@@ -14,9 +14,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// The styles, timing modes and effect switches live in `cua-cursor-motion`, the
+// The styles, timing modes and effect switches live in `cursor-motion`, the
 // single source of truth for cursor motion shared with `@trycua/cursor-motion`.
-pub use cua_cursor_motion::{
+pub use cursor_motion::{
     MotionEffects, MotionStyle, MotionTiming, ResolvedEffects, DEFAULT_FIXED_MS,
 };
 
@@ -70,7 +70,7 @@ impl Default for MotionConfig {
             glide_duration_ms: 0.0, // 0 = speed-based mode
             dwell_after_click_ms: 80.0,
             // The shared agent idle timeout (presence drops an idle agent then too).
-            idle_hide_ms: cua_driver_core::agent_cursor::default_idle_hide_ms(),
+            idle_hide_ms: superuse_core::agent_cursor::default_idle_hide_ms(),
             press_duration_ms: 120.0,
             peak_speed: 900.0,
             min_start_speed: 300.0,
@@ -212,9 +212,9 @@ impl MotionConfig {
         self.effects.resolve(self.style.default_effects())
     }
 
-    /// The fields that shape motion, for `cua_cursor_motion::plan_move`.
-    pub fn params(&self) -> cua_cursor_motion::MotionParams {
-        cua_cursor_motion::MotionParams {
+    /// The fields that shape motion, for `cursor_motion::plan_move`.
+    pub fn params(&self) -> cursor_motion::MotionParams {
+        cursor_motion::MotionParams {
             style: self.style,
             timing: self.timing,
             effects: self.effects,

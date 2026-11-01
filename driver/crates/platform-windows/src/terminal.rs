@@ -98,7 +98,7 @@ pub(crate) fn type_text_policy(_hwnd: u64, _foreground: bool) -> TypeTextPolicy 
 #[cfg(target_os = "windows")]
 pub(crate) fn native_consolehost_type_text_error(
     hwnd: u64,
-) -> cua_driver_core::protocol::ToolResult {
+) -> superuse_core::protocol::ToolResult {
     let class = crate::input::delivery::read_class_name(hwnd);
     native_consolehost_type_text_error_for_class(class)
 }
@@ -106,10 +106,10 @@ pub(crate) fn native_consolehost_type_text_error(
 #[cfg(any(test, target_os = "windows"))]
 fn native_consolehost_type_text_error_for_class(
     class: String,
-) -> cua_driver_core::protocol::ToolResult {
+) -> superuse_core::protocol::ToolResult {
     let suggestion = "Use a process or PTY execution channel for console setup, \
                       or launch a terminal host with a verifiable text-input route.";
-    cua_driver_core::protocol::ToolResult::error(format!(
+    superuse_core::protocol::ToolResult::error(format!(
         "type_text is unavailable for native ConsoleHost window class '{class}': \
          Windows can accept synthesized Unicode input without delivering it to \
          the prompt, so Cua Driver refuses rather than reporting a false success. \

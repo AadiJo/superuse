@@ -120,7 +120,7 @@ function setup(caseName: string, checkout: string, script: "install" | "doctor",
 /** Hashes of every file a rerun must leave alone. */
 function snapshot(home: string, checkout: string): Record<string, string | null> {
   const files = [".claude/settings.json", ".claude/plugins/installed_plugins.json", ".claude/plugins/known_marketplaces.json", ".codex/config.toml", ".config/superuse/policy.json", ".config/superuse/node-path"].map((f) => path.join(home, f));
-  files.push(path.join(checkout, "plugin/driver/cua-driver.exe"), path.join(checkout, "plugin/driver/cua-driver.json"));
+  files.push(path.join(checkout, "plugin/driver/superuse-driver.exe"), path.join(checkout, "plugin/driver/superuse-driver.json"));
   return Object.fromEntries(files.map((f) => [f, sha(f)]));
 }
 
@@ -140,7 +140,7 @@ const cloneA = clone("clone A");
   check("fresh: outcome restart_required, exit 0", r.code === 0 && r.report.outcome === "restart_required", r.summary);
   const node = fs.readFileSync(path.join(homeA, ".config/superuse/node-path"), "utf8").trim();
   check("fresh: Node downloaded into superuse's own folder and recorded", node.startsWith(path.join(homeA, ".local/share/superuse/node/")), node);
-  check("fresh: driver downloaded, nothing built", r.has("DRIVER_DOWNLOADED") && !r.ran(/build\.sh/) && sha(path.join(cloneA, "plugin/driver/cua-driver.exe")) === manifest.sha256, r.summary);
+  check("fresh: driver downloaded, nothing built", r.has("DRIVER_DOWNLOADED") && !r.ran(/build\.sh/) && sha(path.join(cloneA, "plugin/driver/superuse-driver.exe")) === manifest.sha256, r.summary);
   check("fresh: both clients registered", r.has("CLAUDE_RESTART") && r.has("CODEX_RESTART"), r.summary);
   check("fresh: server verified through the launcher", r.has("SERVER_VERIFIED"), r.summary);
 }
@@ -182,8 +182,8 @@ function manifestVersion(checkout: string): string {
   check("rerun: doctor agrees", d.code === 0 && d.report.outcome === "server_verified", d.summary);
 }
 
-const exeA = path.join(cloneA, "plugin/driver/cua-driver.exe");
-const recordA = path.join(cloneA, "plugin/driver/cua-driver.json");
+const exeA = path.join(cloneA, "plugin/driver/superuse-driver.exe");
+const recordA = path.join(cloneA, "plugin/driver/superuse-driver.json");
 
 {
   fs.rmSync(exeA);
@@ -249,10 +249,10 @@ const cloneC = clone("clone C");
   fs.writeFileSync(path.join(skill, "SKILL.md"), "someone else's skill\n");
   const custom = Buffer.from("a hand-built driver");
   fs.mkdirSync(path.join(cloneC, "plugin/driver"), { recursive: true });
-  fs.writeFileSync(path.join(cloneC, "plugin/driver/cua-driver.exe"), custom);
+  fs.writeFileSync(path.join(cloneC, "plugin/driver/superuse-driver.exe"), custom);
   const r = setup("preserve", cloneC, "install", envC);
-  check("preserve: unknown driver kept and reported; clients wait", r.code === 2 && r.has("DRIVER_UNKNOWN") && r.has("CLIENT_SKIPPED") && fs.readFileSync(path.join(cloneC, "plugin/driver/cua-driver.exe")).equals(custom), r.summary);
-  fs.rmSync(path.join(cloneC, "plugin/driver/cua-driver.exe")); // the user moves their driver away
+  check("preserve: unknown driver kept and reported; clients wait", r.code === 2 && r.has("DRIVER_UNKNOWN") && r.has("CLIENT_SKIPPED") && fs.readFileSync(path.join(cloneC, "plugin/driver/superuse-driver.exe")).equals(custom), r.summary);
+  fs.rmSync(path.join(cloneC, "plugin/driver/superuse-driver.exe")); // the user moves their driver away
   const r2 = setup("preserve", cloneC, "install", envC);
   check("preserve: policy file untouched", fs.readFileSync(policy, "utf8") === policyText, r2.summary);
   check("preserve: other Codex server kept, skill conflict reported", fs.readFileSync(path.join(homeC, ".codex/config.toml"), "utf8").includes("[mcp_servers.other]") && r2.has("CODEX_SKILL_CONFLICT") && r2.has("DRIVER_DOWNLOADED"), r2.summary);
@@ -269,16 +269,16 @@ const cloneC = clone("clone C");
 }
 
 {
-  fs.rmSync(path.join(cloneC, "plugin/driver/cua-driver.exe"));
-  fs.rmSync(path.join(cloneC, "plugin/driver/cua-driver.json"));
+  fs.rmSync(path.join(cloneC, "plugin/driver/superuse-driver.exe"));
+  fs.rmSync(path.join(cloneC, "plugin/driver/superuse-driver.json"));
   fs.appendFileSync(path.join(cloneC, "driver/VERSION"), "\n");
   const r = setup("no-release", cloneC, "install", envC);
-  check("no-release: changed driver sources need a build or release", r.code === 1 && r.has("DRIVER_NO_RELEASE") && !fs.existsSync(path.join(cloneC, "plugin/driver/cua-driver.exe")), r.summary);
+  check("no-release: changed driver sources need a build or release", r.code === 1 && r.has("DRIVER_NO_RELEASE") && !fs.existsSync(path.join(cloneC, "plugin/driver/superuse-driver.exe")), r.summary);
   check("no-release: no download, no build, clients left alone", !r.ran(/release download|curl|build-driver\.sh|marketplace add|mcp add/) && r.has("CLIENT_SKIPPED"), r.summary);
   if (flags.build) {
     const b = setup("build", cloneC, "install", { ...envC, PATH: `${path.join(os.homedir(), ".cargo/bin")}:${envC.PATH}` }, ["--build"]);
-    const record = JSON.parse(fs.readFileSync(path.join(cloneC, "plugin/driver/cua-driver.json"), "utf8")) as { source: string; sha256: string };
-    check("build: built from the changed sources and recorded as a build", b.has("DRIVER_BUILT") && record.source === "build" && record.sha256 === sha(path.join(cloneC, "plugin/driver/cua-driver.exe")), b.summary);
+    const record = JSON.parse(fs.readFileSync(path.join(cloneC, "plugin/driver/superuse-driver.json"), "utf8")) as { source: string; sha256: string };
+    check("build: built from the changed sources and recorded as a build", b.has("DRIVER_BUILT") && record.source === "build" && record.sha256 === sha(path.join(cloneC, "plugin/driver/superuse-driver.exe")), b.summary);
   }
 }
 

@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Mutex};
 
 use clipboard_rs::{common::RustImage, Clipboard, ClipboardContext, ContentFormat};
-use cua_driver_core::clipboard::ClipboardBackend;
+use superuse_core::clipboard::ClipboardBackend;
 
 pub struct WindowsClipboard {
     context: Result<Mutex<ClipboardContext>, String>,

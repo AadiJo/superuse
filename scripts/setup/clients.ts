@@ -54,7 +54,7 @@ function checkPackage(dir: string): string[] {
   if (version !== VERSION) problems.push(`version ${version || "unreadable"}, expected ${VERSION}`);
   try { fs.accessSync(path.join(dir, "server", "run.sh"), fs.constants.X_OK); } catch { problems.push("server/run.sh is missing or not executable"); }
   if (!fs.existsSync(path.join(dir, "server", "node_modules", "quickjs-emscripten"))) problems.push("server dependencies are missing");
-  if (sha256File(path.join(dir, "driver", "cua-driver.exe")) !== sha256File(EXE)) problems.push("its driver differs from this checkout's");
+  if (sha256File(path.join(dir, "driver", "superuse-driver.exe")) !== sha256File(EXE)) problems.push("its driver differs from this checkout's");
   return problems;
 }
 

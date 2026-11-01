@@ -1,6 +1,6 @@
 // Minimal stdio MCP client, used to probe computer-use servers and time raw tool calls.
 //
-//   await using c = await McpClient.start(["./cua-driver.exe", "mcp"], { env });
+//   await using c = await McpClient.start(["./superuse-driver.exe", "mcp"], { env });
 //   const { result, ms } = await c.call("list_windows", {});
 //
 // Speaks the 2025-06-18 `initialize` flow, which every server here supports. Server-initiated
@@ -13,7 +13,7 @@ export type Args = Record<string, unknown>;
 export type ContentBlock = { type: string; text?: string; data?: string; mimeType?: string };
 export type Bounds = { x: number; y: number; width: number; height: number };
 
-/** structuredContent fields the bench and fork scripts read from cua-driver. Each tool fills a subset. */
+/** structuredContent fields the bench and fork scripts read from the driver. Each tool fills a subset. */
 export type Structured = Partial<{
   snapshot_id: string;
   tree_markdown: string;

@@ -1,23 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/cua-driver",
-    "crates/cua-driver-contract",
-    "crates/cua-driver-sdk",
-    "crates/cua-driver-testkit",
-    "crates/cua-driver-core",
+    "crates/superuse-driver",
+    "crates/superuse-contract",
+    "crates/superuse-sdk",
+    "crates/superuse-testkit",
+    "crates/superuse-core",
     "crates/platform-windows",
     "crates/cursor-overlay",
-    "crates/cua-cursor-motion",
+    "crates/cursor-motion",
     "crates/pip-preview",
 ]
 
 [workspace.package]
 version = "0.34.0"
 edition = "2021"
-authors = ["trycua"]
+authors = ["Advait Johari", "Cua AI, Inc. (upstream Cua Driver)"]
 license = "MIT"
-repository = "https://github.com/trycua/cua"
+repository = "https://github.com/AadiJo/superuse"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

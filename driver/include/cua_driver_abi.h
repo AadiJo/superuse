@@ -3,7 +3,7 @@
 #ifndef CUA_DRIVER_ABI_H
 #define CUA_DRIVER_ABI_H
 
-/* Generated from cua-driver-sdk/src/abi.rs by cua-driver-abi-header. Do not edit. */
+/* Generated from superuse-sdk/src/abi.rs by cua-driver-abi-header. Do not edit. */
 
 #include <stdarg.h>
 #include <stdbool.h>

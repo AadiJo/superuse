@@ -22,8 +22,8 @@ use std::path::Path;
 use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 
-use cua_driver_core::browser::refusal::{BrowserRefusal, BrowserRefusalCode};
-use cua_driver_core::browser::IsolatedBrowserProcess;
+use superuse_core::browser::refusal::{BrowserRefusal, BrowserRefusalCode};
+use superuse_core::browser::IsolatedBrowserProcess;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_NOT_ALL_ASSIGNED, E_ACCESSDENIED, HANDLE, LUID, WAIT_OBJECT_0,

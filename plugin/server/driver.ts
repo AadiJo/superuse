@@ -1,4 +1,4 @@
-// Cua Driver client. The driver is our fork's cua-driver.exe; we speak its stdio MCP server as
+// Driver client. The driver is superuse-driver.exe, built from driver/ (our fork of Cua Driver); we speak its stdio MCP server as
 // newline-delimited JSON-RPC. One long-lived process serves every call, and calls run one at a
 // time in the order they were issued. If the driver exits, the next call starts a fresh one; if it
 // ends our session after the idle timeout, the next call starts the session again.

@@ -31,7 +31,7 @@ type PolicyFile = { allow?: string[]; deny?: string[]; foreground?: ForegroundMo
 const BUILTIN_DENY = new Set([
   "windowsterminal", "wt", "cmd", "powershell", "pwsh", "powershell_ise", "wsl", "wslhost", "conhost",
   "openconsole", "mintty", "wezterm-gui", "alacritty", "1password", "bitwarden", "keepass", "keepassxc",
-  "dashlane", "credentialuibroker", "consent", "lockapp", "logonui", "sechealthui", "cua-driver",
+  "dashlane", "credentialuibroker", "consent", "lockapp", "logonui", "sechealthui", "cua-driver", "superuse-driver",
   "claude", "codex", "textinputhost",
 ]);
 

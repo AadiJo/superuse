@@ -25,7 +25,7 @@ function die(message: string): never {
 
 const fp = fingerprint();
 const repository = readJson<{ repository: string }>(path.join(PLUGIN, ".claude-plugin", "plugin.json")).repository;
-const base = { repo: repository.replace(/^https:\/\/github\.com\//, ""), tag: `driver-${fp.slice(0, 12)}`, target: "x86_64-pc-windows-gnu", asset: "cua-driver-x86_64-pc-windows-gnu.exe", fingerprint: fp };
+const base = { repo: repository.replace(/^https:\/\/github\.com\//, ""), tag: `driver-${fp.slice(0, 12)}`, target: "x86_64-pc-windows-gnu", asset: "superuse-driver-x86_64-pc-windows-gnu.exe", fingerprint: fp };
 const manifestFile = path.join(REPO, "driver", "release.json");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "superuse-release-"));
 const write = (m: ReleaseManifest) => {
@@ -52,7 +52,7 @@ async function main() {
   if (built.code !== 0) die("scripts/build-driver.sh failed");
   if (fingerprint() !== fp) die("the driver sources changed during the build; rerun");
   const exe = path.join(tmp, base.asset);
-  fs.copyFileSync(path.join(REPO, "tools", "out", "cua-driver.exe"), exe);
+  fs.copyFileSync(path.join(REPO, "tools", "out", "superuse-driver.exe"), exe);
   const manifest: ReleaseManifest = { ...base, sha256: sha256File(exe)! };
 
   // The release candidate must work before anyone downloads it.
@@ -67,7 +67,7 @@ async function main() {
   }
   const head = run("git", ["-C", REPO, "rev-parse", "HEAD"]).stdout.trim();
   if (run("gh", ["api", `repos/${base.repo}/commits/${head}`, "--silent"]).code !== 0) die(`commit ${head} isn't on GitHub yet; push it first`);
-  const created = run("gh", ["release", "create", base.tag, exe, "-R", base.repo, "--target", head, "--title", `cua-driver ${fp.slice(0, 12)}`,
+  const created = run("gh", ["release", "create", base.tag, exe, "-R", base.repo, "--target", head, "--title", `superuse-driver ${fp.slice(0, 12)}`,
     "--notes", `Driver for ${base.target}, built by scripts/build-driver.sh from driver/ at ${head}.\n\nsha256 ${manifest.sha256}\nsource fingerprint ${fp}`]);
   if (created.code !== 0) die(`gh release create failed: ${created.stderr}`);
   console.log(created.stdout.trim());

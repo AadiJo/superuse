@@ -63,8 +63,8 @@ impl EventKind {
     }
 }
 
-/// The shared per-call delivery mode; see [`cua_driver_core::delivery`].
-pub use cua_driver_core::delivery::DeliveryMode;
+/// The shared per-call delivery mode; see [`superuse_core::delivery`].
+pub use superuse_core::delivery::DeliveryMode;
 
 /// JSON-schema fragment for the `delivery_mode` field. Include this in every
 /// input tool's `input_schema.properties.delivery_mode`. Two modes, matching
@@ -73,7 +73,7 @@ pub fn delivery_mode_schema() -> Value {
     // Borrow the canonical SHAPE (type/enum) from the shared cross-platform
     // builder so it can never drift from the consistency gate, while keeping the
     // Windows-specific prose (UIA Invoke / PostMessage / background_unavailable).
-    cua_driver_core::tool_schema::delivery_mode_schema_with(
+    superuse_core::tool_schema::delivery_mode_schema_with(
         "Input delivery mode. 'background' (default) never swaps foreground: \
          it routes through UIA Invoke / PostMessage and the window is never \
          raised. For targets whose input stack silently drops posted events \
@@ -296,7 +296,7 @@ pub fn read_class_name(hwnd: u64) -> String {
 pub fn background_unavailable_error(
     hwnd: u64,
     kind: EventKind,
-) -> cua_driver_core::protocol::ToolResult {
+) -> superuse_core::protocol::ToolResult {
     let class = read_class_name(hwnd);
     let text = format!(
         "Background delivery is not available for target window class \
@@ -307,7 +307,7 @@ pub fn background_unavailable_error(
     );
     // Windows analog of the macOS escalation signal: this surface drops
     // background input, so the deliberate next rung is foreground delivery.
-    cua_driver_core::delivery::background_unavailable_result(
+    superuse_core::delivery::background_unavailable_result(
         text,
         "background_unavailable",
         "background input is dropped by this surface; retry this \
@@ -327,7 +327,7 @@ pub fn background_unavailable_error_with_cause(
     hwnd: u64,
     kind: EventKind,
     cause: impl Into<String>,
-) -> cua_driver_core::protocol::ToolResult {
+) -> superuse_core::protocol::ToolResult {
     let class = read_class_name(hwnd);
     let cause = cause.into();
     let cause_lower = cause.to_ascii_lowercase();
@@ -345,7 +345,7 @@ pub fn background_unavailable_error_with_cause(
          the action and restore the previous foreground afterward.",
         kind.name()
     );
-    cua_driver_core::delivery::background_unavailable_result(
+    superuse_core::delivery::background_unavailable_result(
         text,
         code,
         "background input could not be delivered by the coordinate \
@@ -419,7 +419,7 @@ mod tests {
             .contains("occluded"));
 
         let text = match &result.content[0] {
-            cua_driver_core::protocol::Content::Text { text, .. } => text,
+            superuse_core::protocol::Content::Text { text, .. } => text,
             _ => panic!("expected text content"),
         };
         assert!(text.contains("occluded"), "result text lost cause: {text}");

@@ -1,0 +1,2611 @@
+//! Content-free product telemetry for Cua Driver.
+//!
+//! Routine telemetry is enabled by default, with precedence
+//! `environment override -> persisted preference -> enabled`. Disabling
+//! telemetry stops every request while retaining the local installation ID.
+//! Normal uninstall also retains telemetry state; `telemetry reset-id` and
+//! `uninstall --purge` are the explicit identity-erasure paths.
+//!
+//! Event builders in this module accept only fixed event names and bounded
+//! properties. They never receive prompts, tool arguments/results, typed text,
+//! screenshots, accessibility trees, application/window names, URLs, paths,
+//! raw cursor identifiers/configuration values, or raw errors.
+
+use serde::Serialize;
+use serde_json::{Map, Value};
+use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+const POSTHOG_TIMEOUT_SECS: u64 = 3;
+const LIFECYCLE_RETRY_BACKOFF_SECS: u64 = 15 * 60;
+const TOOL_TELEMETRY_LIMIT_PER_HOUR: usize = 1_000;
+const TOOL_TELEMETRY_WINDOW: Duration = Duration::from_secs(60 * 60);
+
+const HOME_SUBDIRECTORY: &str = ".cua-driver";
+const LEGACY_HOME_SUBDIRECTORY: &str = ".cua-driver-rs";
+const CONFIG_FILE_NAME: &str = "config.json";
+const CONFIG_ENABLED_KEY: &str = "telemetry_enabled";
+const TELEMETRY_ID_FILE_NAME: &str = ".telemetry_id";
+const TELEMETRY_IDENTITY_LOCK_FILE_NAME: &str = ".telemetry_identity.lock";
+const TELEMETRY_LIFECYCLE_LOCK_FILE_NAME: &str = ".telemetry_lifecycle.lock";
+const TELEMETRY_RETRY_AFTER_FILE_NAME: &str = ".telemetry_retry_after";
+const TELEMETRY_INSTALL_CHANNEL_FILE_NAME: &str = ".telemetry_install_channel";
+const INSTALLATION_RECORDED_FILE_NAME: &str = ".installation_recorded";
+const RELEASE_RECORDED_DIRECTORY: &str = ".release_installed";
+
+const ENV_TELEMETRY_DEBUG: &str = "CUA_DRIVER_RS_TELEMETRY_DEBUG";
+const ENV_TELEMETRY_SYNTHETIC: &str = "CUA_DRIVER_TELEMETRY_SYNTHETIC";
+const ENV_TELEMETRY_HOME: &str = "CUA_DRIVER_TELEMETRY_HOME";
+const ENV_CLI_WRAPPED_CHILD: &str = "CUA_DRIVER_CLI_TELEMETRY_CHILD";
+const ENV_CLI_COMPLETION_WORKER: &str = "CUA_DRIVER_CLI_TELEMETRY_WORKER";
+const ENV_CLI_COMPLETION_COMMAND: &str = "CUA_DRIVER_CLI_TELEMETRY_COMMAND";
+const ENV_CLI_COMPLETION_TOOL: &str = "CUA_DRIVER_CLI_TELEMETRY_TOOL";
+const ENV_CLI_COMPLETION_COMPUTER_ACTION: &str = "CUA_DRIVER_CLI_TELEMETRY_COMPUTER_ACTION";
+const ENV_CLI_COMPLETION_OPERATION: &str = "CUA_DRIVER_CLI_TELEMETRY_OPERATION";
+const ENV_CLI_COMPLETION_CLIENT_KIND: &str = "CUA_DRIVER_CLI_TELEMETRY_CLIENT_KIND";
+const ENV_CLI_COMPLETION_EXIT_CODE: &str = "CUA_DRIVER_CLI_TELEMETRY_EXIT_CODE";
+const ENV_CLI_COMPLETION_DURATION_MS: &str = "CUA_DRIVER_CLI_TELEMETRY_DURATION_MS";
+const ENV_LIFECYCLE_WORKER: &str = "CUA_DRIVER_LIFECYCLE_TELEMETRY_WORKER";
+const ENV_UPDATE_EVENT_WORKER: &str = "CUA_DRIVER_UPDATE_TELEMETRY_WORKER";
+const ENV_UPDATE_EVENT_NAME: &str = "CUA_DRIVER_UPDATE_TELEMETRY_EVENT";
+const ENV_UPDATE_SOURCE: &str = "CUA_DRIVER_UPDATE_TELEMETRY_SOURCE";
+const ENV_UPDATE_OUTCOME: &str = "CUA_DRIVER_UPDATE_TELEMETRY_OUTCOME";
+const ENV_UPDATE_TARGET_VERSION: &str = "CUA_DRIVER_UPDATE_TELEMETRY_TARGET_VERSION";
+const ENV_UPDATE_CACHE_HIT: &str = "CUA_DRIVER_UPDATE_TELEMETRY_CACHE_HIT";
+const ENV_UPDATE_DAEMON_WAS_RUNNING: &str = "CUA_DRIVER_UPDATE_TELEMETRY_DAEMON_RUNNING";
+const ENV_UPDATE_FAILURE_CLASS: &str = "CUA_DRIVER_UPDATE_TELEMETRY_FAILURE_CLASS";
+const ENV_UPDATE_DURATION_MS: &str = "CUA_DRIVER_UPDATE_TELEMETRY_DURATION_MS";
+pub const ENV_INSTALL_CHANNEL: &str = "CUA_DRIVER_INSTALL_CHANNEL";
+pub const ENV_RELEASE_VERSION: &str = "CUA_DRIVER_RELEASE_VERSION";
+
+pub mod event {
+    pub const INSTALLATION_REGISTERED: &str = "cua_driver_installation_registered";
+    pub const RELEASE_INSTALLED: &str = "cua_driver_release_installed";
+    pub const SERVE_START_LEGACY: &str = "cua_driver_serve";
+    pub const CLI_COMPLETED: &str = "cua_driver_cli_completed";
+    pub const MCP_SESSION_STARTED: &str = "cua_driver_mcp_session_started";
+    pub const MCP_TOOL_COMPLETED: &str = "cua_driver_mcp_tool_completed";
+    pub const MCP_STARTUP_COMPLETED: &str = "cua_driver_mcp_startup_completed";
+    pub const AGENT_SESSION_STARTED: &str = "cua_driver_agent_session_started";
+    pub const AGENT_SESSION_ENDED: &str = "cua_driver_agent_session_ended";
+    pub const PERMISSIONS_GATE_STARTED: &str = "cua_driver_permissions_gate_started";
+    pub const PERMISSIONS_GATE_DISMISSED: &str = "cua_driver_permissions_gate_dismissed";
+    pub const PERMISSIONS_GATE_COMPLETED: &str = "cua_driver_permissions_gate_completed";
+    pub const UPDATE_CHECKED: &str = "cua_driver_update_checked";
+    pub const UPDATE_APPLY_STARTED: &str = "cua_driver_update_apply_started";
+    pub const UPDATE_APPLY_COMPLETED: &str = "cua_driver_update_apply_completed";
+}
+
+const INSPECTABLE_EVENTS: &[&str] = &[
+    event::INSTALLATION_REGISTERED,
+    event::RELEASE_INSTALLED,
+    event::SERVE_START_LEGACY,
+    event::CLI_COMPLETED,
+    event::MCP_SESSION_STARTED,
+    event::MCP_TOOL_COMPLETED,
+    event::MCP_STARTUP_COMPLETED,
+    event::AGENT_SESSION_STARTED,
+    event::AGENT_SESSION_ENDED,
+    event::PERMISSIONS_GATE_STARTED,
+    event::PERMISSIONS_GATE_DISMISSED,
+    event::PERMISSIONS_GATE_COMPLETED,
+    event::UPDATE_CHECKED,
+    event::UPDATE_APPLY_STARTED,
+    event::UPDATE_APPLY_COMPLETED,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateCheckSource {
+    Background,
+    Cli,
+    Mcp,
+}
+
+impl UpdateCheckSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Cli => "cli",
+            Self::Mcp => "mcp",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateCheckOutcome {
+    UpToDate,
+    Available,
+    Unavailable,
+}
+
+impl UpdateCheckOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UpToDate => "up_to_date",
+            Self::Available => "available",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateApplyOutcome {
+    Installed,
+    AlreadyCurrent,
+    Failed,
+}
+
+impl UpdateApplyOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::AlreadyCurrent => "already_current",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateFailureClass {
+    None,
+    CheckFailed,
+    InstallerExit,
+    InstallerLaunch,
+}
+
+impl UpdateFailureClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::CheckFailed => "check_failed",
+            Self::InstallerExit => "installer_exit",
+            Self::InstallerLaunch => "installer_launch",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Cli,
+    Daemon,
+    McpStdio,
+    McpHttp,
+}
+
+impl Transport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Daemon => "daemon",
+            Self::McpStdio => "mcp_stdio",
+            Self::McpHttp => "mcp_http",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct InstallationIdentity {
+    id: String,
+    persisted: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TelemetryStatus {
+    pub enabled: bool,
+    pub source: &'static str,
+    pub installation_id_present: bool,
+    pub installation_id: Option<String>,
+    pub registration_recorded: bool,
+    pub current_release_recorded: bool,
+}
+
+pub fn is_enabled() -> bool {
+    effective_enabled().0
+}
+
+/// Telemetry is removed from this fork: always off, whatever the environment or config says.
+/// The event code below stays only so its callers compile; `post_to_posthog_with_timeout`
+/// never touches the network.
+fn effective_enabled() -> (bool, &'static str) {
+    (false, "removed")
+}
+
+pub fn status() -> TelemetryStatus {
+    let (enabled, source) = effective_enabled();
+    let id = read_install_id();
+    TelemetryStatus {
+        enabled,
+        source,
+        installation_id_present: id.is_some(),
+        installation_id: id.as_deref().map(redact_id),
+        registration_recorded: marker_path(INSTALLATION_RECORDED_FILE_NAME)
+            .is_some_and(|path| path.exists()),
+        current_release_recorded: release_marker_path(current_product_version())
+            .is_some_and(|path| path.exists()),
+    }
+}
+
+pub fn set_enabled(enabled: bool) -> Result<(), String> {
+    let path = config_path().ok_or_else(|| "home directory is unavailable".to_owned())?;
+    let mut config = read_config();
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| "telemetry config is not a JSON object".to_owned())?;
+    object.insert(CONFIG_ENABLED_KEY.to_owned(), Value::Bool(enabled));
+    write_json_atomic(&path, &config)
+}
+
+pub fn reset_id() -> Result<(), String> {
+    let Some(home) = telemetry_home_dir() else {
+        return Ok(());
+    };
+    let legacy = if std::env::var_os(ENV_TELEMETRY_HOME).is_none()
+        && !crate::bundle::is_local_installation()
+    {
+        home_root().map(|root| root.join(LEGACY_HOME_SUBDIRECTORY))
+    } else {
+        None
+    };
+    reset_id_in_homes(&home, legacy.as_deref())
+}
+
+fn reset_id_in_homes(home: &Path, legacy: Option<&Path>) -> Result<(), String> {
+    let lifecycle_lock = open_lock_file(home, TELEMETRY_LIFECYCLE_LOCK_FILE_NAME)?;
+    lifecycle_lock
+        .lock()
+        .map_err(|error| format!("failed to lock telemetry lifecycle: {error}"))?;
+    let identity_lock = open_lock_file(home, TELEMETRY_IDENTITY_LOCK_FILE_NAME)?;
+    identity_lock
+        .lock()
+        .map_err(|error| format!("failed to lock telemetry identity: {error}"))?;
+    remove_file_if_exists(&home.join(TELEMETRY_ID_FILE_NAME))?;
+    remove_file_if_exists(&home.join(INSTALLATION_RECORDED_FILE_NAME))?;
+    remove_file_if_exists(&home.join(TELEMETRY_RETRY_AFTER_FILE_NAME))?;
+    remove_file_if_exists(&home.join(TELEMETRY_INSTALL_CHANNEL_FILE_NAME))?;
+    let releases = home.join(RELEASE_RECORDED_DIRECTORY);
+    if releases.exists() {
+        std::fs::remove_dir_all(&releases)
+            .map_err(|error| format!("failed to remove {}: {error}", releases.display()))?;
+    }
+    if let Some(legacy) = legacy {
+        remove_file_if_exists(&legacy.join(TELEMETRY_ID_FILE_NAME))?;
+        remove_file_if_exists(&legacy.join(INSTALLATION_RECORDED_FILE_NAME))?;
+        remove_file_if_exists(&legacy.join(TELEMETRY_RETRY_AFTER_FILE_NAME))?;
+        remove_file_if_exists(&legacy.join(TELEMETRY_INSTALL_CHANNEL_FILE_NAME))?;
+        let legacy_releases = legacy.join(RELEASE_RECORDED_DIRECTORY);
+        if legacy_releases.exists() {
+            std::fs::remove_dir_all(&legacy_releases).map_err(|error| {
+                format!("failed to remove {}: {error}", legacy_releases.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+pub fn inspect_event(event_name: &str) -> Result<Value, String> {
+    if !INSPECTABLE_EVENTS.contains(&event_name) {
+        return Err(format!(
+            "unknown telemetry event; expected one of: {}",
+            INSPECTABLE_EVENTS.join(", ")
+        ));
+    }
+    let identity = InstallationIdentity {
+        id: "redacted-installation-id".to_owned(),
+        persisted: read_install_id().is_some(),
+    };
+    let properties = match event_name {
+        event::INSTALLATION_REGISTERED | event::RELEASE_INSTALLED => {
+            lifecycle_properties(install_channel())
+        }
+        event::CLI_COMPLETED => bounded_properties(&[
+            ("command", Value::String("other".into())),
+            ("tool_name", Value::String("not_applicable".into())),
+            ("operation", Value::String("not_applicable".into())),
+            ("computer_action", Value::Bool(false)),
+            ("client_kind", Value::String("not_applicable".into())),
+            ("success", Value::Bool(true)),
+            ("exit_class", Value::String("success".into())),
+            ("duration_bucket", Value::String("lt_100ms".into())),
+        ]),
+        event::MCP_SESSION_STARTED => bounded_properties(&[
+            ("mcp_client", Value::String("unknown".into())),
+            ("mcp_client_version_major", Value::String("unknown".into())),
+            ("protocol_version", Value::String("unknown".into())),
+            ("capability_tools", Value::Bool(false)),
+            ("capability_roots", Value::Bool(false)),
+            ("capability_sampling", Value::Bool(false)),
+            ("capability_experimental", Value::Bool(false)),
+            ("capability_elicitation_form", Value::Bool(false)),
+            ("capability_elicitation_url", Value::Bool(false)),
+            ("reported_provider", Value::String("unknown".into())),
+            ("reported_model", Value::String("unknown".into())),
+            ("reported_agent", Value::String("unknown".into())),
+            (
+                "reported_agent_version_major",
+                Value::String("unknown".into()),
+            ),
+            ("execution_mode", Value::String(execution_mode().into())),
+        ]),
+        event::MCP_TOOL_COMPLETED => bounded_properties(&[
+            ("tool_name", Value::String("other".into())),
+            ("operation", Value::String("not_applicable".into())),
+            ("computer_action", Value::Bool(false)),
+            ("success", Value::Bool(true)),
+            ("error_class", Value::String("none".into())),
+            ("refusal_code", Value::String("none".into())),
+            ("duration_bucket", Value::String("lt_10ms".into())),
+            ("output_type", Value::String("empty".into())),
+            ("output_size_bucket", Value::String("0".into())),
+            ("execution_mode", Value::String(execution_mode().into())),
+        ]),
+        event::MCP_STARTUP_COMPLETED => bounded_properties(&[
+            ("path", Value::String("daemon_proxy".into())),
+            ("daemon", Value::String("already_running".into())),
+            ("success", Value::Bool(true)),
+            ("duration_bucket", Value::String("lt_100ms".into())),
+            ("execution_mode", Value::String(execution_mode().into())),
+        ]),
+        event::AGENT_SESSION_STARTED => bounded_properties(&[
+            ("declaration", Value::String("start_session".into())),
+            ("revived", Value::Bool(false)),
+            ("concurrent_sessions_bucket", Value::String("1".into())),
+            ("entry_transport", Value::String("mcp_stdio".into())),
+            ("client_kind", Value::String("mcp".into())),
+            ("capture_scope", Value::String("auto".into())),
+            ("execution_mode", Value::String(execution_mode().into())),
+        ]),
+        event::AGENT_SESSION_ENDED => bounded_properties(&[
+            ("end_reason", Value::String("explicit".into())),
+            ("duration_bucket", Value::String("lt_10s".into())),
+            ("tool_count_bucket", Value::String("1_4".into())),
+            ("computer_action_count_bucket", Value::String("1_4".into())),
+            ("error_count_bucket", Value::String("0".into())),
+            ("browser_refusal_count_bucket", Value::String("0".into())),
+            ("had_successful_tool", Value::Bool(true)),
+            ("had_successful_computer_action", Value::Bool(true)),
+            ("used_page", Value::Bool(false)),
+            ("used_browser", Value::Bool(true)),
+            ("used_cursor_tools", Value::Bool(false)),
+            ("used_recording", Value::Bool(false)),
+            ("used_config_write", Value::Bool(false)),
+            ("cursor_outcome_observed", Value::Bool(true)),
+            ("cursor_overlay_enabled_at_end", Value::Bool(true)),
+            ("cursor_theme", Value::String("default".into())),
+            ("cursor_motion_customized", Value::Bool(false)),
+            ("multi_cursor_bucket", Value::String("1".into())),
+            ("observed_multiple_transports", Value::Bool(false)),
+            ("client_kind", Value::String("mcp".into())),
+            ("capture_scope", Value::String("auto".into())),
+            ("auto_escalated_to_desktop", Value::Bool(true)),
+            ("escalation_reason", Value::String("other".into())),
+            ("execution_mode", Value::String(execution_mode().into())),
+        ]),
+        event::PERMISSIONS_GATE_STARTED => bounded_properties(&[
+            ("missing_accessibility", Value::Bool(true)),
+            ("missing_screen_recording", Value::Bool(true)),
+        ]),
+        event::PERMISSIONS_GATE_DISMISSED => bounded_properties(&[
+            ("missing_accessibility", Value::Bool(true)),
+            ("missing_screen_recording", Value::Bool(true)),
+            ("duration_bucket", Value::String("2s_9_999ms".into())),
+        ]),
+        event::PERMISSIONS_GATE_COMPLETED => bounded_properties(&[
+            ("missing_accessibility", Value::Bool(true)),
+            ("missing_screen_recording", Value::Bool(true)),
+            ("panel_shown", Value::Bool(true)),
+            ("dismissed", Value::Bool(false)),
+            ("resolution", Value::String("granted".into())),
+            ("duration_bucket", Value::String("2s_9_999ms".into())),
+        ]),
+        event::UPDATE_CHECKED => bounded_properties(&[
+            ("source", Value::String("cli".into())),
+            ("outcome", Value::String("available".into())),
+            ("target_version", Value::String("1.2.3".into())),
+            ("cache_hit", Value::Bool(false)),
+        ]),
+        event::UPDATE_APPLY_STARTED => bounded_properties(&[
+            ("target_version", Value::String("1.2.3".into())),
+            ("daemon_was_running", Value::Bool(false)),
+        ]),
+        event::UPDATE_APPLY_COMPLETED => bounded_properties(&[
+            ("target_version", Value::String("1.2.3".into())),
+            ("outcome", Value::String("installed".into())),
+            ("failure_class", Value::String("none".into())),
+            ("daemon_was_running", Value::Bool(false)),
+            ("duration_bucket", Value::String("2s_9_999ms".into())),
+        ]),
+        _ => Map::new(),
+    };
+    let transport = match event_name {
+        event::MCP_SESSION_STARTED
+        | event::MCP_TOOL_COMPLETED
+        | event::MCP_STARTUP_COMPLETED
+        | event::AGENT_SESSION_STARTED
+        | event::AGENT_SESSION_ENDED => Transport::McpStdio,
+        event::SERVE_START_LEGACY
+        | event::PERMISSIONS_GATE_STARTED
+        | event::PERMISSIONS_GATE_DISMISSED
+        | event::PERMISSIONS_GATE_COMPLETED => Transport::Daemon,
+        _ => Transport::Cli,
+    };
+    Ok(build_payload(event_name, &properties, &identity, transport))
+}
+
+/// Transitional fixed start events for long-running processes only.
+pub fn capture_start(event_name: &'static str, transport: Transport) {
+    if event_name != event::SERVE_START_LEGACY {
+        return;
+    }
+    capture_bounded(event_name, Map::new(), transport);
+}
+
+pub fn register_stdio_observer() {
+    let _ = superuse_core::server::set_stdio_observer(Arc::new(TelemetryObserver));
+    let _ = superuse_core::session::set_session_observer(Arc::new(TelemetryObserver));
+}
+
+fn execution_mode() -> &'static str {
+    if superuse_core::embedded_mode() {
+        "embedded"
+    } else {
+        "standalone"
+    }
+}
+
+struct TelemetryObserver;
+
+impl superuse_core::server::StdioObserver for TelemetryObserver {
+    fn on_session_started(&self, metadata: superuse_core::protocol::InitializeMetadata) {
+        capture_mcp_session_started(metadata, Transport::McpStdio);
+    }
+
+    fn on_tool_completed(&self, outcome: superuse_core::server::ToolCompletionObservation) {
+        capture_tool_completed(outcome, Transport::McpStdio);
+    }
+}
+
+const MAX_TRACKED_AGENT_SESSIONS: usize = 256;
+static AGENT_SESSIONS: OnceLock<Mutex<HashMap<String, AgentSessionState>>> = OnceLock::new();
+
+struct AgentSessionState {
+    started: std::time::Instant,
+    entry_transport: Transport,
+    client_kind: superuse_core::session::SessionClientKind,
+    capture_scope: superuse_core::CaptureScope,
+    auto_escalated_to_desktop: bool,
+    escalation_reason: Option<superuse_core::EscalationReason>,
+    transport_bits: u8,
+    tool_count: u64,
+    computer_action_count: u64,
+    error_count: u64,
+    browser_refusal_count: u64,
+    had_successful_tool: bool,
+    had_successful_computer_action: bool,
+    used_page: bool,
+    used_browser: bool,
+    used_cursor_tools: bool,
+    used_recording: bool,
+    used_config_write: bool,
+    used_window_modality: bool,
+    used_desktop_modality: bool,
+}
+
+impl AgentSessionState {
+    fn new(
+        entry_transport: Transport,
+        client_kind: superuse_core::session::SessionClientKind,
+        capture_scope: superuse_core::CaptureScope,
+    ) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            entry_transport,
+            client_kind,
+            capture_scope,
+            auto_escalated_to_desktop: false,
+            escalation_reason: None,
+            transport_bits: transport_bit(entry_transport),
+            tool_count: 0,
+            computer_action_count: 0,
+            error_count: 0,
+            browser_refusal_count: 0,
+            had_successful_tool: false,
+            had_successful_computer_action: false,
+            used_page: false,
+            used_browser: false,
+            used_cursor_tools: false,
+            used_recording: false,
+            used_config_write: false,
+            used_window_modality: false,
+            used_desktop_modality: false,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        transport: Transport,
+        computer_action: bool,
+        capture_modality: Option<superuse_core::session::CaptureModality>,
+        escalation_reason: Option<superuse_core::EscalationReason>,
+        outcome: &superuse_core::server::ToolCompletionObservation,
+    ) {
+        if is_history_tool(&outcome.tool_name) {
+            return;
+        }
+        self.transport_bits |= transport_bit(transport);
+        self.used_window_modality |= matches!(
+            capture_modality,
+            Some(superuse_core::session::CaptureModality::Window)
+        );
+        self.used_desktop_modality |= matches!(
+            capture_modality,
+            Some(superuse_core::session::CaptureModality::Desktop)
+        );
+        let tool_name = outcome.tool_name.as_str();
+        if tool_name == "escalate_session"
+            && outcome.success
+            && self.capture_scope == superuse_core::CaptureScope::Auto
+        {
+            if let Some(reason) = escalation_reason {
+                self.auto_escalated_to_desktop = true;
+                self.escalation_reason = Some(reason);
+            }
+        }
+        if matches!(tool_name, "start_session" | "end_session") {
+            return;
+        }
+        let used_browser = matches!(
+            tool_name,
+            "get_browser_state"
+                | "browser_prepare"
+                | "browser_navigate"
+                | "browser_click"
+                | "browser_type"
+                | "browser_dialog"
+                | "browser_set_input_files"
+                | "browser_download"
+                | "browser_pointer"
+                | "browser_open_tab"
+                | "browser_close_tab"
+                | "browser_press_key"
+                | "browser_select"
+        );
+        let refused = outcome.refusal_code.is_refusal();
+        let completed_computer_action = computer_action && !refused;
+        self.tool_count = self.tool_count.saturating_add(1);
+        self.computer_action_count = self
+            .computer_action_count
+            .saturating_add(u64::from(completed_computer_action));
+        self.error_count = self.error_count.saturating_add(u64::from(!outcome.success));
+        self.browser_refusal_count = self
+            .browser_refusal_count
+            .saturating_add(u64::from(used_browser && refused));
+        self.had_successful_tool |= outcome.success;
+        self.had_successful_computer_action |= outcome.success && completed_computer_action;
+        self.used_page |= tool_name == "page";
+        self.used_browser |= used_browser;
+        self.used_cursor_tools |= matches!(
+            tool_name,
+            "set_agent_cursor_enabled"
+                | "set_agent_cursor_motion"
+                | "set_agent_cursor_theme"
+                | "get_agent_cursor_state"
+        );
+        self.used_recording |= matches!(
+            tool_name,
+            "start_recording" | "stop_recording" | "replay_trajectory"
+        );
+        self.used_config_write |= tool_name == "set_config";
+    }
+
+    fn ended_properties(
+        &self,
+        reason: superuse_core::session::SessionEndReason,
+        cursor: Option<superuse_core::session::CursorOutcomeObservation>,
+    ) -> Map<String, Value> {
+        use superuse_core::session::{CursorThemeCategory, SessionEndReason};
+        let end_reason = match reason {
+            SessionEndReason::Explicit => "explicit",
+            SessionEndReason::IdleTimeout => "idle_timeout",
+            SessionEndReason::ProcessExit => "process_exit",
+            SessionEndReason::Unknown => "unknown",
+        };
+        let cursor = cursor.unwrap_or(superuse_core::session::CursorOutcomeObservation {
+            observed: false,
+            enabled: false,
+            visible: false,
+            theme: CursorThemeCategory::Unknown,
+            motion_customized: false,
+            active_cursor_count: 0,
+        });
+        let cursor_theme = match cursor.theme {
+            CursorThemeCategory::Default => "default",
+            CursorThemeCategory::Custom => "custom",
+            CursorThemeCategory::Unknown => "unknown",
+        };
+        bounded_properties(&[
+            ("end_reason", Value::String(end_reason.into())),
+            (
+                "duration_bucket",
+                Value::String(agent_session_duration_bucket(self.started.elapsed()).into()),
+            ),
+            (
+                "tool_count_bucket",
+                Value::String(agent_session_count_bucket(self.tool_count).into()),
+            ),
+            (
+                "computer_action_count_bucket",
+                Value::String(agent_session_count_bucket(self.computer_action_count).into()),
+            ),
+            (
+                "error_count_bucket",
+                Value::String(agent_session_error_bucket(self.error_count).into()),
+            ),
+            (
+                "browser_refusal_count_bucket",
+                Value::String(agent_session_error_bucket(self.browser_refusal_count).into()),
+            ),
+            ("had_successful_tool", Value::Bool(self.had_successful_tool)),
+            (
+                "had_successful_computer_action",
+                Value::Bool(self.had_successful_computer_action),
+            ),
+            ("used_page", Value::Bool(self.used_page)),
+            ("used_browser", Value::Bool(self.used_browser)),
+            ("used_cursor_tools", Value::Bool(self.used_cursor_tools)),
+            ("used_recording", Value::Bool(self.used_recording)),
+            ("used_config_write", Value::Bool(self.used_config_write)),
+            (
+                "used_window_modality",
+                Value::Bool(self.used_window_modality),
+            ),
+            (
+                "used_desktop_modality",
+                Value::Bool(self.used_desktop_modality),
+            ),
+            ("cursor_outcome_observed", Value::Bool(cursor.observed)),
+            ("cursor_overlay_enabled_at_end", Value::Bool(cursor.enabled)),
+            ("cursor_theme", Value::String(cursor_theme.into())),
+            (
+                "cursor_motion_customized",
+                Value::Bool(cursor.motion_customized),
+            ),
+            (
+                "multi_cursor_bucket",
+                Value::String(cursor_count_bucket(cursor.active_cursor_count).into()),
+            ),
+            (
+                "observed_multiple_transports",
+                Value::Bool(self.transport_bits.count_ones() > 1),
+            ),
+            (
+                "client_kind",
+                Value::String(session_client_kind(self.client_kind).into()),
+            ),
+            (
+                "capture_scope",
+                Value::String(capture_scope(self.capture_scope).into()),
+            ),
+            (
+                "auto_escalated_to_desktop",
+                Value::Bool(self.auto_escalated_to_desktop),
+            ),
+            (
+                "escalation_reason",
+                Value::String(escalation_reason(self.escalation_reason).into()),
+            ),
+            ("execution_mode", Value::String(execution_mode().into())),
+        ])
+    }
+}
+
+fn transport_bit(transport: Transport) -> u8 {
+    match transport {
+        Transport::Cli => 1,
+        Transport::Daemon => 2,
+        Transport::McpStdio => 4,
+        Transport::McpHttp => 8,
+    }
+}
+
+fn session_transport(transport: superuse_core::session::SessionTransport) -> Transport {
+    match transport {
+        superuse_core::session::SessionTransport::Cli => Transport::Cli,
+        superuse_core::session::SessionTransport::Daemon => Transport::Daemon,
+        superuse_core::session::SessionTransport::McpStdio => Transport::McpStdio,
+        superuse_core::session::SessionTransport::McpHttp => Transport::McpHttp,
+    }
+}
+
+fn session_client_kind(kind: superuse_core::session::SessionClientKind) -> &'static str {
+    match kind {
+        superuse_core::session::SessionClientKind::Cli => "cli",
+        superuse_core::session::SessionClientKind::Direct => "direct",
+        superuse_core::session::SessionClientKind::Mcp => "mcp",
+        superuse_core::session::SessionClientKind::PythonSdk => "python_sdk",
+        superuse_core::session::SessionClientKind::TypescriptSdk => "typescript_sdk",
+    }
+}
+
+fn capture_scope(scope: superuse_core::CaptureScope) -> &'static str {
+    match scope {
+        superuse_core::CaptureScope::Auto => "auto",
+        superuse_core::CaptureScope::Window => "window",
+        superuse_core::CaptureScope::Desktop => "desktop",
+    }
+}
+
+fn escalation_reason(reason: Option<superuse_core::EscalationReason>) -> &'static str {
+    match reason {
+        Some(superuse_core::EscalationReason::AxTreePixelMismatch) => "ax_tree_pixel_mismatch",
+        Some(superuse_core::EscalationReason::BackgroundDeliveryFailed) => {
+            "background_delivery_failed"
+        }
+        Some(superuse_core::EscalationReason::ForegroundIneffective) => "foreground_ineffective",
+        Some(superuse_core::EscalationReason::NoWindowTarget) => "no_window_target",
+        Some(superuse_core::EscalationReason::Other) => "other",
+        None => "not_applicable",
+    }
+}
+
+fn concurrent_sessions_bucket(count: usize) -> &'static str {
+    match count {
+        0 | 1 => "1",
+        2 => "2",
+        3..=5 => "3_5",
+        _ => "gte_6",
+    }
+}
+
+fn cursor_count_bucket(count: usize) -> &'static str {
+    match count {
+        0 | 1 => "1",
+        2 => "2",
+        3..=5 => "3_5",
+        _ => "gte_6",
+    }
+}
+
+fn agent_session_duration_bucket(duration: Duration) -> &'static str {
+    match duration.as_secs() {
+        0..=9 => "lt_10s",
+        10..=59 => "10_59s",
+        60..=299 => "1_4min",
+        300..=1799 => "5_29min",
+        _ => "gte_30min",
+    }
+}
+
+fn agent_session_count_bucket(count: u64) -> &'static str {
+    match count {
+        0 => "0",
+        1..=4 => "1_4",
+        5..=19 => "5_19",
+        20..=99 => "20_99",
+        _ => "gte_100",
+    }
+}
+
+fn agent_session_error_bucket(count: u64) -> &'static str {
+    match count {
+        0 => "0",
+        1 => "1",
+        2..=4 => "2_4",
+        _ => "gte_5",
+    }
+}
+
+impl superuse_core::session::SessionObserver for TelemetryObserver {
+    fn on_session_started(
+        &self,
+        session_id: &str,
+        observation: superuse_core::session::SessionStartObservation,
+    ) {
+        let sessions = AGENT_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
+        if !is_enabled() {
+            sessions.lock().unwrap().remove(session_id);
+            return;
+        }
+        let transport = session_transport(observation.transport);
+        let concurrent = {
+            let mut sessions = sessions.lock().unwrap();
+            if let Some(existing) = sessions.get_mut(session_id) {
+                existing.transport_bits |= transport_bit(transport);
+                return;
+            }
+            if sessions.len() >= MAX_TRACKED_AGENT_SESSIONS {
+                return;
+            }
+            sessions.insert(
+                session_id.to_owned(),
+                AgentSessionState::new(
+                    transport,
+                    observation.client_kind,
+                    observation.capture_scope,
+                ),
+            );
+            sessions.len()
+        };
+        let declaration = match observation.declaration {
+            superuse_core::session::SessionDeclaration::StartSession => "start_session",
+            superuse_core::session::SessionDeclaration::ImplicitFirstAction => {
+                "implicit_first_action"
+            }
+        };
+        capture_bounded(
+            event::AGENT_SESSION_STARTED,
+            bounded_properties(&[
+                ("declaration", Value::String(declaration.into())),
+                ("revived", Value::Bool(observation.revived)),
+                (
+                    "concurrent_sessions_bucket",
+                    Value::String(concurrent_sessions_bucket(concurrent).into()),
+                ),
+                ("entry_transport", Value::String(transport.as_str().into())),
+                (
+                    "client_kind",
+                    Value::String(session_client_kind(observation.client_kind).into()),
+                ),
+                (
+                    "capture_scope",
+                    Value::String(capture_scope(observation.capture_scope).into()),
+                ),
+                ("execution_mode", Value::String(execution_mode().into())),
+            ]),
+            transport,
+        );
+    }
+
+    fn on_tool_completed(
+        &self,
+        session_id: &str,
+        transport: superuse_core::session::SessionTransport,
+        computer_action: bool,
+        capture_modality: Option<superuse_core::session::CaptureModality>,
+        escalation_reason: Option<superuse_core::EscalationReason>,
+        outcome: &superuse_core::server::ToolCompletionObservation,
+    ) {
+        let sessions = AGENT_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut sessions = sessions.lock().unwrap();
+        if !is_enabled() {
+            sessions.remove(session_id);
+            return;
+        }
+        if let Some(state) = sessions.get_mut(session_id) {
+            state.observe(
+                session_transport(transport),
+                computer_action,
+                capture_modality,
+                escalation_reason,
+                outcome,
+            );
+        }
+    }
+
+    fn on_session_ended(
+        &self,
+        session_id: &str,
+        reason: superuse_core::session::SessionEndReason,
+        cursor: Option<superuse_core::session::CursorOutcomeObservation>,
+    ) {
+        let state = AGENT_SESSIONS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .remove(session_id);
+        if !is_enabled() {
+            return;
+        }
+        let Some(state) = state else {
+            return;
+        };
+        let transport = state.entry_transport;
+        capture_bounded(
+            event::AGENT_SESSION_ENDED,
+            state.ended_properties(reason, cursor),
+            transport,
+        );
+    }
+}
+
+static MCP_SESSION_OBSERVED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn mcp_session_observation_key(transport: Transport, mcp_client: &str) -> String {
+    match transport {
+        Transport::McpHttp => format!("mcp_http:{mcp_client}"),
+        _ => transport.as_str().to_owned(),
+    }
+}
+
+pub(crate) fn capture_mcp_session_started(
+    metadata: superuse_core::protocol::InitializeMetadata,
+    transport: Transport,
+) {
+    if !is_enabled() {
+        return;
+    }
+    let mcp_client = normalize_client(metadata.client_name.as_deref());
+    let observation_key = mcp_session_observation_key(transport, &mcp_client);
+    let observed = MCP_SESSION_OBSERVED.get_or_init(|| Mutex::new(HashSet::new()));
+    if !observed.lock().unwrap().insert(observation_key) {
+        return;
+    }
+
+    let context = metadata.reported_agent_context.unwrap_or_default();
+    let capabilities = metadata.capability_flags;
+    capture_bounded(
+        event::MCP_SESSION_STARTED,
+        bounded_properties(&[
+            ("mcp_client", Value::String(mcp_client)),
+            (
+                "mcp_client_version_major",
+                Value::String(version_major(metadata.client_version.as_deref())),
+            ),
+            (
+                "protocol_version",
+                Value::String(normalize_protocol(metadata.protocol_version.as_deref())),
+            ),
+            ("capability_tools", Value::Bool(capabilities.tools)),
+            ("capability_roots", Value::Bool(capabilities.roots)),
+            ("capability_sampling", Value::Bool(capabilities.sampling)),
+            (
+                "capability_experimental",
+                Value::Bool(capabilities.experimental),
+            ),
+            (
+                "capability_elicitation_form",
+                Value::Bool(capabilities.elicitation_form),
+            ),
+            (
+                "capability_elicitation_url",
+                Value::Bool(capabilities.elicitation_url),
+            ),
+            (
+                "reported_provider",
+                Value::String(normalize_provider(context.provider.as_deref())),
+            ),
+            (
+                "reported_model",
+                Value::String(normalize_model(context.model.as_deref())),
+            ),
+            (
+                "reported_agent",
+                Value::String(normalize_client(context.agent_name.as_deref())),
+            ),
+            (
+                "reported_agent_version_major",
+                Value::String(version_major(context.agent_version.as_deref())),
+            ),
+            ("execution_mode", Value::String(execution_mode().into())),
+        ]),
+        transport,
+    );
+}
+
+pub(crate) fn capture_tool_completed(
+    outcome: superuse_core::server::ToolCompletionObservation,
+    transport: Transport,
+) {
+    if is_history_tool(&outcome.tool_name) {
+        return;
+    }
+    let is_first_value_candidate =
+        outcome.computer_action && outcome.success && !outcome.refusal_code.is_refusal();
+    if !is_enabled() || !should_capture_tool_completion(Instant::now(), is_first_value_candidate) {
+        return;
+    }
+    let mut properties = tool_completion_properties(outcome);
+    properties.insert(
+        "execution_mode".into(),
+        Value::String(execution_mode().into()),
+    );
+    capture_bounded(event::MCP_TOOL_COMPLETED, properties, transport);
+}
+
+fn is_history_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "history_status" | "history_query")
+}
+
+#[derive(Debug)]
+struct ToolTelemetryRateLimit {
+    window_started: Instant,
+    captured: usize,
+    captured_value_event: bool,
+}
+
+impl ToolTelemetryRateLimit {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_started: now,
+            captured: 0,
+            captured_value_event: false,
+        }
+    }
+
+    fn allow(&mut self, now: Instant, is_value_event: bool) -> bool {
+        if now.duration_since(self.window_started) >= TOOL_TELEMETRY_WINDOW {
+            self.window_started = now;
+            self.captured = 0;
+            self.captured_value_event = false;
+        }
+        if self.captured >= TOOL_TELEMETRY_LIMIT_PER_HOUR {
+            if !is_value_event || self.captured_value_event {
+                return false;
+            }
+            self.captured_value_event = true;
+            return true;
+        }
+        self.captured += 1;
+        self.captured_value_event |= is_value_event;
+        true
+    }
+}
+
+static TOOL_TELEMETRY_RATE_LIMIT: OnceLock<Mutex<ToolTelemetryRateLimit>> = OnceLock::new();
+
+fn should_capture_tool_completion(now: Instant, is_value_event: bool) -> bool {
+    TOOL_TELEMETRY_RATE_LIMIT
+        .get_or_init(|| Mutex::new(ToolTelemetryRateLimit::new(now)))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .allow(now, is_value_event)
+}
+
+fn tool_completion_properties(
+    outcome: superuse_core::server::ToolCompletionObservation,
+) -> Map<String, Value> {
+    use superuse_core::server::{DurationBucket, OutputSizeBucket, OutputType, ToolErrorClass};
+    let tool_name = if matches!(
+        outcome.error_class,
+        ToolErrorClass::UnknownTool | ToolErrorClass::InvalidParams
+    ) {
+        "other".to_owned()
+    } else {
+        // Re-checked against the compile-time registry, as on the CLI
+        // path: an extension or dynamically named tool is `other`.
+        fixed_tool_name(&outcome.tool_name)
+    };
+    let error_class = match outcome.error_class {
+        ToolErrorClass::None => "none",
+        ToolErrorClass::InvalidParams => "invalid_params",
+        ToolErrorClass::UnknownTool => "unknown_tool",
+        ToolErrorClass::PermissionDenied => "permission_denied",
+        ToolErrorClass::BackgroundUnavailable => "background_unavailable",
+        ToolErrorClass::TransportError => "transport_error",
+        ToolErrorClass::InternalError => "internal_error",
+    };
+    let duration_bucket = match outcome.duration_bucket {
+        DurationBucket::Under10Ms => "lt_10ms",
+        DurationBucket::Ms10To49 => "10_49ms",
+        DurationBucket::Ms50To249 => "50_249ms",
+        DurationBucket::Ms250To999 => "250_999ms",
+        DurationBucket::Ms1000To4999 => "1_4s",
+        DurationBucket::Ms5000OrMore => "gte_5s",
+    };
+    let output_type = match outcome.output_type {
+        OutputType::Empty => "empty",
+        OutputType::Text => "text",
+        OutputType::Image => "image",
+        OutputType::Mixed => "mixed",
+        OutputType::Unknown => "unknown",
+    };
+    let output_size_bucket = match outcome.output_size_bucket {
+        OutputSizeBucket::Empty => "0",
+        OutputSizeBucket::Under1KiB => "lt_1kib",
+        OutputSizeBucket::KiB1To9 => "1_9kib",
+        OutputSizeBucket::KiB10To99 => "10_99kib",
+        OutputSizeBucket::KiB100To1023 => "100_1023kib",
+        OutputSizeBucket::MiB1OrMore => "gte_1mib",
+    };
+    bounded_properties(&[
+        ("tool_name", Value::String(tool_name)),
+        (
+            "operation",
+            Value::String(outcome.operation.as_str().into()),
+        ),
+        ("computer_action", Value::Bool(outcome.computer_action)),
+        ("success", Value::Bool(outcome.success)),
+        ("error_class", Value::String(error_class.into())),
+        (
+            "refusal_code",
+            Value::String(outcome.refusal_code.as_str().into()),
+        ),
+        ("duration_bucket", Value::String(duration_bucket.into())),
+        ("output_type", Value::String(output_type.into())),
+        (
+            "output_size_bucket",
+            Value::String(output_size_bucket.into()),
+        ),
+    ])
+}
+
+pub(crate) fn capture_mcp_startup_completed(
+    path: &'static str,
+    daemon: &'static str,
+    success: bool,
+    elapsed: Duration,
+) {
+    let path = match path {
+        "daemon_proxy" => "daemon_proxy",
+        _ => "unknown",
+    };
+    let daemon = match daemon {
+        "not_applicable" => "not_applicable",
+        "already_running" => "already_running",
+        "launched" => "launched",
+        "launch_failed" => "launch_failed",
+        "launch_timeout" => "launch_timeout",
+        "unreachable" => "unreachable",
+        "unsupported_relaunch" => "unsupported_relaunch",
+        _ => "unknown",
+    };
+    capture_bounded(
+        event::MCP_STARTUP_COMPLETED,
+        bounded_properties(&[
+            ("path", Value::String(path.into())),
+            ("daemon", Value::String(daemon.into())),
+            ("success", Value::Bool(success)),
+            (
+                "duration_bucket",
+                Value::String(duration_bucket(elapsed).into()),
+            ),
+            ("execution_mode", Value::String(execution_mode().into())),
+        ]),
+        Transport::McpStdio,
+    );
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn capture_permissions_gate_completed(
+    missing_accessibility: bool,
+    missing_screen_recording: bool,
+    panel_shown: bool,
+    dismissed: bool,
+    resolution: &'static str,
+    elapsed: Duration,
+) {
+    let resolution = match resolution {
+        "granted" => "granted",
+        "dismissed_then_granted" => "dismissed_then_granted",
+        "timeout" => "timeout",
+        _ => "unknown",
+    };
+    capture_bounded(
+        event::PERMISSIONS_GATE_COMPLETED,
+        bounded_properties(&[
+            ("missing_accessibility", Value::Bool(missing_accessibility)),
+            (
+                "missing_screen_recording",
+                Value::Bool(missing_screen_recording),
+            ),
+            ("panel_shown", Value::Bool(panel_shown)),
+            ("dismissed", Value::Bool(dismissed)),
+            ("resolution", Value::String(resolution.into())),
+            (
+                "duration_bucket",
+                Value::String(duration_bucket(elapsed).into()),
+            ),
+        ]),
+        Transport::Daemon,
+    );
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const fn permissions_gate_resolution(
+    gate_failed: bool,
+    dismissed: bool,
+) -> &'static str {
+    if gate_failed {
+        "timeout"
+    } else if dismissed {
+        "dismissed_then_granted"
+    } else {
+        "granted"
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn capture_permissions_gate_started(
+    missing_accessibility: bool,
+    missing_screen_recording: bool,
+) {
+    capture_bounded(
+        event::PERMISSIONS_GATE_STARTED,
+        bounded_properties(&[
+            ("missing_accessibility", Value::Bool(missing_accessibility)),
+            (
+                "missing_screen_recording",
+                Value::Bool(missing_screen_recording),
+            ),
+        ]),
+        Transport::Daemon,
+    );
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn capture_permissions_gate_dismissed(
+    missing_accessibility: bool,
+    missing_screen_recording: bool,
+    elapsed: Duration,
+) {
+    capture_bounded(
+        event::PERMISSIONS_GATE_DISMISSED,
+        bounded_properties(&[
+            ("missing_accessibility", Value::Bool(missing_accessibility)),
+            (
+                "missing_screen_recording",
+                Value::Bool(missing_screen_recording),
+            ),
+            (
+                "duration_bucket",
+                Value::String(duration_bucket(elapsed).into()),
+            ),
+        ]),
+        Transport::Daemon,
+    );
+}
+
+fn normalize_client(value: Option<&str>) -> String {
+    let normalized = value.unwrap_or("").trim().to_ascii_lowercase();
+    for (needle, canonical) in [
+        ("claude", "claude_code"),
+        ("codex", "codex"),
+        ("cursor", "cursor"),
+        ("windsurf", "windsurf"),
+        ("vscode", "vscode"),
+        ("visual studio code", "vscode"),
+        ("zed", "zed"),
+        ("openclaw", "openclaw"),
+        ("opencode", "opencode"),
+        ("hermes", "hermes"),
+    ] {
+        if normalized.contains(needle) {
+            return canonical.into();
+        }
+    }
+    if normalized == "pi" || normalized.starts_with("pi/") || normalized.starts_with("pi ") {
+        return "pi".into();
+    }
+    if normalized.is_empty() {
+        "unknown".into()
+    } else {
+        "other".into()
+    }
+}
+
+fn normalize_provider(value: Option<&str>) -> String {
+    match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "anthropic" => "anthropic".into(),
+        "openai" => "openai".into(),
+        "google" | "google-ai" | "google_vertex" => "google".into(),
+        "xai" | "x.ai" => "xai".into(),
+        "amazon" | "aws" | "bedrock" => "amazon".into(),
+        "microsoft" | "azure" | "azure-openai" => "microsoft".into(),
+        "" => "unknown".into(),
+        _ => "custom".into(),
+    }
+}
+
+fn normalize_model(value: Option<&str>) -> String {
+    let raw = value.unwrap_or("").trim().to_ascii_lowercase();
+    if raw.is_empty() {
+        return "unknown".into();
+    }
+    let category = if raw.starts_with("claude-") {
+        if raw.contains("opus") {
+            "claude_opus"
+        } else if raw.contains("sonnet") {
+            "claude_sonnet"
+        } else if raw.contains("haiku") {
+            "claude_haiku"
+        } else {
+            "claude_other"
+        }
+    } else if raw.starts_with("gpt-5") {
+        "gpt_5"
+    } else if raw.starts_with("gpt-4.1") {
+        "gpt_4_1"
+    } else if raw.starts_with("gpt-4o") {
+        "gpt_4o"
+    } else if raw.starts_with("gpt-4") {
+        "gpt_4"
+    } else if raw == "o1" || raw.starts_with("o1-") {
+        "openai_o1"
+    } else if raw == "o3" || raw.starts_with("o3-") {
+        "openai_o3"
+    } else if raw == "o4" || raw.starts_with("o4-") {
+        "openai_o4"
+    } else if raw.starts_with("gemini-") {
+        if raw.contains("flash") {
+            "gemini_flash"
+        } else if raw.contains("pro") {
+            "gemini_pro"
+        } else {
+            "gemini_other"
+        }
+    } else if raw.starts_with("nova-") {
+        "amazon_nova"
+    } else if raw.starts_with("phi-") {
+        "microsoft_phi"
+    } else {
+        "custom"
+    };
+    category.into()
+}
+
+fn normalize_protocol(value: Option<&str>) -> String {
+    match value {
+        Some(value @ ("2024-11-05" | "2025-03-26" | "2025-06-18" | "2025-11-25")) => {
+            value.to_owned()
+        }
+        _ => "unknown".into(),
+    }
+}
+
+fn version_major(value: Option<&str>) -> String {
+    let major = value
+        .unwrap_or("")
+        .split(|character: char| !character.is_ascii_digit())
+        .find(|part| !part.is_empty())
+        .unwrap_or("unknown");
+    if major.len() <= 4 {
+        major.to_owned()
+    } else {
+        "unknown".into()
+    }
+}
+
+pub fn ensure_first_run_registration() {
+    if !is_enabled() || lifecycle_is_current() || lifecycle_retry_deferred() {
+        return;
+    }
+    let Some(home) = telemetry_home_dir() else {
+        return;
+    };
+    let Some(_lifecycle_lock) = try_lifecycle_lock(&home) else {
+        return;
+    };
+    if !is_enabled() || lifecycle_retry_deferred() {
+        return;
+    }
+    if lifecycle_is_current() {
+        let _ = remove_file_if_exists(&home.join(TELEMETRY_INSTALL_CHANNEL_FILE_NAME));
+        return;
+    }
+    eprintln!(
+        "Cua Driver sends content-free product telemetry by default. Run `cua-driver telemetry disable` to stop it; `cua-driver telemetry status` shows the current setting."
+    );
+    capture_install_locked(&home, &mut post_to_posthog);
+}
+
+/// Run lifecycle delivery in a hidden worker before CLI parsing. The normal
+/// process only spawns this worker, so a blackholed telemetry endpoint cannot
+/// delay MCP initialization, daemon startup, or finite CLI commands.
+pub(crate) fn run_lifecycle_worker_if_requested() -> bool {
+    if !parse_env_bool(ENV_LIFECYCLE_WORKER).unwrap_or(false) {
+        return false;
+    }
+    ensure_first_run_registration();
+    true
+}
+
+pub(crate) fn spawn_first_run_registration_worker() {
+    if !is_enabled() || lifecycle_is_current() || lifecycle_retry_deferred() {
+        return;
+    }
+    eprintln!(
+        "Cua Driver sends content-free product telemetry by default. Run `cua-driver telemetry disable` to stop it; `cua-driver telemetry status` shows the current setting."
+    );
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let _ = std::process::Command::new(executable)
+        .env(ENV_LIFECYCLE_WORKER, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+pub fn capture_install() {
+    capture_install_with_poster(post_to_posthog);
+}
+
+fn capture_install_with_poster<F>(mut post: F)
+where
+    F: FnMut(&Value) -> Result<u16, String>,
+{
+    if !is_enabled() || lifecycle_retry_deferred() {
+        return;
+    }
+    let Some(home) = telemetry_home_dir() else {
+        return;
+    };
+    let Some(_lifecycle_lock) = try_lifecycle_lock(&home) else {
+        return;
+    };
+    if !is_enabled() || lifecycle_is_current() || lifecycle_retry_deferred() {
+        return;
+    }
+    capture_install_locked(&home, &mut post);
+}
+
+fn capture_install_locked<F>(home: &Path, post: &mut F)
+where
+    F: FnMut(&Value) -> Result<u16, String>,
+{
+    let Some(identity) = get_or_create_install_id() else {
+        return;
+    };
+    let channel = install_channel();
+    let registration_marker = home.join(INSTALLATION_RECORDED_FILE_NAME);
+
+    if !registration_marker.exists() {
+        let payload = build_payload(
+            event::INSTALLATION_REGISTERED,
+            &lifecycle_properties(channel),
+            &identity,
+            Transport::Cli,
+        );
+        if post_success(post, &payload, event::INSTALLATION_REGISTERED) {
+            if write_marker(&registration_marker).is_err() {
+                defer_lifecycle_retry(home);
+                return;
+            }
+        } else {
+            defer_lifecycle_retry(home);
+            return;
+        }
+    }
+
+    let version = release_version();
+    let Some(release_marker) = release_marker_path(&version) else {
+        return;
+    };
+    if release_marker.exists() {
+        return;
+    }
+    let payload = build_payload(
+        event::RELEASE_INSTALLED,
+        &lifecycle_properties(channel),
+        &identity,
+        Transport::Cli,
+    );
+    if post_success(post, &payload, event::RELEASE_INSTALLED) {
+        if write_marker(&release_marker).is_ok() {
+            let _ = remove_file_if_exists(&home.join(TELEMETRY_RETRY_AFTER_FILE_NAME));
+            let _ = remove_file_if_exists(&home.join(TELEMETRY_INSTALL_CHANNEL_FILE_NAME));
+        } else {
+            defer_lifecycle_retry(home);
+        }
+    } else {
+        defer_lifecycle_retry(home);
+    }
+}
+
+fn lifecycle_is_current() -> bool {
+    let registered = marker_path(INSTALLATION_RECORDED_FILE_NAME).is_some_and(|path| path.exists());
+    let release = release_marker_path(&release_version()).is_some_and(|path| path.exists());
+    registered && release
+}
+
+fn lifecycle_retry_deferred() -> bool {
+    let Some(path) = marker_path(TELEMETRY_RETRY_AFTER_FILE_NAME) else {
+        return false;
+    };
+    let Some(retry_after) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+    else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(retry_after);
+    retry_after > now && retry_after.saturating_sub(now) <= LIFECYCLE_RETRY_BACKOFF_SECS
+}
+
+fn defer_lifecycle_retry(home: &Path) {
+    let retry_after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| {
+            duration
+                .as_secs()
+                .saturating_add(LIFECYCLE_RETRY_BACKOFF_SECS)
+        });
+    if let Ok(retry_after) = retry_after {
+        let _ = std::fs::write(
+            home.join(TELEMETRY_RETRY_AFTER_FILE_NAME),
+            retry_after.to_string(),
+        );
+    }
+}
+
+fn post_success<F>(post: &mut F, payload: &Value, event_name: &str) -> bool
+where
+    F: FnMut(&Value) -> Result<u16, String>,
+{
+    match post(payload) {
+        Ok(status) if (200..300).contains(&status) => true,
+        Ok(status) => {
+            debug_log(format_args!(
+                "{event_name} returned {status}; marker not written"
+            ));
+            false
+        }
+        Err(error) => {
+            debug_log(format_args!(
+                "{event_name} failed: {error}; marker not written"
+            ));
+            false
+        }
+    }
+}
+
+pub(crate) fn capture_bounded(
+    event_name: &'static str,
+    properties: Map<String, Value>,
+    transport: Transport,
+) {
+    if !is_enabled() {
+        return;
+    }
+    let Some(identity) = get_or_create_install_id() else {
+        return;
+    };
+    let payload = build_payload(event_name, &properties, &identity, transport);
+    spawn_payload(event_name, payload);
+}
+
+/// Record an explicit or freshness-bounded update check. A detached worker
+/// owns delivery because CLI checks are one-shot processes and must not wait
+/// on PostHog before returning to the user.
+pub(crate) fn capture_update_checked(
+    source: UpdateCheckSource,
+    outcome: UpdateCheckOutcome,
+    target_version: Option<&str>,
+    cache_hit: bool,
+) {
+    spawn_update_event_worker(
+        event::UPDATE_CHECKED,
+        Some(source.as_str()),
+        Some(outcome.as_str()),
+        target_version,
+        Some(cache_hit),
+        None,
+        None,
+        None,
+    );
+}
+
+pub(crate) fn capture_update_apply_started(target_version: &str, daemon_was_running: bool) {
+    spawn_update_event_worker(
+        event::UPDATE_APPLY_STARTED,
+        None,
+        None,
+        Some(target_version),
+        None,
+        Some(daemon_was_running),
+        None,
+        None,
+    );
+}
+
+pub(crate) fn capture_update_apply_completed(
+    target_version: Option<&str>,
+    outcome: UpdateApplyOutcome,
+    failure_class: UpdateFailureClass,
+    daemon_was_running: bool,
+    elapsed: Duration,
+) {
+    spawn_update_event_worker(
+        event::UPDATE_APPLY_COMPLETED,
+        None,
+        Some(outcome.as_str()),
+        target_version,
+        None,
+        Some(daemon_was_running),
+        Some(failure_class.as_str()),
+        Some(elapsed),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_update_event_worker(
+    event_name: &'static str,
+    source: Option<&str>,
+    outcome: Option<&str>,
+    target_version: Option<&str>,
+    cache_hit: Option<bool>,
+    daemon_was_running: Option<bool>,
+    failure_class: Option<&str>,
+    elapsed: Option<Duration>,
+) {
+    if !is_enabled() {
+        return;
+    }
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let mut worker = std::process::Command::new(executable);
+    worker
+        .env(ENV_UPDATE_EVENT_WORKER, "1")
+        .env(ENV_UPDATE_EVENT_NAME, event_name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(source) = source {
+        worker.env(ENV_UPDATE_SOURCE, source);
+    }
+    if let Some(outcome) = outcome {
+        worker.env(ENV_UPDATE_OUTCOME, outcome);
+    }
+    if let Some(version) = target_version.and_then(strict_release_version) {
+        worker.env(ENV_UPDATE_TARGET_VERSION, version);
+    }
+    if let Some(cache_hit) = cache_hit {
+        worker.env(ENV_UPDATE_CACHE_HIT, if cache_hit { "1" } else { "0" });
+    }
+    if let Some(daemon_was_running) = daemon_was_running {
+        worker.env(
+            ENV_UPDATE_DAEMON_WAS_RUNNING,
+            if daemon_was_running { "1" } else { "0" },
+        );
+    }
+    if let Some(failure_class) = failure_class {
+        worker.env(ENV_UPDATE_FAILURE_CLASS, failure_class);
+    }
+    if let Some(elapsed) = elapsed {
+        worker.env(ENV_UPDATE_DURATION_MS, elapsed.as_millis().to_string());
+    }
+    let _ = worker.spawn();
+}
+
+/// Run the hidden update-event delivery worker before CLI parsing. Every
+/// environment value is revalidated into a closed enum or strict SemVer before
+/// it can enter a payload.
+pub(crate) fn run_update_event_worker_if_requested() -> bool {
+    if !parse_env_bool(ENV_UPDATE_EVENT_WORKER).unwrap_or(false) {
+        return false;
+    }
+    let event_name = std::env::var(ENV_UPDATE_EVENT_NAME).unwrap_or_default();
+    let target_version = std::env::var(ENV_UPDATE_TARGET_VERSION)
+        .ok()
+        .and_then(|value| strict_release_version(&value))
+        .unwrap_or_else(|| "unknown".into());
+    let properties = match event_name.as_str() {
+        event::UPDATE_CHECKED => {
+            let source = match std::env::var(ENV_UPDATE_SOURCE).as_deref() {
+                Ok("background") => "background",
+                Ok("cli") => "cli",
+                Ok("mcp") => "mcp",
+                _ => return true,
+            };
+            let outcome = match std::env::var(ENV_UPDATE_OUTCOME).as_deref() {
+                Ok("up_to_date") => "up_to_date",
+                Ok("available") => "available",
+                Ok("unavailable") => "unavailable",
+                _ => return true,
+            };
+            bounded_properties(&[
+                ("source", Value::String(source.into())),
+                ("outcome", Value::String(outcome.into())),
+                ("target_version", Value::String(target_version)),
+                (
+                    "cache_hit",
+                    Value::Bool(parse_env_bool(ENV_UPDATE_CACHE_HIT).unwrap_or(false)),
+                ),
+            ])
+        }
+        event::UPDATE_APPLY_STARTED => bounded_properties(&[
+            ("target_version", Value::String(target_version)),
+            (
+                "daemon_was_running",
+                Value::Bool(parse_env_bool(ENV_UPDATE_DAEMON_WAS_RUNNING).unwrap_or(false)),
+            ),
+        ]),
+        event::UPDATE_APPLY_COMPLETED => {
+            let outcome = match std::env::var(ENV_UPDATE_OUTCOME).as_deref() {
+                Ok("installed") => "installed",
+                Ok("already_current") => "already_current",
+                Ok("failed") => "failed",
+                _ => return true,
+            };
+            let failure_class = match std::env::var(ENV_UPDATE_FAILURE_CLASS).as_deref() {
+                Ok("none") => "none",
+                Ok("check_failed") => "check_failed",
+                Ok("installer_exit") => "installer_exit",
+                Ok("installer_launch") => "installer_launch",
+                _ => return true,
+            };
+            let elapsed = std::env::var(ENV_UPDATE_DURATION_MS)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_millis)
+                .unwrap_or_default();
+            bounded_properties(&[
+                ("target_version", Value::String(target_version)),
+                ("outcome", Value::String(outcome.into())),
+                ("failure_class", Value::String(failure_class.into())),
+                (
+                    "daemon_was_running",
+                    Value::Bool(parse_env_bool(ENV_UPDATE_DAEMON_WAS_RUNNING).unwrap_or(false)),
+                ),
+                (
+                    "duration_bucket",
+                    Value::String(duration_bucket(elapsed).into()),
+                ),
+            ])
+        }
+        _ => return true,
+    };
+    if !is_enabled() {
+        return true;
+    }
+    let Some(identity) = get_or_create_install_id() else {
+        return true;
+    };
+    let payload = build_payload(&event_name, &properties, &identity, Transport::Cli);
+    if let Err(error) =
+        post_to_posthog_with_timeout(&payload, Duration::from_secs(POSTHOG_TIMEOUT_SECS))
+    {
+        debug_log(format_args!("{event_name} failed: {error}"));
+    }
+    true
+}
+
+/// Record a finite CLI command only after its outcome is known. This is
+/// synchronous with a short timeout because one-shot processes may exit before
+/// a detached request is delivered.
+pub(crate) fn capture_cli_completed(
+    command: &'static str,
+    tool_name: Option<&str>,
+    computer_action: bool,
+    operation: &str,
+    client_kind: &str,
+    exit_code: i32,
+    elapsed: Duration,
+) {
+    if !is_enabled() {
+        return;
+    }
+    let command = match command {
+        "list_tools" => "list_tools",
+        "describe" => "describe",
+        "mcp_config" => "mcp_config",
+        "manifest" => "manifest",
+        "call" => "call",
+        "stop" => "stop",
+        "status" => "status",
+        "recording" => "recording",
+        "history" => "history",
+        "dump_docs" => "dump_docs",
+        "update" => "update",
+        "check_update" => "check_update",
+        "doctor" => "doctor",
+        "diagnose" => "diagnose",
+        "permissions" => "permissions",
+        "autostart" => "autostart",
+        "skills" => "skills",
+        "extension" => "extension",
+        "config" => "config",
+        _ => "other",
+    };
+    let success = exit_code == 0;
+    let tool_name = if command == "call" {
+        fixed_tool_name(tool_name.unwrap_or(""))
+    } else {
+        "not_applicable".into()
+    };
+    let operation = fixed_cli_operation(command, operation);
+    let client_kind = fixed_cli_client_kind(command, client_kind);
+    let exit_class = match exit_code {
+        0 => "success",
+        1 => "tool_error",
+        64 => "invalid_input",
+        _ => "other",
+    };
+    let Some(identity) = get_or_create_install_id() else {
+        return;
+    };
+    let payload = build_payload(
+        event::CLI_COMPLETED,
+        &bounded_properties(&[
+            ("command", Value::String(command.into())),
+            ("tool_name", Value::String(tool_name)),
+            ("operation", Value::String(operation.into())),
+            (
+                "computer_action",
+                Value::Bool(command == "call" && computer_action),
+            ),
+            ("client_kind", Value::String(client_kind.into())),
+            ("success", Value::Bool(success)),
+            ("exit_class", Value::String(exit_class.into())),
+            (
+                "duration_bucket",
+                Value::String(duration_bucket(elapsed).into()),
+            ),
+        ]),
+        &identity,
+        Transport::Cli,
+    );
+    if let Err(error) =
+        post_to_posthog_with_timeout(&payload, Duration::from_secs(POSTHOG_TIMEOUT_SECS))
+    {
+        debug_log(format_args!("{} failed: {error}", event::CLI_COMPLETED));
+    }
+}
+
+pub(crate) fn is_wrapped_cli_child() -> bool {
+    parse_env_bool(ENV_CLI_WRAPPED_CHILD).unwrap_or(false)
+}
+
+pub(crate) fn cli_wrapped_child_env() -> &'static str {
+    ENV_CLI_WRAPPED_CHILD
+}
+
+/// Run the hidden delivery worker before CLI parsing. The foreground parent
+/// never waits on this process, so telemetry delivery cannot add network
+/// latency to one-shot commands.
+pub(crate) fn run_cli_completion_worker_if_requested() -> bool {
+    if !parse_env_bool(ENV_CLI_COMPLETION_WORKER).unwrap_or(false) {
+        return false;
+    }
+    let command = std::env::var(ENV_CLI_COMPLETION_COMMAND).unwrap_or_default();
+    let exit_code = std::env::var(ENV_CLI_COMPLETION_EXIT_CODE)
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(1);
+    let elapsed = std::env::var(ENV_CLI_COMPLETION_DURATION_MS)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_default();
+    let command = fixed_cli_command(&command);
+    let tool_name = std::env::var(ENV_CLI_COMPLETION_TOOL).ok();
+    let computer_action = parse_env_bool(ENV_CLI_COMPLETION_COMPUTER_ACTION).unwrap_or(false);
+    let operation = std::env::var(ENV_CLI_COMPLETION_OPERATION).unwrap_or_default();
+    let client_kind = std::env::var(ENV_CLI_COMPLETION_CLIENT_KIND).unwrap_or_default();
+    capture_cli_completed(
+        command,
+        tool_name.as_deref(),
+        computer_action,
+        &operation,
+        &client_kind,
+        exit_code,
+        elapsed,
+    );
+    true
+}
+
+pub(crate) fn spawn_cli_completion_worker(
+    command: &'static str,
+    tool_name: Option<&str>,
+    computer_action: bool,
+    operation: &str,
+    client_kind: &str,
+    exit_code: i32,
+    elapsed: Duration,
+) {
+    if !is_enabled() {
+        return;
+    }
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let mut worker = std::process::Command::new(executable);
+    worker
+        .env(ENV_CLI_COMPLETION_WORKER, "1")
+        .env(ENV_CLI_COMPLETION_COMMAND, fixed_cli_command(command))
+        .env(
+            ENV_CLI_COMPLETION_COMPUTER_ACTION,
+            if computer_action { "1" } else { "0" },
+        )
+        .env(
+            ENV_CLI_COMPLETION_OPERATION,
+            fixed_cli_operation(command, operation),
+        )
+        .env(
+            ENV_CLI_COMPLETION_CLIENT_KIND,
+            fixed_cli_client_kind(command, client_kind),
+        )
+        .env(ENV_CLI_COMPLETION_EXIT_CODE, exit_code.to_string())
+        .env(
+            ENV_CLI_COMPLETION_DURATION_MS,
+            elapsed.as_millis().to_string(),
+        );
+    if let Some(tool_name) = tool_name {
+        worker.env(ENV_CLI_COMPLETION_TOOL, fixed_tool_name(tool_name));
+    }
+    let _ = worker
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+fn fixed_cli_command(command: &str) -> &'static str {
+    match command {
+        "list_tools" => "list_tools",
+        "describe" => "describe",
+        "mcp_config" => "mcp_config",
+        "manifest" => "manifest",
+        "call" => "call",
+        "stop" => "stop",
+        "status" => "status",
+        "recording" => "recording",
+        "history" => "history",
+        "dump_docs" => "dump_docs",
+        "update" => "update",
+        "check_update" => "check_update",
+        "doctor" => "doctor",
+        "diagnose" => "diagnose",
+        "permissions" => "permissions",
+        "autostart" => "autostart",
+        "skills" => "skills",
+        "extension" => "extension",
+        "config" => "config",
+        _ => "other",
+    }
+}
+
+fn fixed_tool_name(tool_name: &str) -> String {
+    if tool_name == "type_text_chars" {
+        return "type_text".into();
+    }
+    let tool_name = superuse_core::tool::renamed_tool(tool_name).unwrap_or(tool_name);
+    if superuse_core::tool::default_capabilities_for(tool_name).is_empty() {
+        "other".into()
+    } else {
+        // Every canonical tool is asserted by superuse-core tests to have a
+        // capability entry. Returning the original value is therefore safe:
+        // arbitrary argv can reach this branch only when it matches that
+        // compile-time registry vocabulary exactly.
+        tool_name.to_owned()
+    }
+}
+
+fn fixed_cli_operation(command: &str, operation: &str) -> &'static str {
+    match command {
+        "recording" => match operation {
+            "start" => "start",
+            "stop" => "stop",
+            "status" => "status",
+            "render" => "render",
+            _ => "other",
+        },
+        "history" => match operation {
+            "enable" => "enable",
+            "disable" => "disable",
+            "pause" => "pause",
+            "resume" => "resume",
+            "status" => "status",
+            "flush" => "flush",
+            "list" => "list",
+            "show" => "show",
+            "delete" => "delete",
+            _ => "other",
+        },
+        "permissions" => match operation {
+            "status" => "status",
+            "grant" => "grant",
+            _ => "other",
+        },
+        "config" => match operation {
+            "show" => "show",
+            "get" => "get",
+            "set" => "set",
+            "reset" => "reset",
+            _ => "other",
+        },
+        "autostart" => match operation {
+            "enable" => "enable",
+            "disable" => "disable",
+            "status" => "status",
+            "kick" => "kick",
+            _ => "other",
+        },
+        "skills" => match operation {
+            "install" => "install",
+            "update" => "update",
+            "uninstall" => "uninstall",
+            "status" => "status",
+            "path" => "path",
+            _ => "other",
+        },
+        "extension" => match operation {
+            "list" => "list",
+            "info" => "info",
+            "status" => "status",
+            "install" => "install",
+            "update" => "update",
+            "uninstall" => "uninstall",
+            "path" => "path",
+            _ => "other",
+        },
+        "update" => match operation {
+            "apply" => "apply",
+            "check_only" => "check_only",
+            _ => "other",
+        },
+        _ => "not_applicable",
+    }
+}
+
+fn fixed_cli_client_kind(command: &str, client_kind: &str) -> &'static str {
+    if command != "mcp_config" {
+        return "not_applicable";
+    }
+    match client_kind {
+        "generic" => "generic",
+        "claude_code" => "claude_code",
+        "codex" => "codex",
+        "cursor" => "cursor",
+        "openclaw" => "openclaw",
+        "opencode" => "opencode",
+        "hermes" => "hermes",
+        "pi" => "pi",
+        "antigravity" => "antigravity",
+        "qwen_code" => "qwen_code",
+        "factory_droid" => "factory_droid",
+        "zcode" => "zcode",
+        _ => "other",
+    }
+}
+
+pub(crate) fn bounded_properties(entries: &[(&str, Value)]) -> Map<String, Value> {
+    entries
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), value.clone()))
+        .collect()
+}
+
+fn lifecycle_properties(channel: &'static str) -> Map<String, Value> {
+    bounded_properties(&[
+        ("install_channel", Value::String(channel.to_owned())),
+        ("product_version", Value::String(release_version())),
+    ])
+}
+
+fn build_payload(
+    event_name: &str,
+    properties: &Map<String, Value>,
+    identity: &InstallationIdentity,
+    transport: Transport,
+) -> Value {
+    let mut event_properties = properties.clone();
+    event_properties.insert("telemetry_schema_version".into(), Value::from(3));
+    event_properties
+        .entry("product_version")
+        .or_insert_with(|| Value::String(current_product_version().into()));
+    event_properties.insert("os_family".into(), Value::String(os_family().into()));
+    event_properties.insert("os_major".into(), Value::String(os_major()));
+    event_properties.insert("arch".into(), Value::String(arch().into()));
+    event_properties.insert("is_ci".into(), Value::Bool(is_ci()));
+    event_properties.insert(
+        "is_synthetic".into(),
+        Value::Bool(parse_env_bool(ENV_TELEMETRY_SYNTHETIC).unwrap_or(false)),
+    );
+    event_properties.insert("transport".into(), Value::String(transport.as_str().into()));
+    event_properties.insert(
+        "process_session_id".into(),
+        Value::String(process_session_id()),
+    );
+    event_properties.insert("id_persisted".into(), Value::Bool(identity.persisted));
+    event_properties.insert("$process_person_profile".into(), Value::Bool(false));
+    // No location lookup from the request IP (same as Lume and the cua SDK).
+    event_properties.insert("$geoip_disable".into(), Value::Bool(true));
+    event_properties.insert("$lib".into(), Value::String("cua-driver-rs".into()));
+    event_properties.insert(
+        "$lib_version".into(),
+        Value::String(current_product_version().into()),
+    );
+
+    serde_json::json!({
+        "event": event_name,
+        "distinct_id": identity.id,
+        "properties": event_properties,
+    })
+}
+
+fn spawn_payload(event_name: &'static str, payload: Value) {
+    PENDING_SENDS.fetch_add(1, Ordering::SeqCst);
+    let task = move || {
+        let _pending = PendingSendGuard;
+        if let Err(error) = post_to_posthog(&payload) {
+            debug_log(format_args!("{event_name} failed: {error}"));
+        }
+    };
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::spawn_blocking(task);
+    } else {
+        if std::thread::Builder::new()
+            .name("cua-telemetry".into())
+            .spawn(task)
+            .is_err()
+        {
+            finish_pending_send();
+        }
+    }
+}
+
+static PENDING_SENDS: AtomicUsize = AtomicUsize::new(0);
+static PENDING_WAIT: OnceLock<(Mutex<()>, Condvar)> = OnceLock::new();
+
+struct PendingSendGuard;
+
+impl Drop for PendingSendGuard {
+    fn drop(&mut self) {
+        finish_pending_send();
+    }
+}
+
+fn finish_pending_send() {
+    if let Some((lock, ready)) = PENDING_WAIT.get() {
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        PENDING_SENDS.fetch_sub(1, Ordering::SeqCst);
+        ready.notify_all();
+    } else {
+        PENDING_SENDS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Give already-enqueued telemetry a bounded chance to finish when a
+/// long-running MCP process is about to force-exit.
+pub(crate) fn flush_pending(timeout: Duration) {
+    if PENDING_SENDS.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    let wait = PENDING_WAIT.get_or_init(|| (Mutex::new(()), Condvar::new()));
+    let deadline = std::time::Instant::now() + timeout;
+    let mut guard = wait
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while PENDING_SENDS.load(Ordering::SeqCst) > 0 {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let (next, result) = wait
+            .1
+            .wait_timeout(guard, deadline - now)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard = next;
+        if result.timed_out() {
+            break;
+        }
+    }
+}
+
+fn post_to_posthog(payload: &Value) -> Result<u16, String> {
+    post_to_posthog_with_timeout(payload, Duration::from_secs(POSTHOG_TIMEOUT_SECS))
+}
+
+/// The only network sink telemetry had. It now refuses every event without sending it.
+fn post_to_posthog_with_timeout(_payload: &Value, _timeout: Duration) -> Result<u16, String> {
+    Err("telemetry is removed from this build".to_owned())
+}
+
+fn telemetry_home_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(ENV_TELEMETRY_HOME) {
+        return Some(PathBuf::from(path));
+    }
+    home_root().map(|home| home.join(crate::bundle::user_home_subdirectory()))
+}
+
+fn home_root() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+fn config_path() -> Option<PathBuf> {
+    telemetry_home_dir().map(|home| home.join(CONFIG_FILE_NAME))
+}
+
+fn marker_path(name: &str) -> Option<PathBuf> {
+    telemetry_home_dir().map(|home| home.join(name))
+}
+
+fn release_marker_path(version: &str) -> Option<PathBuf> {
+    let safe: String = version
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+        .take(80)
+        .collect();
+    telemetry_home_dir().map(|home| home.join(RELEASE_RECORDED_DIRECTORY).join(safe))
+}
+
+fn read_config() -> Value {
+    config_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| Value::Object(Map::new()))
+}
+
+fn write_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "invalid config path".to_owned())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    let json = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, json)
+        .map_err(|error| format!("failed to write {}: {error}", temporary.display()))?;
+    #[cfg(windows)]
+    if path.exists() {
+        std::fs::remove_file(path)
+            .map_err(|error| format!("failed to replace {}: {error}", path.display()))?;
+    }
+    std::fs::rename(&temporary, path)
+        .map_err(|error| format!("failed to replace {}: {error}", path.display()))
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("failed to remove {}: {error}", path.display())),
+    }
+}
+
+fn write_marker(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    std::fs::write(path, "1")
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+fn open_lock_file(home: &Path, name: &str) -> Result<File, String> {
+    std::fs::create_dir_all(home)
+        .map_err(|error| format!("failed to create {}: {error}", home.display()))?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(home.join(name))
+        .map_err(|error| format!("failed to open telemetry state lock: {error}"))
+}
+
+fn try_lifecycle_lock(home: &Path) -> Option<File> {
+    let file = match open_lock_file(home, TELEMETRY_LIFECYCLE_LOCK_FILE_NAME) {
+        Ok(file) => file,
+        Err(error) => {
+            debug_log(format_args!("lifecycle lock unavailable: {error}"));
+            return None;
+        }
+    };
+    match file.try_lock() {
+        Ok(()) => Some(file),
+        Err(TryLockError::WouldBlock) => {
+            debug_log(format_args!("lifecycle registration already in progress"));
+            None
+        }
+        Err(TryLockError::Error(error)) => {
+            debug_log(format_args!("failed to lock telemetry lifecycle: {error}"));
+            None
+        }
+    }
+}
+
+fn migrate_legacy_telemetry_home() {
+    if std::env::var_os(ENV_TELEMETRY_HOME).is_some() || crate::bundle::is_local_installation() {
+        return;
+    }
+    let Some(root) = home_root() else {
+        return;
+    };
+    let legacy = root.join(LEGACY_HOME_SUBDIRECTORY);
+    let current = root.join(HOME_SUBDIRECTORY);
+    if !legacy.is_dir() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&current);
+    let Ok(identity_lock) = open_lock_file(&current, TELEMETRY_IDENTITY_LOCK_FILE_NAME) else {
+        return;
+    };
+    if identity_lock.lock().is_err() {
+        return;
+    }
+    for name in [TELEMETRY_ID_FILE_NAME, INSTALLATION_RECORDED_FILE_NAME] {
+        let source = legacy.join(name);
+        let destination = current.join(name);
+        if source.exists() && !destination.exists() {
+            let _ = std::fs::rename(&source, &destination);
+        }
+    }
+    let _ = std::fs::remove_dir(&legacy);
+}
+
+fn read_install_id() -> Option<String> {
+    migrate_legacy_telemetry_home();
+    let path = marker_path(TELEMETRY_ID_FILE_NAME)?;
+    read_install_id_path(&path)
+}
+
+fn read_install_id_path(path: &Path) -> Option<String> {
+    let value = std::fs::read_to_string(path).ok()?;
+    let trimmed = value.trim();
+    if uuid::Uuid::parse_str(trimmed).is_ok() {
+        Some(trimmed.to_owned())
+    } else {
+        None
+    }
+}
+
+fn get_or_create_install_id() -> Option<InstallationIdentity> {
+    load_or_create_install_id_uncached()
+}
+
+fn load_or_create_install_id_uncached() -> Option<InstallationIdentity> {
+    if let Some(id) = read_install_id() {
+        return Some(InstallationIdentity {
+            id,
+            persisted: true,
+        });
+    }
+    let Some(path) = marker_path(TELEMETRY_ID_FILE_NAME) else {
+        static EPHEMERAL_ID: OnceLock<String> = OnceLock::new();
+        return Some(InstallationIdentity {
+            id: EPHEMERAL_ID
+                .get_or_init(|| uuid::Uuid::new_v4().to_string())
+                .clone(),
+            persisted: false,
+        });
+    };
+    let candidate = uuid::Uuid::new_v4().to_string();
+    match persist_install_id_if_absent(&path, &candidate) {
+        Ok(id) => Some(InstallationIdentity {
+            id,
+            persisted: true,
+        }),
+        Err(error) => {
+            debug_log(format_args!("installation identity unavailable: {error}"));
+            None
+        }
+    }
+}
+
+fn persist_install_id_if_absent(path: &Path, candidate: &str) -> Result<String, String> {
+    let home = path
+        .parent()
+        .ok_or_else(|| "invalid telemetry identity path".to_owned())?;
+    let identity_lock = open_lock_file(home, TELEMETRY_IDENTITY_LOCK_FILE_NAME)?;
+    identity_lock
+        .lock()
+        .map_err(|error| format!("failed to lock telemetry identity: {error}"))?;
+
+    if let Some(id) = read_install_id_path(path) {
+        return Ok(id);
+    }
+
+    let temporary = home.join(format!(".telemetry-id-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = File::create(&temporary)
+            .map_err(|error| format!("failed to write telemetry identity: {error}"))?;
+        file.write_all(candidate.as_bytes())
+            .map_err(|error| format!("failed to write telemetry identity: {error}"))?;
+        file.sync_data()
+            .map_err(|error| format!("failed to sync telemetry identity: {error}"))?;
+
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(path)
+                .map_err(|error| format!("failed to replace telemetry identity: {error}"))?;
+        }
+        std::fs::rename(&temporary, path)
+            .map_err(|error| format!("failed to persist telemetry identity: {error}"))?;
+        Ok(candidate.to_owned())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn redact_id(id: &str) -> String {
+    format!("{}…", id.chars().take(8).collect::<String>())
+}
+
+fn current_product_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn release_version() -> String {
+    std::env::var(ENV_RELEASE_VERSION)
+        .ok()
+        .and_then(|value| strict_release_version(&value))
+        .unwrap_or_else(|| current_product_version().to_owned())
+}
+
+fn strict_release_version(raw: &str) -> Option<String> {
+    let value = raw.trim().strip_prefix('v').unwrap_or(raw.trim());
+    if value.is_empty() || value.len() > 64 || value.contains('+') {
+        return None;
+    }
+    let (core, prerelease) = value
+        .split_once('-')
+        .map_or((value, None), |(core, suffix)| (core, Some(suffix)));
+    let components: Vec<&str> = core.split('.').collect();
+    if components.len() != 3
+        || components.iter().any(|part| {
+            part.is_empty() || part.len() > 6 || !part.chars().all(|c| c.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+    if prerelease.is_some_and(|suffix| {
+        suffix.is_empty()
+            || suffix.len() > 32
+            || suffix.split('.').any(|part| part.is_empty())
+            || !suffix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    }) {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn duration_bucket(elapsed: Duration) -> &'static str {
+    match elapsed.as_millis() {
+        0..=99 => "lt_100ms",
+        100..=499 => "100_499ms",
+        500..=1_999 => "500ms_1_999ms",
+        2_000..=9_999 => "2s_9_999ms",
+        _ => "gte_10s",
+    }
+}
+
+fn install_channel() -> &'static str {
+    std::env::var(ENV_INSTALL_CHANNEL)
+        .ok()
+        .and_then(|value| normalize_install_channel(&value))
+        .or_else(|| {
+            marker_path(TELEMETRY_INSTALL_CHANNEL_FILE_NAME)
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .and_then(|value| normalize_install_channel(&value))
+        })
+        .unwrap_or("first_run")
+}
+
+fn normalize_install_channel(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "install_script" => Some("install_script"),
+        "update_apply" => Some("update_apply"),
+        "python_package" => Some("python_package"),
+        "manual_binary" => Some("manual_binary"),
+        "first_run" => Some("first_run"),
+        _ => None,
+    }
+}
+
+fn process_session_id() -> String {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| uuid::Uuid::new_v4().to_string()).clone()
+}
+
+fn parse_env_bool(name: &str) -> Option<bool> {
+    let value = std::env::var(name).ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "no" | "off" => Some(false),
+        "1" | "true" | "yes" | "on" => Some(true),
+        _ => None,
+    }
+}
+
+fn debug_enabled() -> bool {
+    parse_env_bool(ENV_TELEMETRY_DEBUG).unwrap_or(false)
+}
+
+fn debug_log(args: std::fmt::Arguments<'_>) {
+    if debug_enabled() {
+        eprintln!("[telemetry] {args}");
+    } else {
+        tracing::debug!(target: "cua_driver::telemetry", "{args}");
+    }
+}
+
+fn os_family() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        "linux" => "linux",
+        _ => "other",
+    }
+}
+
+fn os_major() -> String {
+    static OS_MAJOR: OnceLock<String> = OnceLock::new();
+    OS_MAJOR
+        .get_or_init(|| {
+            let raw = os_version();
+            let start = raw.find(|character: char| character.is_ascii_digit());
+            let Some(start) = start else {
+                return "unknown".into();
+            };
+            raw[start..]
+                .split(|character: char| !character.is_ascii_digit())
+                .next()
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unknown")
+                .to_owned()
+        })
+        .clone()
+}
+
+fn os_version() -> String {
+    #[cfg(target_os = "macos")]
+    let command = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output();
+    #[cfg(target_os = "windows")]
+    let command = std::process::Command::new("cmd")
+        .args(["/c", "ver"])
+        .output();
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|contents| {
+                contents
+                    .lines()
+                    .find_map(|line| line.strip_prefix("VERSION_ID=").map(str::to_owned))
+            })
+            .map(|value| value.trim_matches('"').to_owned())
+            .unwrap_or_else(|| "unknown".into())
+    }
+    #[cfg(not(target_os = "linux"))]
+    command
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x86_64",
+        "x86" => "x86",
+        _ => "other",
+    }
+}
+
+fn is_ci() -> bool {
+    const VARIABLES: &[&str] = &[
+        "CI",
+        "CONTINUOUS_INTEGRATION",
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "JENKINS_URL",
+        "CIRCLECI",
+        "BUILDKITE",
+        "TF_BUILD",
+        "TEAMCITY_VERSION",
+        "TRAVIS",
+        "APPVEYOR",
+        "BITBUCKET_BUILD_NUMBER",
+        "CODEBUILD_BUILD_ID",
+        "DRONE",
+        "HUDSON_URL",
+        "CI_NAME",
+    ];
+    VARIABLES
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+}

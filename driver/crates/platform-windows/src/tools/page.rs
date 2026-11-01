@@ -23,12 +23,12 @@
 //!        pre-existing `cua-driver-eval` bookmark (creation flow is
 //!        described in the docs; not yet automated end-to-end).  Zero
 //!        config, no launch flag.
-//!     2. **CDP fallback** — uses the shared `cua_driver_core::cdp` helper.
+//!     2. **CDP fallback** — uses the shared `superuse_core::cdp` helper.
 //!        Requires `--remote-debugging-port=N` and `CUA_DRIVER_CDP_PORT=N`.
 //!        Returns an actionable error if neither path works.
 
 use async_trait::async_trait;
-use cua_driver_core::page::{ClickElementResult, PageBackend};
+use superuse_core::page::{ClickElementResult, PageBackend};
 
 use windows::core::Interface;
 use windows::Win32::Foundation::HWND;
@@ -132,7 +132,7 @@ impl PageBackend for WindowsPageBackend {
                  bookmark-URL bypass.  Or use `get_text` / `query_dom` for read-only access."
             ),
         };
-        let result = cua_driver_core::cdp::evaluate(port, javascript, true).await?;
+        let result = superuse_core::cdp::evaluate(port, javascript, true).await?;
         Ok(format!("cdp.runtime.evaluate.user_gesture: {result}"))
     }
 
@@ -159,7 +159,7 @@ impl PageBackend for WindowsPageBackend {
         )
             })?;
         let result =
-            cua_driver_core::cdp::evaluate_targeted(port, javascript, true, target_url_contains)
+            superuse_core::cdp::evaluate_targeted(port, javascript, true, target_url_contains)
                 .await?;
         Ok(format!("cdp.runtime.evaluate.user_gesture: {result}"))
     }

@@ -7,7 +7,7 @@
 //!   `CursorMotionPath.swift`; arc-length helper after trope-cua, see
 //!   THIRD_PARTY_NOTICES.md)
 //! - `trajectory` — the motion styles, timing and effect geometry, which live
-//!   in the `cua-cursor-motion` crate (shared with the `@trycua/cursor-motion` web package)
+//!   in the `cursor-motion` crate (shared with the `@trycua/cursor-motion` web package)
 //! - `OverlayCommand` — messages sent from MCP tools to the overlay thread
 //! - `SurfaceFit` — keeps each platform's overlay surface fitted to the live
 //!   display geometry, so screen-coordinate cursors stay on the pointer
@@ -25,8 +25,8 @@ pub mod surface_fit;
 pub mod theme;
 pub mod theme_artifact;
 pub mod trajectory;
-/// The `classic` glide's Dubins planner, now in `cua-cursor-motion`.
-pub use cua_cursor_motion::dubins as path_planner;
+/// The `classic` glide's Dubins planner, now in `cursor-motion`.
+pub use cursor_motion::dubins as path_planner;
 pub mod z_order;
 
 pub use badge_glyphs::{BadgeChip, BadgeGlyph};
@@ -413,7 +413,7 @@ pub enum OverlayCommand {
 // pointer point, `POINTER_ANCHOR_OFFSET` points from the anchor opposite the
 // heading, so a cursor anchored by `anchor_for_pointer` draws its tip on the
 // requested coordinate at every heading and backing scale.
-pub use cua_cursor_motion::{anchor_for_pointer, pointer_for_anchor, POINTER_ANCHOR_OFFSET};
+pub use cursor_motion::{anchor_for_pointer, pointer_for_anchor, POINTER_ANCHOR_OFFSET};
 
 /// Cursor key for a named session's keyboard and text feedback: the explicit
 /// `session` label, else the trusted lifecycle `_session_id`. Anonymous calls

@@ -2,7 +2,7 @@
 // just because it exists.
 //
 // driver/release.json pins a published build: its release tag, asset, executable SHA-256 and the
-// fingerprint of the sources it was built from. plugin/driver/cua-driver.json records where the
+// fingerprint of the sources it was built from. plugin/driver/superuse-driver.json records where the
 // installed exe came from. Setup compares both with the checkout's current fingerprint each run:
 //   current     the installed exe is the recorded one, built from today's sources: reuse it
 //   fetch       missing, or an older managed exe, and the pin matches today's sources: download
@@ -20,8 +20,8 @@ import { PLUGIN, REPO, run, sha256, sha256File, writeAtomic, type Check } from "
 export type ReleaseManifest = { repo: string; tag: string; target: string; asset: string; sha256: string; fingerprint: string };
 export type Provenance = { source: "release" | "build"; fingerprint: string; sha256: string; tag?: string; rustc?: string };
 
-export const EXE = path.join(PLUGIN, "driver", "cua-driver.exe");
-const RECORD = path.join(PLUGIN, "driver", "cua-driver.json");
+export const EXE = path.join(PLUGIN, "driver", "superuse-driver.exe");
+const RECORD = path.join(PLUGIN, "driver", "superuse-driver.json");
 const PENDING = `${RECORD}.pending`; // the record for an exe being swapped in; see installExe
 const MANIFEST = path.join(REPO, "driver", "release.json");
 
@@ -101,7 +101,7 @@ function describe(s: State, fp: string): Check {
     case "stale":
       return { id, status: "fail", code: "DRIVER_NO_RELEASE", summary: `the driver sources (fingerprint ${short(fp)}) have no matching release${s.installed ? `; the installed driver was built from ${short(s.installed)}` : ""}`, next: BUILD_HINT };
     case "unknown":
-      return { id, status: "action", code: "DRIVER_UNKNOWN", summary: "plugin/driver/cua-driver.exe has no provenance record and isn't the pinned release; superuse left it alone", evidence: [`sha256 ${s.sha}`], next: "Move it away so install can put the pinned driver there, or point SUPERUSE_DRIVER at it to keep using it." };
+      return { id, status: "action", code: "DRIVER_UNKNOWN", summary: "plugin/driver/superuse-driver.exe has no provenance record and isn't the pinned release; superuse left it alone", evidence: [`sha256 ${s.sha}`], next: "Move it away so install can put the pinned driver there, or point SUPERUSE_DRIVER at it to keep using it." };
   }
 }
 
@@ -165,7 +165,7 @@ export function buildDriver(fp: string): Check {
   const out = path.join(REPO, "tools", "out");
   const tmp = path.join(path.dirname(EXE), `.build-${process.pid}`);
   fs.mkdirSync(path.dirname(EXE), { recursive: true });
-  fs.copyFileSync(path.join(out, "cua-driver.exe"), tmp);
+  fs.copyFileSync(path.join(out, "superuse-driver.exe"), tmp);
   const sha = sha256File(tmp) ?? "";
   installExe(tmp, { source: "build", fingerprint: fp, sha256: sha, rustc: fs.readFileSync(path.join(out, "rustc.txt"), "utf8").trim() });
   return { id, status: "ok", code: "DRIVER_BUILT", summary: "built from source and installed", evidence: [`sha256 ${sha}`, `fingerprint ${short(fp)}`] };

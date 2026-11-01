@@ -7,6 +7,9 @@
 //! - [`Lock::window`] covers every input action on one top-level window,
 //!   background or foreground, so two agents' keys don't interleave and one
 //!   agent's held modifiers (the attached Ctrl+S hold) don't reach the other's.
+//!   It is keyed on the window's UI thread, because that hold sets the
+//!   thread's key state: an owned dialog and its owner usually share a thread,
+//!   so they share a lock.
 //!
 //! Who takes them: `tools::impl_`'s input-tool wrapper takes the window lock
 //! for each call, then the foreground lock when the call asks for foreground
@@ -17,6 +20,10 @@
 //!
 //! A wait longer than [`WAIT`] gives up with [`InputBusy`], which tools turn
 //! into an `input_busy` refusal. No input is sent then.
+//!
+//! A tool call the runtime aborts drops its locks at once, while a blocking
+//! actuator it started may still be sending input. The plugin never cancels a
+//! call, so this only matters for other clients.
 //!
 //! Each lock is a named Win32 mutex in the session's `Local\` namespace. A
 //! mutex rather than a semaphore because Windows abandons a mutex whose owner
@@ -33,7 +40,7 @@ use tokio::sync::oneshot;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
-use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOT};
+use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetWindowThreadProcessId, GA_ROOT};
 
 /// How long an action waits for another agent's lock before it is refused:
 /// longer than any single input action takes, short enough that the model
@@ -43,7 +50,8 @@ pub const WAIT: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lock {
     Foreground,
-    /// A top-level window, by HWND. Build it with [`Lock::window`].
+    /// A top-level window, by HWND. Build it with [`Lock::window`]. The mutex
+    /// is its UI thread's, so every window on that thread shares it.
     Window(u64),
 }
 
@@ -62,7 +70,15 @@ impl Lock {
     fn mutex_name(self) -> Vec<u16> {
         let name = match self {
             Self::Foreground => r"Local\superuse-input-foreground".to_owned(),
-            Self::Window(hwnd) => format!(r"Local\superuse-input-window-{hwnd:x}"),
+            Self::Window(hwnd) => {
+                // A window that's gone has no thread; its own HWND still names a lock.
+                let thread = unsafe { GetWindowThreadProcessId(HWND(hwnd as *mut _), None) };
+                if thread == 0 {
+                    format!(r"Local\superuse-input-window-{hwnd:x}")
+                } else {
+                    format!(r"Local\superuse-input-thread-{thread}")
+                }
+            }
         };
         name.encode_utf16().chain(std::iter::once(0)).collect()
     }
@@ -81,15 +97,15 @@ impl std::fmt::Display for InputBusy {
         match self.lock {
             Lock::Foreground => write!(
                 f,
-                "input_busy: another agent is using the real cursor and foreground window \
-                 (its Superuse driver held the foreground lock for over {ms} ms). No input \
-                 was sent. Retry this action."
+                "input_busy: another agent, or an earlier call that is still running, is \
+                 using the real cursor and foreground window (the foreground lock was held \
+                 for over {ms} ms). No input was sent. Retry this action."
             ),
             Lock::Window(hwnd) => write!(
                 f,
-                "input_busy: another agent is sending input to window {hwnd} (its Superuse \
-                 driver held that window's lock for over {ms} ms). No input was sent. Retry \
-                 this action."
+                "input_busy: another agent, or an earlier call that is still running, is \
+                 sending input to window {hwnd} or another window of its app's UI thread (that \
+                 lock was held for over {ms} ms). No input was sent. Retry this action."
             ),
         }
     }

@@ -588,9 +588,15 @@ fn input_locked<T: Tool + 'static>(tool: T, token_window: &TokenWindowResolver) 
 /// Whether a call activates a window or uses the real cursor: foreground
 /// delivery, desktop scope (SendInput at a screen point, or the real pointer
 /// for `move_cursor`), and `bring_to_front`, which activates by definition.
+/// For the other tools, desktop scope counts only without a `window_id`: with
+/// one (the pid guard fills it in from a pid), they take their background
+/// path, where pen injection and the MSAA click take the foreground lock
+/// themselves and would otherwise wait on this call's own lock.
 fn takes_foreground(tool: &str, args: &Value) -> bool {
+    let desktop = args.get("scope").and_then(Value::as_str) == Some("desktop");
     crate::input::delivery::DeliveryMode::from_args(args).is_foreground()
-        || args.get("scope").and_then(Value::as_str) == Some("desktop")
+        || (desktop
+            && (tool == "move_cursor" || args.get("window_id").is_none_or(Value::is_null)))
         || tool == "bring_to_front"
 }
 

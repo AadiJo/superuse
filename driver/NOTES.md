@@ -393,12 +393,12 @@ Each agent runs its own driver, and nothing stopped two of them from acting at o
 `input/lock.rs` adds two kinds of lock, both named mutexes in the session's `Local\` namespace:
 
 - The foreground lock (`Local\superuse-input-foreground`) covers an action that activates a window or uses the real cursor, from activation through input to the foreground restore.
-- A window lock (`Local\superuse-input-window-<top-level HWND in hex>`) covers every input action on that window, background or foreground.
+- A window lock covers every input action on a top-level window, background or foreground. It is named after the window's UI thread (`Local\superuse-input-thread-<thread id>`), because the attached modifier hold sets that thread's key state: an owned dialog like Save As usually runs on its owner's thread, so the two share a lock. Windows on separate threads, like two apps, don't.
 
 Who takes them:
 
-- `InputLockedTool` in `tools/impl_.rs` wraps every input tool: `click`, `double_click`, `right_click`, `drag`, `type_text`, `press_key`, `hotkey`, `set_value`, `scroll`, `bring_to_front`, `invoke_menu` and `move_cursor`. It sits inside the pid guards, so it sees the `window_id` they fill in, or else the element token's window. It takes the window lock, then the foreground lock when the call has `delivery_mode:"foreground"` or `scope:"desktop"`, or is `bring_to_front`. Both are held for the whole call. That includes the post-click window watch, so a dialog the other agent opens isn't reported as this action's.
-- Background actuators that still touch the shared pointer or foreground take the foreground lock themselves: pen injection (`inject_click_screen`, `inject_drag_screen`, which re-assert the user's foreground afterwards) and the MSAA click without activation (`send_click_synthesized_mods`, which moves the real cursor). They run only for background calls, so they never wait on a foreground lock their own call holds.
+- `InputLockedTool` in `tools/impl_.rs` wraps every input tool: `click`, `double_click`, `right_click`, `drag`, `type_text`, `press_key`, `hotkey`, `set_value`, `scroll`, `bring_to_front`, `invoke_menu` and `move_cursor`. It sits inside the pid guards, so it sees the `window_id` they fill in, or else the element token's window. It takes the window lock, then the foreground lock when the call has `delivery_mode:"foreground"`, is `bring_to_front`, or has `scope:"desktop"` with no `window_id` (or is a desktop `move_cursor`, which moves the real pointer). A desktop-scope call that names a window takes the background path, so it doesn't take the foreground lock. Both are held for the whole call. That includes the post-click window watch, so a dialog the other agent opens isn't reported as this action's.
+- Background actuators that still touch the shared pointer or foreground take the foreground lock themselves: pen injection (`inject_click_screen`, `inject_drag_screen`, which re-assert the user's foreground afterwards) and the MSAA click without activation (`send_click_synthesized_mods`, which moves the real cursor). They run only on background paths, and the wrapper never takes the foreground lock for a call that reaches one, so they never wait on a lock their own call holds.
 - The order is always window, then foreground.
 
 A wait past 5 s returns `input_busy` (`effect: "refused"`, `lock: "foreground"` or `"window"`, `window_id`, `waited_ms`) and sends no input. The message says another agent is using the cursor or the window, and to retry. Busy pen injection reports `input_busy`, not `background_unavailable`, so the model doesn't escalate to foreground over it.
@@ -429,7 +429,10 @@ Single-agent acceptance on both builds (`acceptance-20261101-144944.json` and `-
 
 - Only drivers with this change take the locks. A release driver, the user's own input, or another tool can still act at the same moment.
 - Desktop-scope input without a window (`scope:"desktop"` and no `window_id`) takes only the foreground lock. It can still interleave with another agent's background input on the foreground window. The plugin doesn't send desktop scope.
-- The window lock is per top-level window. An owned dialog, like Save As, is its own top-level window, so input to the dialog and to its owner doesn't serialize.
+- Two windows of one app that run on separate UI threads don't share a lock. That's fine for the modifier hold, which is per thread.
+- Several windows on one UI thread (Chromium's windows, for one) serialize, even when two agents use different windows. The cost is waiting, not wrong input.
+- `browser_prepare`'s one-time remote-debugging setup activates the browser and sends Enter and Ctrl+W through SendInput without the foreground lock. It runs once per browser session with `"browsers": "attach"`.
+- A tool call the runtime aborts drops its locks while a blocking actuator may still be sending input. The plugin never cancels calls.
 - Two restores still run without the lock: posted clicks and background scrolls hand the foreground back when a WebView host took it during the action. Both act only when the target itself took the foreground.
 - `launch_app` takes no lock. An app that takes the foreground as it starts can still fail another agent's foreground action, which then reports `foreground_unavailable` as before.
 - A non-elevated driver that can't open an elevated driver's mutex acts unlocked.

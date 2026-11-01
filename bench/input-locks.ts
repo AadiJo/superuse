@@ -31,7 +31,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { McpClient, textOf, type Args, type ToolResult } from "./mcp-client.ts";
 import { start } from "./tasks.ts";
-import { listWindows, ps, Sampler, timestamp, WIN_TEMP, WSL_TEMP, type Win } from "./win.ts";
+import { listWindows, ps, Sampler, timestamp, WIN_TEMP, WIN_TYPES, WSL_TEMP, type Win } from "./win.ts";
 
 const HERE = import.meta.dirname;
 const EXE = process.env.SUPERUSE_DRIVER ?? path.join(HERE, "..", "plugin/driver/superuse-driver.exe");
@@ -41,7 +41,12 @@ const POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.ex
 const PAD_EXE = "MenuPad-locks.exe";
 // The driver's lock names and wait (driver/crates/platform-windows/src/input/lock.rs).
 const FOREGROUND_LOCK = String.raw`Local\superuse-input-foreground`;
-const windowLock = (hwnd: number) => String.raw`Local\superuse-input-window-` + hwnd.toString(16);
+/** A window's lock is its UI thread's, so a window and its owned dialogs share one. */
+async function windowLock(hwnd: number): Promise<string> {
+  const thread = Number((await ps(`${WIN_TYPES}\n$p = [uint32]0; [SuperuseW]::GetWindowThreadProcessId([IntPtr]${hwnd}, [ref]$p)`)).trim());
+  if (!thread) throw new Error(`window ${hwnd} has no UI thread`);
+  return String.raw`Local\superuse-input-thread-` + thread;
+}
 const LOCK_WAIT_MS = 5000;
 // WSL's clock ran about 10% slow against Windows' here (4540 ms for a 5040 ms Windows sleep), so a
 // refusal after the driver's full wait can measure under 5000 ms on this side.
@@ -247,7 +252,7 @@ async function checkHeld({ a, observer, pads }: Agents) {
     sampler.stop();
     foregroundHolder.kill();
   });
-  const windowHolder = await holdMutex(windowLock(pad.hwnd), LOCK_WAIT_MS + 3000, true);
+  const windowHolder = await holdMutex(await windowLock(pad.hwnd), LOCK_WAIT_MS + 3000, true);
   const typed = await a.call("type_text", { ...target, text: "held" }).finally(() => windowHolder.kill());
   const text = await padText(observer, pad);
   const s = sampler.summary();

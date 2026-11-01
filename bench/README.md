@@ -13,6 +13,8 @@ The scripts run on Node 24+ through type stripping, with no build step. `npm ins
 
 `node session-check.ts [--idle]` checks that the plugin's driver client starts its session again after the driver ends it, through the real driver, and writes `out/session-check-<time>.json`. `--idle` waits out the driver's real 5-minute idle timeout instead of ending the session.
 
+`node agent-labels.ts` starts two plugin servers at once, has each click in its own MenuPad window, and captures both windows to `out/agent-labels-<time>/labels.png`, where both cursors must show different labels. It sends input, so run it on an idle desktop.
+
 `node helium-check.ts [--direct | --claude]` checks the plugin's page API in your own Helium. It fills a test form in a tab it opens and closes again, and writes `out/helium-check-<time>.json`.
 
 `node cursor-colors.ts [--baseline <exe>]` checks that drivers running side by side draw different cursor colors, and that a driver which exits frees its color. It sends input to three MenuPads it opens, and writes `out/cursor-colors/<time>.json` with PNGs.

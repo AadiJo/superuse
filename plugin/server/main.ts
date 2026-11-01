@@ -11,10 +11,14 @@
 //      SUPERUSE_CURSOR      "fast" (default: visible agent cursor, short glide), "animated" or "off"
 //      SUPERUSE_APPS, SUPERUSE_FOREGROUND, SUPERUSE_POLICY  see policy.ts;  SUPERUSE_AUDIT  action log path or "off"
 //      SUPERUSE_TRACE       file for per-call timings (benchmarks; off by default)
+//      SUPERUSE_AGENT       label in the badge under this server's agent cursor, shown as is (about 19
+//                           characters fit). Default: the MCP client's name and the lowest number no other
+//                           running server holds, e.g. "Claude Code 2" (agent-label.ts)
 
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { agentLabel } from "./agent-label.ts";
 import { Driver, trace, type CursorMode } from "./driver.ts";
 import { Desktop } from "./desktop.ts";
 import { Policy, type Ask } from "./policy.ts";
@@ -25,6 +29,8 @@ const TEXT_LIMIT = 20_000;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DRIVER = process.env.SUPERUSE_DRIVER ?? path.join(here, "..", "driver", "superuse-driver.exe");
 const CURSOR = (process.env.SUPERUSE_CURSOR ?? "fast") as CursorMode;
+
+let clientInfo: { name?: unknown; title?: unknown } = {}; // from the client's initialize, for its cursor label
 
 const API = `Control Windows apps with JavaScript. The code runs in an async function with a persistent \`desktop\` object; top-level let/const persist between calls. Return a value or call log(...) to see output.
 
@@ -110,7 +116,7 @@ const ask: Ask = async (message, rememberLabel) => {
 };
 
 const policy = new Policy(ask);
-const desktop = new Desktop(new Driver(DRIVER, CURSOR, () => (policy.browserAttach ? ["--grant", "existing-profile"] : [])), policy);
+const desktop = new Desktop(new Driver(DRIVER, CURSOR, () => (policy.browserAttach ? ["--grant", "existing-profile"] : []), () => agentLabel(clientInfo)), policy);
 const sandbox = await Sandbox.create((method, args) => desktop.dispatch(method, args), userWait);
 process.on("unhandledRejection", () => {}); // every API promise is tracked by the sandbox; nothing should land here
 
@@ -145,6 +151,7 @@ async function handle(msg: Message) {
     case "initialize": {
       const caps = (msg.params?.capabilities ?? {}) as { elicitation?: unknown };
       clientCanElicit = !!caps.elicitation;
+      clientInfo = (msg.params?.clientInfo ?? {}) as typeof clientInfo;
       const version = typeof msg.params?.protocolVersion === "string" ? msg.params.protocolVersion : "2025-06-18";
       return reply({ protocolVersion: version, capabilities: { tools: {} }, serverInfo: { name: "superuse", version: VERSION }, instructions: INSTRUCTIONS });
     }

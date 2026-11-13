@@ -6,7 +6,8 @@
 //   node bench/helium-check.ts --claude   headless Claude run only (add --no-helium-mcp to hide the
 //                                         user's own "helium" MCP server and test the plugin alone)
 //
-// The direct run passes only if the form arrives and the foreground and cursor end where they started.
+// The direct run passes only if every step succeeds (including the refusal of a stale ref), the form
+// arrives, and the foreground and cursor end where they started.
 //
 // It serves a test form from WSL on 127.0.0.1:8765; the form reports each submission back to that
 // server, so the check never reads the user's tabs. Everything happens in a tab the run opens. At
@@ -114,12 +115,15 @@ async function js(c: McpClient, code: string): Promise<{ text: string; error: bo
 const STEPS: Array<[label: string, code: string]> = [
   ["bind Helium + open tab", `const w = await desktop.window({app: "chrome", title: "Helium"}); globalThis.p = await w.page().newTab(${JSON.stringify(FORM_URL)}); return p.title`],
   ["read", "return await p.read()"],
+  // A ref from a superseded read must throw, not return as if the text went in.
+  ["stale ref refused", String.raw`const old = (await p.read({query: "Name"})).match(/\[(p\d+:\d+)\] textbox "Name"/)[1]; await p.read({query: "Name"}); try { await p.type(old, "STALE"); } catch (e) { if (/browser_ref_stale/.test(e.message)) return "refused"; throw e; } throw new Error("a stale ref was accepted")`],
   ["type name", String.raw`const r = await p.read({query: "Name"}); await p.type(r.match(/\[(p\d+:\d+)\] textbox "Name"/)[1], "Ada Lovelace", {replace: true}); return "ok"`],
   ["type email", String.raw`const r = await p.read({query: "Email"}); await p.type("ada@example.com", r.match(/\[(p\d+:\d+)\] textbox "Email"/)[1], {replace: true}); return "ok"`],
   ["type notes", String.raw`const r = await p.read({query: "Notes"}); await p.type("typed in the background", r.match(/\[(p\d+:\d+)\] textbox "Notes"/)[1]); return "ok"`],
   ["select plan", String.raw`const r = await p.read({query: "Plan"}); await p.select(r.match(/\[(p\d+:\d+)\] combobox "Plan"/)[1], "Pro"); return "ok"`],
   ["tick agree", String.raw`const r = await p.read({query: "agree"}); await p.click(r.match(/\[(p\d+:\d+)\] checkbox/)[1]); return "ok"`],
-  ["Enter in Name", String.raw`const r = await p.read({query: "Name"}); await p.click(r.match(/\[(p\d+:\d+)\] textbox "Name"/)[1]); await p.key("Enter"); return "ok"`],
+  // Text boxes declare type, not click, so typing is what puts the focus back in Name.
+  ["Enter in Name", String.raw`const r = await p.read({query: "Name"}); await p.type(r.match(/\[(p\d+:\d+)\] textbox "Name"/)[1], "Ada Lovelace", {replace: true}); await p.key("Enter"); return "ok"`],
   ["screenshot refused fast", 'try { await p.screenshot(); return "captured" } catch (e) { return /isn.t painted/.test(e.message) ? "refused fast" : "ERR " + e.message }'],
   ["close tab", 'await p.close(); return "ok"'],
 ];
@@ -151,7 +155,7 @@ async function directRun() {
   // including after the browser's "Allow remote debugging?" prompt takes the foreground.
   const disturbance = sampler.summary();
   const background = disturbance.foreground_restored === true && disturbance.cursor_max_displacement_px === 0;
-  return { steps, wall_s, disturbance, submission, passed: isWanted(submission) && background };
+  return { steps, wall_s, disturbance, submission, passed: steps.every((s) => s.ok) && isWanted(submission) && background };
 }
 
 /** The same job as a user prompt through headless Claude Code with the plugin. */

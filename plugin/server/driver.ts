@@ -36,11 +36,14 @@ export type DriverData = Partial<{
   // "global_input", ...), and what it saw of the effect ("confirmed", "unverifiable", "suspected_noop", ...).
   route: string;
   effect: string;
+  // With effect "refused": why. Browser actions (browser_click, browser_type, ...) report refusals here.
+  error: { code?: string; hint?: string };
   pid: number;
   screenshot_width: number;
   screenshot_height: number;
   windows: DriverWindow[];
-  // Browser route (get_browser_state, browser_*): every refusal comes back as status "refused".
+  // Browser reads and binding (get_browser_state, ...): a refusal comes back as status "refused".
+  // Browser actions come back in the action envelope instead: effect "refused" with `error`.
   status: string;
   refusal: { code?: string; message?: string };
   target_id: string;

@@ -105,10 +105,11 @@ function fail(r: DriverResult, what: string): never {
   throw new Error(`${what} failed: ${msg}`);
 }
 
-/** Browser-route refusals carry {status: "refused", refusal: {code, message}}. */
+/** Browser reads refuse with {status: "refused", refusal: {code, message}}; browser actions with the
+ *  action envelope {effect: "refused", error: {code, hint}}. */
 function browserFail(r: DriverResult, what: string): never {
-  const code = r.data.refusal?.code ?? "";
-  let msg = r.data.refusal?.message ?? r.text.slice(0, 400);
+  const code = r.data.refusal?.code ?? r.data.error?.code ?? "";
+  let msg = r.data.refusal?.message ?? r.data.error?.hint ?? r.text.slice(0, 400);
   if (/stale/.test(code)) msg += "\nHint: refs belong to the latest p.read() of this tab; read again and use the new refs.";
   if (code === "browser_consent_required") msg += "\nHint: the browser didn't grant DevTools access; ask the user to allow it in the browser.";
   throw new Error(`${what} failed (${code || "error"}): ${msg}`);
@@ -776,11 +777,15 @@ class Page {
 
   info(): PageInfo { return { title: this.title, url: this.url }; }
 
+  /** Run one browser action tool on this tab. Throws unless the action fully went through: the driver
+   *  wraps browser_* refusals in its action envelope (effect "refused"), and text cut short by a
+   *  page change comes back as effect "partial". */
   private async act(tool: string, args: Args, onTab = true) {
     const r = await this.d.driver.call(tool, { target_id: this.target, ...(onTab ? { tab_id: this.tab } : {}), ...args });
     this.d.markAction();
-    audit({ tool, app: this.win.app.key, window: this.win.id, delivery: "devtools", ok: r.data.status !== "refused" && !r.isError });
-    if (r.data.status === "refused" || r.isError) browserFail(r, tool);
+    const failed = r.isError || r.data.status === "refused" || r.data.effect === "refused" || r.data.effect === "partial";
+    audit({ tool, app: this.win.app.key, window: this.win.id, delivery: "devtools", effect: r.data.effect, ok: !failed });
+    if (failed) browserFail(r, tool);
     return r;
   }
 

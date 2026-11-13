@@ -1,7 +1,7 @@
 {
   "name": "superuse",
   "displayName": "Superuse",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Windows computer use for Claude: one sandboxed JavaScript tool over a background-input UI Automation driver, with per-app approvals.",
   "author": { "name": "Advait Johari" },
   "repository": "https://github.com/AadiJo/superuse",

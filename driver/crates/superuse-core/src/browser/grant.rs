@@ -103,15 +103,20 @@ impl ExistingProfileGrants {
         endpoint_ws_url: String,
         cleanup_remote_debugging: bool,
         protected_consent: Option<crate::consent::ProtectedGrant>,
+        socket_generation: Option<u64>,
     ) -> ExistingProfileGrant {
         let now = Instant::now();
         let key = Self::key(public_session, transport_session, pid);
-        let generation = self
-            .inner
-            .lock()
-            .unwrap()
-            .get(&key)
-            .map_or(1, |grant| grant.generation.saturating_add(1));
+        // Every grant on one browser socket shares that socket's generation
+        // (`CdpPool::grant_generation`). Before the endpoint has a socket, a
+        // grant follows the one it replaces.
+        let generation = socket_generation.unwrap_or_else(|| {
+            self.inner
+                .lock()
+                .unwrap()
+                .get(&key)
+                .map_or(1, |grant| grant.generation.saturating_add(1))
+        });
         let grant = ExistingProfileGrant {
             public_session: public_session.to_owned(),
             transport_session: transport_session.unwrap_or(public_session).to_owned(),
@@ -258,6 +263,7 @@ mod tests {
             "ws://127.0.0.1:1/devtools/browser/x".to_owned(),
             false,
             None,
+            None,
         );
         assert!(matches!(
             grants.lookup("public-a", Some("transport-a"), 42),
@@ -287,6 +293,7 @@ mod tests {
             "ws://127.0.0.1:1/devtools/browser/x".to_owned(),
             false,
             None,
+            None,
         );
         assert_eq!(grants.remove_session("transport-a").len(), 1);
         assert!(matches!(
@@ -308,6 +315,7 @@ mod tests {
             BrowserProduct::GoogleChrome,
             "ws://127.0.0.1:1/devtools/browser/x".to_owned(),
             false,
+            None,
             None,
         );
         let key = ExistingProfileGrants::key("public-a", Some("transport-a"), 42);
@@ -348,6 +356,7 @@ mod tests {
             "ws://127.0.0.1:1/devtools/browser/x".to_owned(),
             true,
             None,
+            None,
         );
         grants.mint(
             "public-b",
@@ -359,6 +368,7 @@ mod tests {
             BrowserProduct::GoogleChrome,
             "ws://127.0.0.1:1/devtools/browser/x".to_owned(),
             false,
+            None,
             None,
         );
 
@@ -390,6 +400,7 @@ mod tests {
             "ws://127.0.0.1:1/devtools/browser/x".to_owned(),
             true,
             None,
+            None,
         );
         let mut reused = fingerprint(42);
         reused.start_time = Some(8);
@@ -403,6 +414,7 @@ mod tests {
             BrowserProduct::GoogleChrome,
             "ws://127.0.0.1:2/devtools/browser/y".to_owned(),
             false,
+            None,
             None,
         );
 

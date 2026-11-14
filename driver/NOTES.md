@@ -437,3 +437,30 @@ Single-agent acceptance on both builds (`acceptance-20261101-144944.json` and `-
 - `launch_app` takes no lock. An app that takes the foreground as it starts can still fail another agent's foreground action, which then reports `foreground_unavailable` as before.
 - A non-elevated driver that can't open an elevated driver's mutex acts unlocked.
 - Installs need `--build` until a maintainer publishes a driver release with this change.
+
+## One browser connection for every agent session
+
+A Chromium browser with its remote-debugging toggle on shows "Allow remote debugging?" for every new browser-level DevTools connection. The driver answers the prompt, but it still flashes in the browser and takes the foreground for about half a second. Each plugin server ran its own driver, each driver opened its own connection, so every agent session prompted once. `bench/browser-attach.ts` on `main`: a second session's bind showed 1 prompt and 2 foreground changes (attach 600 ms).
+
+One process now holds the connection. The plugin starts `superuse-driver serve` on a named pipe as a shared browser service, and every server sends its DevTools calls (`get_browser_state`, `browser_*`) through `superuse-driver mcp --socket <pipe>`. Windows, input and the agent cursor still go through each server's own driver, so cursor colors, labels and input locks work as before.
+
+Driver changes:
+
+- `CdpPool` keeps an existing-profile socket after its grant ends (`browser/cdp_ws.rs`). Before, ending a grant closed the socket, so in a runtime with two sessions the second one lost its socket when the first left, and reconnected with a new prompt. A new grant on the endpoint now takes the open socket's generation (`CdpPool::grant_generation`), so every grant on a socket agrees on it, and `claim_existing` dials only past a closed socket. `browser_prepare` invalidates a session's page capabilities only when the generation changed.
+- `serve` exits once no client has been connected for `SUPERUSE_DRIVER_EXIT_UNUSED_SECS` seconds (unset: never). The plugin sets 600. Windows only.
+- `serve` reserves its pipe name with its first instance, so of two services started at once on one name the second exits. Windows only.
+- A call on an ended session returns the registry's `session_ended` refusal through the service too, so the plugin's "start the session again and retry" works on both paths.
+
+Plugin changes (`plugin/server`): `browserService()` names the pipe after the driver build; `Driver` starts the service when its client finds none; `browserBind` moves the driver's one-window grant to the window asked for, which costs no prompt once the connection is open. Before, with several browser windows only the front one could be bound.
+
+`bench/browser-attach.ts` with this change, three Helium windows open: session A 1 prompt, then 0 prompts and 0 foreground changes for session B, for B after A exited, for a third session, and for B after its idle session ended (attach 2 to 4 ms each). Both windows the driver could tell apart bound. The service exited by itself after the last session.
+
+### Limits
+
+- The service keeps a session label for the connection that first used it, so a server's label there is its usual one plus a tail that is new for every connection ("Claude Code 1 4f2a9"). The cursor the service draws for page actions shows that label, and all sessions' page cursors share the service's one color. Cursors for native windows are unchanged.
+- The connection stays open while any session that used the service is alive, and for ten minutes after. Before, it closed with the session.
+- If the service dies, the next page call fails with "the driver process exited" and the one after starts a new service. That new connection prompts once.
+- The browser opens a new tab in its most recently active window, and the driver refuses the tab when that is not the bound window. With several windows where the front one can't be told apart from another (same size, same tab title), `p.newTab()` is refused. This is unchanged.
+- The service is a Windows process started through WSL interop, detached from the server. Killing its `/init` stub in WSL ends it.
+- Windows keeps running the old image of the exe while a process started from that path is alive. A service started right after an update can run the previous build until the old drivers exit.
+- Installs need `--build` until a maintainer publishes a driver release with this change.

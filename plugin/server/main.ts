@@ -19,7 +19,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { agentLabel } from "./agent-label.ts";
-import { Driver, trace, type CursorMode } from "./driver.ts";
+import { browserService, Driver, trace, type CursorMode } from "./driver.ts";
 import { Desktop } from "./desktop.ts";
 import { Policy, type Ask } from "./policy.ts";
 import { Sandbox } from "./sandbox.ts";
@@ -117,7 +117,10 @@ const ask: Ask = async (message, rememberLabel) => {
 };
 
 const policy = new Policy(ask);
-const desktop = new Desktop(new Driver(DRIVER, CURSOR, () => (policy.browsers === "off" ? [] : ["--grant", "existing-profile"]), () => agentLabel(clientInfo)), policy);
+const label = () => agentLabel(clientInfo);
+// Windows go through this server's own driver. Web pages go through the browser service that every
+// server shares.
+const desktop = new Desktop(new Driver(DRIVER, CURSOR, label), new Driver(DRIVER, CURSOR, label, browserService(DRIVER)), policy);
 const sandbox = await Sandbox.create((method, args) => desktop.dispatch(method, args), userWait);
 process.on("unhandledRejection", () => {}); // every API promise is tracked by the sandbox; nothing should land here
 

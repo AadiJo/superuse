@@ -253,10 +253,14 @@ export class Desktop {
    *  bind, so a tab this session opened is known by its Page, not by an id. */
   readonly opened = new Set<Page>();
   readonly driver: Driver;
+  /** The driver for DevTools work (get_browser_state, browser_*): the browser service all servers
+   *  share, so the browser is asked to allow debugging once for all of them. */
+  readonly browser: Driver;
   readonly policy: Policy;
 
-  constructor(driver: Driver, policy: Policy) {
+  constructor(driver: Driver, browser: Driver, policy: Policy) {
     this.driver = driver;
+    this.browser = browser;
     this.policy = policy;
   }
 
@@ -349,27 +353,31 @@ export class Desktop {
     }
   }
 
-  /** Bind the browser behind window `w` over DevTools. The first bind in a session attaches to the
-   *  browser's existing profile, and the driver answers the browser's "Allow remote debugging?"
-   *  prompt. Chromium shows that prompt in the browser window the user activated last, and the
-   *  driver only answers it inside the window it prepares, so attaching goes through that window.
-   *  If the attach doesn't cover `w` itself, the page binds through that front window instead. */
+  /** Bind the browser behind window `w` over DevTools. The driver's grant on a browser covers one
+   *  of its windows at a time: without a grant it refuses the bind with browser_consent_required,
+   *  and with a grant for another window with browser_binding_stale. Either way this attaches and
+   *  binds again.
+   *
+   *  Attaching goes through the browser's front window first. If the browser service has no
+   *  connection to that browser yet, it opens one, and the browser shows "Allow remote debugging?"
+   *  in the window the user activated last; the driver answers that prompt only inside the window
+   *  it prepares. With the connection open, moving the grant to `w` shows no prompt, and pages
+   *  bound through other windows keep working. If `w` can't take the grant, the page binds through
+   *  the front window instead. */
   async browserBind(w: Win): Promise<{ target: string; tabs: BrowserTab[]; win: Win }> {
     if (this.policy.browsers === "off") {
-      throw new Error(`web pages are reached over the browser's DevTools, which is off. Set "browsers": "tab" in ${this.policy.file} and start a new session, or use this window's accessibility tree (w.state, w.setValue, w.click).`);
+      throw new Error(`web pages are reached over the browser's DevTools, which is off. Set "browsers": "tab" in ${this.policy.file}, or use this window's accessibility tree (w.state, w.setValue, w.click).`);
     }
-    const bind = (x: { pid: number; id: number }) => this.driver.call("get_browser_state", { pid: x.pid, window_id: x.id });
+    const bind = (x: { pid: number; id: number }) => this.browser.call("get_browser_state", { pid: x.pid, window_id: x.id });
+    const attach = (x: { pid: number; id: number }) => this.browser.call("browser_prepare", { pid: x.pid, window_id: x.id, strategy: { kind: "existing_profile" } });
     let via = w;
     let r = await bind(w);
-    if (r.data.refusal?.code === "browser_consent_required") {
+    if (r.data.refusal?.code === "browser_consent_required" || r.data.refusal?.code === "browser_binding_stale") {
       const front = await this.frontWindowOf(w);
-      const prep = await this.driver.call("browser_prepare", { pid: front.pid, window_id: front.id, strategy: { kind: "existing_profile" } });
+      const prep = await attach(front);
       if (prep.data.status !== "ok") browserFail(prep, "attaching to the browser");
-      r = await bind(w);
-      if (r.data.refusal?.code === "browser_consent_required" && front.id !== w.id) {
-        via = front;
-        r = await bind(front);
-      }
+      if (front.id !== w.id && (await attach(w)).data.status !== "ok") via = front;
+      r = await bind(via);
     }
     if (r.data.status !== "ok" || !r.data.target_id) browserFail(r, "binding the browser");
     if (r.data.mutation_allowed === false) throw new Error("the browser window is bound read-only (its tab couldn't be matched exactly); bind the window again");
@@ -796,7 +804,7 @@ class Page {
    *  wraps browser_* refusals in its action envelope (effect "refused"), and text cut short by a
    *  page change comes back as effect "partial". */
   private async act(tool: string, args: Args, onTab = true) {
-    const r = await this.d.driver.call(tool, { target_id: this.target, ...(onTab ? { tab_id: this.tab } : {}), ...args });
+    const r = await this.d.browser.call(tool, { target_id: this.target, ...(onTab ? { tab_id: this.tab } : {}), ...args });
     this.d.markAction();
     const failed = r.isError || r.data.status === "refused" || r.data.effect === "refused" || r.data.effect === "partial";
     audit({ tool, app: this.win.app.key, window: this.win.id, delivery: "devtools", effect: r.data.effect, ok: !failed });
@@ -806,7 +814,7 @@ class Page {
 
   /** The page as an outline, then its actionable elements as refs like [p3:12]. */
   async read(opts: { query?: string; screenshot?: boolean } = {}): Promise<string> {
-    const snap = () => this.d.driver.call("get_browser_state", {
+    const snap = () => this.d.browser.call("get_browser_state", {
       target_id: this.target, tab_id: this.tab, snapshot_format: "semantic_v2", query: opts.query, include_screenshot: opts.screenshot || undefined,
     });
     let r = await snap();
@@ -839,7 +847,7 @@ class Page {
 
   /** "Enter", "Escape", "ctrl+a": sent to the page's focused element. */
   async key(combo: string) {
-    if (!this.d.driver.has("browser_press_key")) throw new Error("page key presses need a newer driver; click the page's button instead");
+    if (!this.d.browser.has("browser_press_key")) throw new Error("page key presses need a newer driver; click the page's button instead");
     const parts = combo.split("+").map((k) => k.trim());
     const key = parts.pop()!;
     const modifiers = parts.map((m) => MODIFIERS[m.toLowerCase()] ?? m.toLowerCase());
@@ -849,7 +857,7 @@ class Page {
   /** Choose an option of a <select>. Uses the driver's page route when it has one, otherwise the
    *  window's accessibility tree, which changes <select> values in the background. */
   async select(at: string, option: string) {
-    if (this.d.driver.has("browser_select")) return void await this.act("browser_select", { ref: at, option });
+    if (this.d.browser.has("browser_select")) return void await this.act("browser_select", { ref: at, option });
     const name = this.refs.get(at)?.name;
     if (!name) throw new Error(`select: read() the page first; ${at} isn't in the latest read`);
     const n = await this.win.find(name, "ComboBox");
@@ -861,7 +869,7 @@ class Page {
 
   /** Open a tab in the background, without touching the user's current tab. */
   async newTab(url: string): Promise<Page> {
-    if (!this.d.driver.has("browser_open_tab")) throw new Error("opening tabs needs a newer driver; use p.go(url) on a tab you opened, or ask the user");
+    if (!this.d.browser.has("browser_open_tab")) throw new Error("opening tabs needs a newer driver; use p.go(url) on a tab you opened, or ask the user");
     const r = await this.act("browser_open_tab", { url }, false);
     const tabId = r.data.tab_id;
     if (!tabId) throw new Error("the browser didn't report the new tab");

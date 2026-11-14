@@ -19,6 +19,8 @@ The scripts run on Node 24+ through type stripping, with no build step. `npm ins
 
 `node helium-check.ts [--direct | --claude]` checks the plugin's page API in your own Helium. It fills a test form in a tab it opens and closes again, and writes `out/helium-check-<time>.json`.
 
+`node browser-attach.ts [--title Helium]` checks that agent sessions share one DevTools connection to your own open browser: two plugin servers bind it, one exits, a third starts, and an idle session ends, and the browser's "Allow remote debugging?" prompt must show once in all of that. It also checks that every browser window binds and that the shared browser service exits when no session is left. It stops this checkout's browser service first, and writes `out/browser-attach-<time>.json`.
+
 `node tab-scope.ts [--title Helium]` checks `"browsers": "tab"` in your own open browser: a session under it must reach the selected tab and its own tabs, and must not list or find a tab another session opened. It opens and closes two test tabs, and writes `out/tab-scope-<time>.json`.
 
 `node cursor-colors.ts [--baseline <exe>]` checks that drivers running side by side draw different cursor colors, and that a driver which exits frees its color. It sends input to three MenuPads it opens, and writes `out/cursor-colors/<time>.json` with PNGs.

@@ -489,9 +489,20 @@ async fn invoke_daemon_tool(
                     "Call start_session with session '{sid}' to start it again, or use a new session label."
                 )
             };
-            return DaemonResponse::err(
-                format!("session has ended; tool call '{tool_name}' was rejected. {recovery}"),
-                1,
+            // The same refusal the registry gives a client that owns its
+            // runtime, so one recovery (`refusal.code == "session_ended"`,
+            // then `start_session`) works however the client reached it.
+            let message =
+                format!("session has ended; tool call '{tool_name}' was rejected. {recovery}");
+            let refusal = serde_json::json!({
+                "status": "refused",
+                "refusal": { "code": "session_ended", "message": message },
+            });
+            return DaemonResponse::ok(
+                serde_json::to_value(
+                    superuse_core::protocol::ToolResult::error(message).with_structured(refusal),
+                )
+                .expect("tool result is serializable"),
             );
         }
     }
@@ -1718,6 +1729,9 @@ pub async fn run_serve(
     };
     tokio::pin!(parent_liveness);
 
+    let clients = std::sync::Arc::new(ConnectedClients::new());
+    let exit_when_unused = exit_when_unused();
+
     // Idle-session and recording maintenance is owned by the SDK runtime.
     if let Some(port) = crate::mcp_http::configured_port()? {
         crate::mcp_http::spawn(sdk.clone(), port)?;
@@ -1759,9 +1773,10 @@ pub async fn run_serve(
             }
         }
 
-        // All daemons use the current-user descriptor. Embedded daemons also
-        // reserve the pipe name with their first instance.
-        let first_pipe_instance = embedded && first_pipe;
+        // All daemons use the current-user descriptor, and reserve the pipe
+        // name with their first instance: of two daemons started at once on
+        // one name, the second fails here instead of serving half the clients.
+        let first_pipe_instance = first_pipe;
         let created = if sec_attrs_ptr.is_null() {
             ServerOptions::new()
                 .first_pipe_instance(first_pipe_instance)
@@ -1833,8 +1848,10 @@ pub async fn run_serve(
                 let reg = sdk.clone();
                 let shutdown_tx2 = shutdown_tx.clone();
                 let trusted_resume_registry = trusted_resume_registry.clone();
+                let client = clients.connect();
 
                 tokio::spawn(async move {
+                    let _client = client;
                     let (reader, mut writer) = tokio::io::split(server);
                     let mut lines = BufReader::new(reader).lines();
 
@@ -2175,6 +2192,10 @@ pub async fn run_serve(
                 eprintln!("Cua Driver embedded host closed its lifetime pipe; shutting down.");
                 break;
             }
+            _ = clients.unused_for(exit_when_unused) => {
+                eprintln!("Cua Driver daemon has had no client for its exit-when-unused time; shutting down.");
+                break;
+            }
         }
     }
 
@@ -2191,6 +2212,73 @@ pub async fn run_serve(
 }
 
 /// Pause between attempts to replace a named-pipe instance that failed.
+/// Seconds without a connected client after which the daemon exits. Unset, it
+/// runs until told to stop. A service that many clients start on demand and
+/// none supervises sets this (the plugin's shared browser service does), so
+/// it ends, and closes what it holds, once the last client is gone.
+#[cfg(target_os = "windows")]
+const EXIT_WHEN_UNUSED_ENV: &str = "SUPERUSE_DRIVER_EXIT_UNUSED_SECS";
+
+#[cfg(target_os = "windows")]
+fn exit_when_unused() -> Option<std::time::Duration> {
+    std::env::var(EXIT_WHEN_UNUSED_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(std::time::Duration::from_secs)
+}
+
+/// Client connections the daemon is serving, and when it last had none.
+#[cfg(target_os = "windows")]
+struct ConnectedClients {
+    count: std::sync::atomic::AtomicUsize,
+    unused_since: Mutex<std::time::Instant>,
+}
+
+#[cfg(target_os = "windows")]
+impl ConnectedClients {
+    fn new() -> Self {
+        Self {
+            count: std::sync::atomic::AtomicUsize::new(0),
+            unused_since: Mutex::new(std::time::Instant::now()),
+        }
+    }
+
+    /// Count one connection until the returned guard drops.
+    fn connect(self: &std::sync::Arc<Self>) -> ConnectedClient {
+        self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ConnectedClient(self.clone())
+    }
+
+    /// Resolves once no client has been connected for `limit`; never, without one.
+    async fn unused_for(&self, limit: Option<std::time::Duration>) {
+        let Some(limit) = limit else {
+            return std::future::pending().await;
+        };
+        loop {
+            let unused = (self.count.load(std::sync::atomic::Ordering::SeqCst) == 0)
+                .then(|| self.unused_since.lock().unwrap().elapsed());
+            match unused {
+                Some(unused) if unused >= limit => return,
+                Some(unused) => tokio::time::sleep(limit - unused).await,
+                None => tokio::time::sleep(limit).await,
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct ConnectedClient(std::sync::Arc<ConnectedClients>);
+
+#[cfg(target_os = "windows")]
+impl Drop for ConnectedClient {
+    fn drop(&mut self) {
+        if self.0.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            *self.0.unused_since.lock().unwrap() = std::time::Instant::now();
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 const PIPE_INSTANCE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 

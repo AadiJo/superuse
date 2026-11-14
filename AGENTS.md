@@ -21,7 +21,8 @@ Finish by telling the user the outcome, what you verified, and anything still wa
 
 ## Working on Superuse
 
-- Checks: `node bench/server-check.ts` (sandbox and policy), `node bench/ui-check.ts` (window API on fixture windows; sends input, so run it on an idle desktop), `node bench/acceptance.ts` (driver checks on real apps; also sends input), `node bench/setup-check.ts` (installer, in isolated client config), `npm run typecheck` at the root and in `plugin/server`.
+- Checks: `node bench/server-check.ts` (sandbox and policy), `node bench/ui-check.ts` (window API on fixture windows; sends input, so run it on an idle desktop), `node bench/acceptance.ts` (driver checks on real apps; also sends input), `node bench/setup-check.ts` (installer, in isolated client config), `node bench/browser-attach.ts` and `node bench/tab-scope.ts` (browser attach and tab scope, on the user's own open browser), `npm run typecheck` at the root and in `plugin/server`.
 - Bump `version` in `plugin/.claude-plugin/plugin.json` whenever the server, skill, launcher, dependencies or driver pin change. The server and setup read it from there.
+- Windows keeps running the old image of `superuse-driver.exe` while any process started from that path is alive, and the shared browser service outlives the server that started it. After rebuilding the driver, stop this checkout's driver processes before you test it. `node bench/browser-attach.ts` stops the browser service itself.
 - Editing `driver/` or `scripts/build-driver.sh` changes the driver's source fingerprint. Installs then need `--build`, until a maintainer runs `node scripts/release-driver.ts --publish` and commits the new `driver/release.json`.
 - Agent sessions export `CLAUDE_CONFIG_DIR`, which beats `HOME`. A test that only changes `HOME` edits the user's real Claude config. Set `CLAUDE_CONFIG_DIR` and `CODEX_HOME` too, as `bench/setup-check.ts` does.

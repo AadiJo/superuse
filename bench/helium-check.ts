@@ -113,7 +113,14 @@ async function js(c: McpClient, code: string): Promise<{ text: string; error: bo
 
 // The page API by hand: open a background tab, fill the form, submit with Enter, close the tab.
 const STEPS: Array<[label: string, code: string]> = [
-  ["bind Helium + open tab", `const w = await desktop.window({app: "chrome", title: "Helium"}); globalThis.p = await w.page().newTab(${JSON.stringify(FORM_URL)}); return p.title`],
+  // The driver refuses a window it can't tell from another of the same size, so with several Helium
+  // windows open the first that binds is the one to use.
+  ["bind Helium + open tab", `const rows = (await desktop.windows()).filter((r) => r.id !== undefined && r.title.endsWith("- Helium"));
+let failure = new Error("no Helium window");
+for (const row of rows) {
+  try { globalThis.p = await (await desktop.window({pid: row.pid, id: row.id})).page().newTab(${JSON.stringify(FORM_URL)}); return p.title } catch (e) { failure = e }
+}
+throw failure;`],
   ["read", "return await p.read()"],
   // A ref from a superseded read must throw, not return as if the text went in.
   ["stale ref refused", String.raw`const old = (await p.read({query: "Name"})).match(/\[(p\d+:\d+)\] textbox "Name"/)[1]; await p.read({query: "Name"}); try { await p.type(old, "STALE"); } catch (e) { if (/browser_ref_stale/.test(e.message)) return "refused"; throw e; } throw new Error("a stale ref was accepted")`],

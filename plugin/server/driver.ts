@@ -2,8 +2,12 @@
 // newline-delimited JSON-RPC. One long-lived process serves every call, and calls run one at a
 // time in the order they were issued. If the driver exits, the next call starts a fresh one; if it
 // ends our session after the idle timeout, the next call starts the session again.
+//
+// A Driver either owns its runtime, or reaches one that every Superuse server on this desktop
+// shares (browserService below).
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import { createInterface } from "node:readline";
 import { VERSION } from "./version.ts";
@@ -70,6 +74,27 @@ type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
 const TIMEOUT_MS = 20_000;
 
+/** A driver runtime shared by every Driver that names the same pipe. The driver process is then a
+ *  thin client of it; the first client starts the service, and the service exits by itself once no
+ *  client has been connected for `exitUnusedSecs` (SUPERUSE_DRIVER_EXIT_UNUSED_SECS replaces it).
+ *
+ *  The service keeps a session label for the connection that first used it, even after that client
+ *  has exited, and our labels ("Claude Code 1") pass from one server to the next. So a client's
+ *  label there is its usual one plus a short tail that is new for every connection. The badge under
+ *  the cursor the service draws for page actions shows it, e.g. "Claude Code 1 4f2a9". */
+export type SharedService = { pipe: string; grants: string[]; exitUnusedSecs: number };
+
+/** The service that holds this desktop's DevTools connections to the user's browsers. A browser
+ *  asks its user "Allow remote debugging?" for every new connection, so one process keeps a single
+ *  connection per browser and every agent session's page calls go through it: the browser asks
+ *  once, not once per session. It closes its connections when it exits, ten minutes after the last
+ *  session that used it has gone. The name is per driver build, so a rebuilt or updated driver
+ *  gets its own service instead of one still running the old code. */
+export function browserService(exe: string): SharedService {
+  const build = createHash("sha256").update(`${exe}\n${fs.statSync(exe, { throwIfNoEntry: false })?.mtimeMs ?? 0}`).digest("hex").slice(0, 12);
+  return { pipe: String.raw`\\.\pipe\superuse-browser-${build}`, grants: ["existing-profile"], exitUnusedSecs: 600 };
+}
+
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export type CursorMode = "fast" | "animated" | "off";
@@ -90,28 +115,61 @@ export class Driver {
   private tail: Promise<unknown> = Promise.resolve();
   private readonly exe: string;
   private readonly cursor: CursorMode;
-  private readonly launchArgs: () => string[];
   private readonly sessionLabel: () => Promise<string>;
+  private readonly shared: SharedService | undefined;
   // Every call carries one session label, so cursor settings apply to every action. The driver
   // draws it in the badge under the agent cursor; it's fixed for the life of the driver process.
   private session = "superuse";
 
-  /** `launchArgs` and `sessionLabel` are read each time the driver process starts (e.g. the
-   *  existing-profile grant, and a label that names the MCP client). The driver starts on the first
-   *  desktop call, so a session that never uses the desktop never asks for a label. */
-  constructor(exe: string, cursor: CursorMode, launchArgs: () => string[] = () => [], sessionLabel: () => Promise<string> = async () => "superuse") {
+  /** `sessionLabel` is read each time the driver process starts (a label that names the MCP
+   *  client). The driver starts on the first call, so a session that never uses the desktop never
+   *  asks for a label. With `shared`, the process is a client of that service, not its own runtime. */
+  constructor(exe: string, cursor: CursorMode, sessionLabel: () => Promise<string> = async () => "superuse", shared?: SharedService) {
     this.exe = exe;
     this.cursor = cursor;
-    this.launchArgs = launchArgs;
     this.sessionLabel = sessionLabel;
+    this.shared = shared;
   }
 
   /** Whether the running driver offers a tool. Valid once a call has completed the handshake. */
   has(tool: string) { return this.toolNames.has(tool); }
 
+  /** The driver's environment. WSLENV names the variables that cross into the Windows process. */
+  private env(extra: Record<string, string> = {}) {
+    const wslenv = ["DO_NOT_TRACK", ...Object.keys(extra), process.env.WSLENV].filter(Boolean).join(":");
+    return { ...process.env, DO_NOT_TRACK: "1", ...extra, WSLENV: wslenv };
+  }
+
   private start() {
-    const wslenv = ["DO_NOT_TRACK", process.env.WSLENV].filter(Boolean).join(":");
-    const proc = spawn(this.exe, ["mcp", ...this.launchArgs()], { env: { ...process.env, DO_NOT_TRACK: "1", WSLENV: wslenv } });
+    this.ready = withTimeout(this.connect(), "starting the driver");
+  }
+
+  /** Start the driver process and shake hands. A client of a shared service exits at once when no
+   *  service is listening: start the service then, and try again until it answers. Detached, so
+   *  the service outlives this server; two servers starting one at the same moment is fine, because
+   *  the second service finds the pipe taken and exits. */
+  private async connect() {
+    const giveUp = Date.now() + TIMEOUT_MS / 2;
+    for (let startedService = false; ;) {
+      this.launch();
+      try {
+        return await this.handshake();
+      } catch (e) {
+        // A process that is still running failed for some other reason.
+        if (!this.shared || this.proc || Date.now() > giveUp) throw e;
+        if (!startedService) {
+          const { pipe, grants, exitUnusedSecs } = this.shared;
+          spawn(this.exe, ["serve", "--socket", pipe, ...grants.flatMap((g) => ["--grant", g])],
+            { detached: true, stdio: "ignore", env: this.env({ SUPERUSE_DRIVER_EXIT_UNUSED_SECS: process.env.SUPERUSE_DRIVER_EXIT_UNUSED_SECS ?? String(exitUnusedSecs) }) }).unref();
+          startedService = true;
+        }
+        await sleep(250);
+      }
+    }
+  }
+
+  private launch() {
+    const proc = spawn(this.exe, this.shared ? ["mcp", "--socket", this.shared.pipe] : ["mcp"], { env: this.env() });
     this.proc = proc;
     createInterface({ input: proc.stdout }).on("line", (line) => this.onLine(line));
     proc.stderr.on("data", () => {}); // driver logs; ignored
@@ -124,11 +182,11 @@ export class Driver {
     };
     proc.on("exit", () => gone("the driver process exited; the next call restarts it"));
     proc.on("error", (e) => gone(`couldn't run the driver at ${this.exe}: ${e.message}`));
-    this.ready = withTimeout(this.handshake(), "starting the driver");
   }
 
   private async handshake() {
-    this.session = await this.sessionLabel();
+    const label = await this.sessionLabel();
+    this.session = this.shared ? `${label} ${randomBytes(3).toString("hex").slice(0, 5)}` : label;
     await this.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "superuse", version: VERSION } });
     this.send({ jsonrpc: "2.0", method: "notifications/initialized" });
     const list = (await this.request("tools/list", {})) as { tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }> };

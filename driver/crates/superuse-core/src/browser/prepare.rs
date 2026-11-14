@@ -1194,6 +1194,7 @@ impl BrowserEngine {
             || previous_grant
                 .as_ref()
                 .is_some_and(|grant| grant.cleanup_remote_debugging);
+        let socket_generation = self.pool.grant_generation(&endpoint.ws_url).await;
         let grant = self.existing_profile_grants.mint(
             &request.session,
             request.transport_session.as_deref(),
@@ -1205,11 +1206,9 @@ impl BrowserEngine {
             endpoint.ws_url.clone(),
             cleanup_remote_debugging,
             protected_consent,
+            socket_generation,
         );
         if let Some(previous) = previous_grant {
-            self.pool
-                .release_existing(&previous.endpoint_ws_url, previous.generation)
-                .await;
             if let Some(protected) = previous.protected_consent.as_ref() {
                 self.approval_broker.revoke(protected).await;
             }
@@ -1353,8 +1352,12 @@ impl BrowserEngine {
                 }
             }
         }
-        self.store
-            .invalidate_endpoint_generation(pid, previous_generation);
+        // A grant that reused the open socket keeps its generation, and the
+        // capabilities minted on that socket stay valid.
+        if previous_generation != grant.generation {
+            self.store
+                .invalidate_endpoint_generation(pid, previous_generation);
+        }
 
         Ok(PrepareOutcome {
             action: PrepareAction::AttachedExistingProfile,

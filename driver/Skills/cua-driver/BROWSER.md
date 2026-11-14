@@ -216,6 +216,11 @@ used internally by typed browser tools and refuses caller-directed raw target ac
 `Runtime.enable`, persistent page scripts, request interception, and browser
 identity overrides.
 
+The runtime keeps its browser socket after a grant ends, and every grant on one
+browser shares it. A later `browser_prepare` for that browser, from the same
+session or another one on the same runtime, reuses the open socket, so the
+browser does not prompt again. The socket closes with the browser or the runtime.
+
 The grant lives only in the runtime, is scoped and expiring, and is discarded
 when the runtime shuts down. A bounded reconnect can reuse it only while the same
 process/profile proof remains valid. After preparation or reconnect, discard

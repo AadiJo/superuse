@@ -679,10 +679,6 @@ impl BrowserEngine {
                             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                                 let engine = engine.clone();
                                 runtime.spawn(async move {
-                                    engine
-                                        .pool
-                                        .release_existing(&grant.endpoint_ws_url, grant.generation)
-                                        .await;
                                     if let Some(protected) = grant.protected_consent.as_ref() {
                                         engine.approval_broker.revoke(protected).await;
                                     }
@@ -754,9 +750,6 @@ impl BrowserEngine {
                             .push(request);
                     }
                 }
-                self.pool
-                    .release_existing(&grant.endpoint_ws_url, grant.generation)
-                    .await;
                 if let Some(protected) = grant.protected_consent.as_ref() {
                     self.approval_broker.revoke(protected).await;
                 }
@@ -798,9 +791,6 @@ impl BrowserEngine {
                         .push(request);
                 }
             }
-            self.pool
-                .release_existing(&grant.endpoint_ws_url, grant.generation)
-                .await;
             if let Some(protected) = grant.protected_consent.as_ref() {
                 self.approval_broker.revoke(protected).await;
             }

@@ -175,8 +175,7 @@ export class Policy {
   }
 
   /** How much of a running browser's existing profile w.page() may reach: nothing, the selected tab
-   *  and tabs opened here, or every tab. Anything but "off" is read when the driver starts, because
-   *  the driver takes the matching grant (`--grant existing-profile`) at launch. */
+   *  and tabs opened here, or every tab. */
   get browsers(): BrowserMode {
     this.refresh();
     const mode = process.env.SUPERUSE_BROWSERS ?? this.conf.browsers;

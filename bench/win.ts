@@ -13,7 +13,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
+export const POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
 export const WIN_TEMP = String.raw`C:\Users\Aadi\AppData\Local\Temp\superuse`;
 export const WSL_TEMP = "/mnt/c/Users/Aadi/AppData/Local/Temp/superuse";
 
@@ -52,7 +52,7 @@ public static class SuperuseW {
 "@
 `;
 
-const encode = (script: string) => Buffer.from(script, "utf16le").toString("base64");
+export const encode = (script: string) => Buffer.from(script, "utf16le").toString("base64");
 
 /** Run a PowerShell snippet on Windows and return its stdout. The exit code is ignored; a run
  * past `timeoutMs` is killed and throws. stdin stays closed, because WSL interop would relay ours. */

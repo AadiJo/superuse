@@ -45,8 +45,26 @@ function check(name: string, ok: boolean, detail: string) {
 const session = (browsers: "tab" | "attach") =>
   McpClient.start(["node", path.join(REPO, "plugin/server/main.ts")], { env: { SUPERUSE_AUDIT: "off", SUPERUSE_BROWSERS: browsers, SUPERUSE_APPS: "chrome" } });
 
+/** The browser window both sessions use, once the first session has found one that binds. */
+let target: { pid: number; id: number } | undefined;
+
+// The driver refuses a window it can't tell from another of the same size, so with several browser
+// windows open the first that binds is the one to use.
+const FIND = `const rows = (await desktop.windows()).filter((r) => r.id !== undefined && r.title.includes(${JSON.stringify(flags.title)}));
+let failure = new Error("no window titled " + ${JSON.stringify(flags.title)});
+for (const row of rows) {
+  try { await (await desktop.window({pid: row.pid, id: row.id})).page(); return JSON.stringify({pid: row.pid, id: row.id}); } catch (e) { failure = e }
+}
+throw failure;`;
+
+/** Run `code` with `w` bound to the target window. */
 async function js(c: McpClient, code: string): Promise<{ text: string; error: boolean }> {
-  const { result } = await c.call("js", { code: `const w = await desktop.window({app: "chrome", title: ${JSON.stringify(flags.title)}});\n${code}` }, 120_000);
+  if (!target) {
+    const { result } = await c.call("js", { code: FIND }, 120_000);
+    if (result.isError) return { text: textOf(result), error: true };
+    target = JSON.parse(textOf(result)) as typeof target;
+  }
+  const { result } = await c.call("js", { code: `const w = await desktop.window(${JSON.stringify(target)});\n${code}` }, 120_000);
   return { text: textOf(result), error: !!result.isError };
 }
 

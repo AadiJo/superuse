@@ -439,7 +439,11 @@ pub fn endpoint_port_is_grant_owned(url: &str) -> bool {
 }
 
 /// One pooled browser-level connection per endpoint URL. Existing-profile
-/// entries are additionally owned by one explicit connection generation.
+/// entries additionally carry a connection generation, shared by every grant
+/// on the endpoint, and stay in the pool after their grants end: the browser
+/// asks its user to allow every new browser-level connection, so the next
+/// grant reuses the open socket instead of dialing. The socket closes with the
+/// browser or with this process.
 pub struct CdpPool {
     conns: Mutex<HashMap<String, PoolEntry>>,
     claimed_loopback_ports: StdMutex<HashSet<u16>>,
@@ -482,8 +486,23 @@ impl CdpPool {
         Ok(conn)
     }
 
+    /// The generation a new grant on this endpoint takes: the open socket's
+    /// own, so every grant on one socket agrees on it, or the one after a
+    /// closed socket's. `None` when no grant has used the endpoint.
+    pub async fn grant_generation(&self, ws_url: &str) -> Option<u64> {
+        let conns = self.conns.lock().await;
+        let entry = conns.get(ws_url)?;
+        let generation = entry.generation?;
+        Some(if entry.conn.is_closed() {
+            generation.saturating_add(1)
+        } else {
+            generation
+        })
+    }
+
     /// Convert the one live browser-level socket into grant-owned state. This
     /// does not redial and therefore cannot create a second consent prompt.
+    /// Only a closed socket left by an earlier grant is dialed again.
     pub async fn claim_existing(
         &self,
         ws_url: &str,
@@ -494,8 +513,10 @@ impl CdpPool {
         let mut conns = self.conns.lock().await;
         let conn = match conns.get(ws_url) {
             Some(entry) if !entry.conn.is_closed() => entry.conn.clone(),
-            Some(_) => anyhow::bail!("the approved browser socket closed before it was claimed"),
-            None => Arc::new(CdpConnection::connect(ws_url).await?),
+            Some(entry) if entry.generation.is_none() => {
+                anyhow::bail!("the approved browser socket closed before it was claimed")
+            }
+            _ => Arc::new(CdpConnection::connect(ws_url).await?),
         };
         conn.restrict_to_existing_profile();
         conns.insert(
@@ -586,6 +607,9 @@ impl CdpPool {
         self.conns.lock().await.remove(ws_url);
     }
 
+    /// A grant on this endpoint ended. Only the marker goes: the socket stays
+    /// in the pool, open or closed, so the next grant reuses it or takes the
+    /// generation after it.
     pub fn release_claim_marker(&self, ws_url: &str) {
         if let Some(port) = loopback_port(ws_url) {
             if self.claimed_loopback_ports.lock().unwrap().remove(&port) {
@@ -594,17 +618,6 @@ impl CdpPool {
         }
     }
 
-    pub async fn release_existing(&self, ws_url: &str, generation: u64) {
-        let mut conns = self.conns.lock().await;
-        if conns
-            .get(ws_url)
-            .is_some_and(|entry| entry.generation == Some(generation))
-        {
-            conns.remove(ws_url);
-        }
-        drop(conns);
-        self.release_claim_marker(ws_url);
-    }
 }
 
 impl Default for CdpPool {
@@ -707,11 +720,14 @@ mod tests {
         assert!(pool.get_existing(&url, 2).await.is_err());
         let reused = pool.get_existing(&url, 1).await.unwrap();
         assert!(Arc::ptr_eq(&claimed, &reused));
-        pool.release_existing(&url, 1).await;
+        pool.release_claim_marker(&url);
         assert!(
-            pool.get(&url).await.is_ok(),
-            "session cleanup releases ownership"
+            pool.get(&url).await.is_err(),
+            "the socket stays grant-owned after its grant ends"
         );
+        assert_eq!(pool.grant_generation(&url).await, Some(1));
+        let next = pool.claim_existing(&url, 1).await.unwrap();
+        assert!(Arc::ptr_eq(&claimed, &next), "the next grant must not redial");
     }
 
     #[tokio::test]
@@ -778,36 +794,6 @@ mod tests {
         assert!(endpoint_port_is_grant_owned(&url));
         drop(second);
         assert!(!endpoint_port_is_grant_owned(&url));
-    }
-
-    #[tokio::test]
-    async fn stalled_reconnect_does_not_block_generation_release() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(async move {
-            let (first, _) = listener.accept().await.unwrap();
-            let _first_ws = tokio_tungstenite::accept_async(first).await.unwrap();
-            let (_stalled_reconnect, _) = listener.accept().await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        });
-        let url = format!("ws://127.0.0.1:{port}/devtools/browser/reconnect");
-        let pool = CdpPool::new();
-        let claimed = pool.claim_existing(&url, 1).await.unwrap();
-        claimed.demux.close();
-
-        let mut reconnect = Box::pin(pool.reconnect_existing(&url, 1, 2));
-        tokio::select! {
-            _ = &mut reconnect => panic!("reconnect unexpectedly completed"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-        }
-        tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            pool.release_existing(&url, 1),
-        )
-        .await
-        .expect("grant release must not wait for the reconnect handshake");
-        drop(reconnect);
-        server.abort();
     }
 
     #[tokio::test]

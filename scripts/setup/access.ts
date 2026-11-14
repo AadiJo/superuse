@@ -10,7 +10,7 @@ import { windowsDir, writeAtomic, type Check } from "./lib.ts";
 export const POLICY = process.env.SUPERUSE_POLICY ?? path.join(os.homedir(), ".config", "superuse", "policy.json");
 
 type Foreground = "ask" | "allow" | "deny";
-type Browsers = "attach" | "off";
+type Browsers = "tab" | "attach" | "off";
 type PolicyFile = { allow?: string[]; deny?: string[]; foreground?: Foreground; browsers?: Browsers; [other: string]: unknown };
 
 /** Choices the user approved, from install's flags. */
@@ -34,12 +34,17 @@ function readPolicy(): Read {
   }
 }
 
-/** Whether the policy file turns browser attach on. SUPERUSE_BROWSERS in this shell doesn't count:
- *  clients don't see it, and verification removes it. */
-export function browsersEnabled(): boolean {
+/** The policy file's browser mode: "tab" (the selected tab and tabs superuse opens), "attach" (every
+ *  tab) or "off". SUPERUSE_BROWSERS in this shell doesn't count: clients don't see it, and
+ *  verification removes it. */
+function browserMode(): Browsers {
   const r = readPolicy();
-  return r.kind === "ok" && r.policy.browsers === "attach";
+  const mode = r.kind === "ok" ? r.policy.browsers : undefined;
+  return mode === "tab" || mode === "attach" ? mode : "off";
 }
+
+/** Whether the policy file lets w.page() attach to the user's browser at all. */
+export const browsersEnabled = (): boolean => browserMode() !== "off";
 
 export function checkPolicy(): Check {
   const id = "policy";
@@ -96,13 +101,14 @@ export function browsersByHint(): string[] {
  *  at some point; only scripts/doctor.sh --verify proves a connection. */
 export function checkBrowser(): Check {
   const id = "browser";
-  if (!browsersEnabled()) return { id, status: "ok", code: "BROWSER_DISABLED", summary: "off (w.page() can't reach the user's logged-in browser)", next: "If the user wants that, rerun install with --browsers=attach." };
+  const mode = browserMode();
+  if (mode === "off") return { id, status: "ok", code: "BROWSER_DISABLED", summary: "off (w.page() can't reach the user's logged-in browser)", next: "If the user wants that, rerun install with --browsers=tab (the selected tab and tabs superuse opens) or --browsers=attach (every tab)." };
   const local = windowsDir("LOCALAPPDATA");
   const found = local ? BROWSERS.filter(([, dir]) => fs.existsSync(path.join(local, dir))) : [];
   const evidence = found.map(([name, dir]) => `${name}: ${fs.existsSync(path.join(local!, dir, "DevToolsActivePort")) ? "remote debugging has been on (a hint, not a connection)" : "no sign of remote debugging"}`);
-  if (!found.length) return { id, status: "action", code: "BROWSER_NOT_FOUND", summary: "browsers: attach, but no Chrome, Edge, Helium, Chromium or Brave profile was found", next: "Install a Chromium browser, or set browsers back to off." };
+  if (!found.length) return { id, status: "action", code: "BROWSER_NOT_FOUND", summary: `browsers: ${mode}, but no Chrome, Edge, Helium, Chromium or Brave profile was found`, next: "Install a Chromium browser, or set browsers back to off." };
   return {
-    id, status: "action", code: "BROWSER_UNVERIFIED", summary: "browsers: attach, not verified yet", evidence,
+    id, status: "action", code: "BROWSER_UNVERIFIED", summary: `browsers: ${mode}, not verified yet`, evidence,
     next: "Open the browser, turn on chrome://inspect/#remote-debugging, approve the browser app, restart the MCP server if it was running, then run scripts/doctor.sh --verify.",
   };
 }

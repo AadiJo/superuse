@@ -37,7 +37,9 @@ Access choices (install only). Pass only what the user approved; nothing else ch
   --allow-apps=a,b         apps superuse may control without asking (e.g. TestPad,Calculator; "*" for all)
   --foreground=ask|allow|deny
                            whether superuse may briefly take the real mouse and focus
-  --browsers=attach|off    whether w.page() may use the user's running, logged-in browser`;
+  --browsers=tab|attach|off
+                           whether w.page() may use the user's running, logged-in browser: tab is
+                           the selected tab and tabs superuse opens, attach is every tab`;
 
 const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
@@ -75,7 +77,7 @@ function oneOf<const T extends string>(value: string | undefined, allowed: reado
 const choices: AccessChoices = {
   allowApps: (opts["allow-apps"] ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   foreground: oneOf(opts.foreground, ["ask", "allow", "deny"], "foreground"),
-  browsers: oneOf(opts.browsers, ["attach", "off"], "browsers"),
+  browsers: oneOf(opts.browsers, ["tab", "attach", "off"], "browsers"),
 };
 if (!installing && (choices.allowApps.length || choices.foreground || choices.browsers || opts.build)) usage("doctor doesn't change anything; pass access choices and --build to install");
 if (installing && opts.verify) usage("--verify is a doctor option: run scripts/doctor.sh --verify");

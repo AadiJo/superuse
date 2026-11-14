@@ -12,9 +12,9 @@ Use this when the user asks you to install, configure, update or repair Superuse
 4. **Access choices.** The `policy` check shows what is already allowed. Ask the user once, in one message, about what isn't settled and what their task needs:
    - which apps Superuse may control without asking. Clients that can't show approval prompts need this (`claude -p`, T3 Code);
    - whether Superuse may briefly take the real mouse and focus when background input fails;
-   - whether `w.page()` may use their running, logged-in browser.
+   - whether `w.page()` may use their running, logged-in browser, and how much of it: only the selected tab and tabs Superuse opens (`tab`), or every tab (`attach`).
 
-   Rerun install with exactly the approved answers: `--allow-apps=TestPad,Calculator`, `--foreground=allow|ask|deny`, `--browsers=attach|off`. Wildcards (`--allow-apps=*`) and attach come only from the user's own words. Done when every choice is either answered or left at its default by the user.
+   Rerun install with exactly the approved answers: `--allow-apps=TestPad,Calculator`, `--foreground=allow|ask|deny`, `--browsers=tab|attach|off`. Wildcards (`--allow-apps=*`), tab and attach come only from the user's own words. Done when every choice is either answered or left at its default by the user.
 5. **Prove it.** With `restart_required`, tell the user to start a new session of that client (or run `/reload-plugins` in Claude Code). In a session that has Superuse loaded, call the `js` tool with `return (await desktop.windows()).length`. If the user turned the browser on, also run `scripts/doctor.sh --verify` with the browser open. Done when the client the user named returns a number from that call, and `browser` reads `BROWSER_VERIFIED` or `BROWSER_DISABLED`.
 
 Finish by telling the user the outcome, what you verified, and anything still waiting on them. `scripts/doctor.sh` rechecks everything later without changing anything.

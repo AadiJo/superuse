@@ -248,6 +248,10 @@ export class Desktop {
   private readonly trees = new Map<number, WindowTree>(); // by window id, so rebinding keeps them
   private readonly bindings = new Map<number, Promise<Win>>();
   private readonly pages = new Map<number, Promise<Page>>();
+  /** Pages opened with newTab() and not closed since. Under "browsers": "tab" these and each
+   *  window's selected tab are the only tabs pages reach. The driver mints new tab ids on every
+   *  bind, so a tab this session opened is known by its Page, not by an id. */
+  readonly opened = new Set<Page>();
   readonly driver: Driver;
   readonly policy: Policy;
 
@@ -351,8 +355,8 @@ export class Desktop {
    *  driver only answers it inside the window it prepares, so attaching goes through that window.
    *  If the attach doesn't cover `w` itself, the page binds through that front window instead. */
   async browserBind(w: Win): Promise<{ target: string; tabs: BrowserTab[]; win: Win }> {
-    if (!this.policy.browserAttach) {
-      throw new Error(`web pages are reached over the browser's DevTools, which is off. Set "browsers": "attach" in ${this.policy.file} and start a new session, or use this window's accessibility tree (w.state, w.setValue, w.click).`);
+    if (this.policy.browsers === "off") {
+      throw new Error(`web pages are reached over the browser's DevTools, which is off. Set "browsers": "tab" in ${this.policy.file} and start a new session, or use this window's accessibility tree (w.state, w.setValue, w.click).`);
     }
     const bind = (x: { pid: number; id: number }) => this.driver.call("get_browser_state", { pid: x.pid, window_id: x.id });
     let via = w;
@@ -380,13 +384,24 @@ export class Desktop {
     return front && front.window_id !== w.id ? this.makeWindow(front) : w;
   }
 
-  /** The selected tab of browser window `w`, or the tab whose title or URL contains `query`. */
+  /** Whether pages reach only the selected tab and the tabs this session opened. */
+  get tabScoped() { return this.policy.browsers === "tab"; }
+
+  /** The selected tab of browser window `w`, or the tab whose title or URL contains `query`. Under
+   *  "browsers": "tab" a query only finds the selected tab and tabs this session opened, so the
+   *  user's other tabs are never searched, bound or named in an error. */
   private async openPage(w: Win, query?: string): Promise<Page> {
     const { target, tabs, win } = await this.browserBind(w);
     const q = query?.toLowerCase();
-    const tab = q
-      ? tabs.find((t) => `${t.title ?? ""} ${t.url ?? ""}`.toLowerCase().includes(q))
-      : tabs.find((t) => t.active === true) ?? (tabs.length === 1 ? tabs[0] : undefined);
+    const matches = (t: { title?: string; url?: string }) => q !== undefined && `${t.title ?? ""} ${t.url ?? ""}`.toLowerCase().includes(q);
+    const selected = tabs.find((t) => t.active === true) ?? (tabs.length === 1 ? tabs[0] : undefined);
+    if (q && this.tabScoped) {
+      const own = [...this.opened].find((p) => p.win.pid === win.pid && matches(p.info()));
+      if (own) return own;
+      if (selected && matches(selected)) return new Page(this, win, target, selected, false);
+      throw new Error(`no tab you can reach matches "${query}". "browsers": "tab" limits pages to the selected tab and tabs you opened with newTab(); ask the user to select the tab they mean.`);
+    }
+    const tab = q ? tabs.find(matches) : selected;
     if (!tab) {
       throw new Error(q
         ? `no tab matches "${query}". Tabs: ${tabs.map((t) => `"${t.title ?? ""}"`).join(", ")}`
@@ -763,7 +778,7 @@ const KEY_NAMES: Record<string, string> = {
 class Page {
   private refs = new Map<string, { role?: string; name?: string | null }>(); // from the latest read
   private readonly d: Desktop;
-  private readonly win: Win;
+  readonly win: Win;
   private readonly target: string;
   private readonly tab: string;
   private readonly openedHere: boolean;
@@ -850,18 +865,25 @@ class Page {
     const r = await this.act("browser_open_tab", { url }, false);
     const tabId = r.data.tab_id;
     if (!tabId) throw new Error("the browser didn't report the new tab");
-    return new Page(this.d, this.win, this.target, { tab_id: tabId, url, title: "" }, true);
+    const page = new Page(this.d, this.win, this.target, { tab_id: tabId, url, title: "" }, true);
+    this.d.opened.add(page);
+    return page;
   }
 
   /** Close a tab opened with newTab(). The user's own tabs stay open. */
   async close() {
     if (!this.openedHere) throw new Error("only tabs opened with newTab() can be closed");
     await this.act("browser_close_tab", {});
+    this.d.opened.delete(this);
   }
 
   async tabs() {
     const { tabs } = await this.d.browserBind(this.win);
-    return tabs.map((t) => ({ title: t.title ?? "", url: t.url ?? "", selected: t.active === true }));
+    const rows = tabs.map((t) => ({ title: t.title ?? "", url: t.url ?? "", selected: t.active === true }));
+    if (!this.d.tabScoped) return rows;
+    // The selected tab, then this session's own tabs as their pages last saw them.
+    const own = [...this.d.opened].filter((p) => p.win.pid === this.win.pid).map((p) => ({ ...p.info(), selected: false }));
+    return [...rows.filter((t) => t.selected), ...own];
   }
 
   /** Attach an image of the tab's viewport. Chromium doesn't paint a tab that isn't showing, so a

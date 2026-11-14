@@ -133,7 +133,7 @@ for (const app of order) {
 if (!tried.length) return "NO_APPROVED_BROWSER";
 throw new Error("no browser attached. " + tried.join("; "));`, 120_000);
     if (r.text === "NO_APPROVED_BROWSER") {
-      return { id, status: "action", code: "BROWSER_NOT_APPROVED", summary: "browsers: attach, but no approved Chromium browser window is open", next: "Open the browser, and approve it (add it to \"allow\" in the policy file, with the user's say-so). Then rerun scripts/doctor.sh --verify." };
+      return { id, status: "action", code: "BROWSER_NOT_APPROVED", summary: "browsers are on, but no approved Chromium browser window is open", next: "Open the browser, and approve it (add it to \"allow\" in the policy file, with the user's say-so). Then rerun scripts/doctor.sh --verify." };
     }
     if (r.error || !r.text.startsWith("CLICKED") || !clicked) {
       return { id, status: "fail", code: "BROWSER_VERIFY_FAILED", summary: "couldn't drive a test tab in the browser", evidence: [r.text.slice(0, 400), `page saw the click: ${clicked}`], next: "Turn on chrome://inspect/#remote-debugging in the browser, then rerun scripts/doctor.sh --verify. Running clients need a new session to pick up a browsers change." };

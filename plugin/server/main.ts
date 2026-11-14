@@ -52,6 +52,7 @@ w.screenshot()                               attach an image of the window
 
 Web pages in Chrome, Edge, Helium and other Chromium browsers, over the browser's DevTools (background, keys included):
 w.page(tabText?) -> Page               the selected tab, or the tab whose title or URL contains tabText
+                                       (under "browsers": "tab", only the selected tab and tabs you opened)
 p.newTab(url) -> Page                  open your own background tab; leaves the user's tabs alone
 p.read({query?, screenshot?}) -> string  page outline, then actionable refs like [p3:12]
 p.click(ref | [x, y])   p.type(ref, "text", {replace?})   p.key("Enter" | "ctrl+a")   p.select(ref, "Pro")
@@ -116,7 +117,7 @@ const ask: Ask = async (message, rememberLabel) => {
 };
 
 const policy = new Policy(ask);
-const desktop = new Desktop(new Driver(DRIVER, CURSOR, () => (policy.browserAttach ? ["--grant", "existing-profile"] : []), () => agentLabel(clientInfo)), policy);
+const desktop = new Desktop(new Driver(DRIVER, CURSOR, () => (policy.browsers === "off" ? [] : ["--grant", "existing-profile"]), () => agentLabel(clientInfo)), policy);
 const sandbox = await Sandbox.create((method, args) => desktop.dispatch(method, args), userWait);
 process.on("unhandledRejection", () => {}); // every API promise is tracked by the sandbox; nothing should land here
 

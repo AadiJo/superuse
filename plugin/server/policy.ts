@@ -8,12 +8,15 @@
 //   { "allow": ["testpad", "uwp:calculator"],   apps allowed without asking; "*" allows every app
 //     "deny": ["slack"],                          apps never shown or controlled
 //     "foreground": "ask",                        "ask" | "allow" | "deny" for {foreground: true}
-//     "browsers": "attach" }                      let w.page() attach to a running Chromium browser's own
-//                                                 profile over DevTools (cookies, logins); default "off"
+//     "browsers": "tab" }                         let w.page() attach to a running Chromium browser's own
+//                                                 profile over DevTools (cookies, logins). "tab" reaches the
+//                                                 selected tab and tabs Claude opens; "attach" reaches every
+//                                                 tab; default "off"
 // The built-in blocks (shells, password managers, security prompts, agents) stay in force under
 // "*"; lift one by naming its exact key in "allow", e.g. "windowsterminal".
 // Env: SUPERUSE_APPS        comma list of apps pre-approved for this process (benchmarks, headless runs); "*" for all
 //      SUPERUSE_FOREGROUND  overrides the file's "foreground"
+//      SUPERUSE_BROWSERS    overrides the file's "browsers"
 
 import fs from "node:fs";
 import os from "node:os";
@@ -24,7 +27,8 @@ export type Ask = (message: string, rememberLabel: string) => Promise<"once" | "
 
 export type App = { key: string; label: string };
 type ForegroundMode = "ask" | "allow" | "deny";
-type PolicyFile = { allow?: string[]; deny?: string[]; foreground?: ForegroundMode; browsers?: "attach" | "off" };
+export type BrowserMode = "off" | "tab" | "attach";
+type PolicyFile = { allow?: string[]; deny?: string[]; foreground?: ForegroundMode; browsers?: BrowserMode };
 
 // Hidden and refused unless the policy file's "allow" names them: shells (a terminal window is
 // shell access), password managers, credential and security prompts, and agents (including us).
@@ -170,11 +174,13 @@ export class Policy {
     if (app && remember) this.persistAllow(app.key);
   }
 
-  /** May w.page() attach to a running browser's existing profile? Read when the driver starts,
-   *  because the driver takes the matching grant (`--grant existing-profile`) at launch. */
-  get browserAttach(): boolean {
+  /** How much of a running browser's existing profile w.page() may reach: nothing, the selected tab
+   *  and tabs opened here, or every tab. Anything but "off" is read when the driver starts, because
+   *  the driver takes the matching grant (`--grant existing-profile`) at launch. */
+  get browsers(): BrowserMode {
     this.refresh();
-    return (process.env.SUPERUSE_BROWSERS ?? this.conf.browsers) === "attach";
+    const mode = process.env.SUPERUSE_BROWSERS ?? this.conf.browsers;
+    return mode === "tab" || mode === "attach" ? mode : "off";
   }
 
   /** Throws unless foreground input (real cursor and focus) is allowed for this app. */
